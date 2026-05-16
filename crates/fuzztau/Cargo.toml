@@ -1,0 +1,30 @@
+[package]
+name = "fuzztau"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[[bin]]
+name = "parse"
+path = "fuzz_targets/parse.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "wire"
+path = "fuzz_targets/wire.rs"
+test = false
+doc = false
+
+[dependencies]
+libtau = { path = "../libtau" }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[dependencies.libfuzzer-sys]
+version = "0.4"
+
+[workspace]

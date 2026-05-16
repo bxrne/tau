@@ -1,0 +1,51 @@
+replicaCount: 1
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  repository: ghcr.io/bxrne/tau
+  pullPolicy: IfNotPresent
+  tag: ""
+
+service:
+  type: ClusterIP
+  port: 7070
+  metricsPort: 9100
+
+storage:
+  size: 1Gi
+  storageClassName: ""
+
+config:
+  logLevel: info
+  compactThreshold: 8
+
+  wal:
+    enabled: true
+    path: /data/tau.wal
+
+  tls:
+    enabled: false
+    cert: ""
+    key: ""
+
+  auth:
+    enabled: false
+    username: ""
+    password: ""
+    usersFile: /data/users.db
+
+  limits:
+    maxConnections: 1024
+    idleTimeoutSecs: 300
+
+resources: {}
+
+podAnnotations: {}
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}

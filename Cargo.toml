@@ -1,6 +1,46 @@
-[package]
-name = "tau"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+resolver = "2"
+members = [
+    "crates/libtau",
+    "crates/tau",
+    "crates/tauctl",
+]
 
-[dependencies]
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "A time-series database built on algebraically precise temporal intervals."
+
+[workspace.dependencies]
+libtau = { path = "crates/libtau" }
+clap = { version = "4.5", features = ["derive"] }
+crc32fast = "1.5.0"
+rustc-hash = "2.1"
+libc = "0.2"
+nom = "8.0.0"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+aes-gcm = "0.10"
+rand = "0.8"
+base64 = "0.22"
+argon2 = "0.5"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pemfile = "2.2"
+rcgen = "0.13"
+ratatui = "0.29"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+crossterm = "0.28"
+tui-textarea = { version = "0.7", features = ["crossterm"] }
+
+bitflags = "2"
+prometheus-client = "0.22"
+sysinfo = { version = "0.32", default-features = false, features = ["system"] }
+hex = "0.4"
+itoa = "1"
+
+hegeltest = "0.14.12"
+hegeltest-macros = "0.14.12"
+pretty_assertions = "1.4"
+tempfile = "3.27.0"

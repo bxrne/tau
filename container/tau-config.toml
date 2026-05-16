@@ -1,0 +1,35 @@
+# tau server configuration for the Docker stack.
+# Edit this file, then run: docker compose up -d
+#
+# TAU_ENCRYPTION_KEY is still read from the environment (see .env).
+# All other settings live here.
+
+bind = "0.0.0.0:7070"
+log_level = "info"
+compact_threshold = 8
+
+[wal]
+enabled = true
+path = "/data/tau.wal"
+
+[tls]
+enabled = false
+# To enable TLS, uncomment these paths, mount the cert/key files in
+# docker-compose.yml, and set enabled = true.
+# cert = "/data/tls/server.crt"
+# key  = "/data/tls/server.key"
+
+[auth]
+enabled = true
+# Bootstrap admin credentials. Only used on the very first start when
+# users_file does not yet exist. After that, users_file is source of truth.
+username = "admin"
+password = "changeme_use_a_strong_password"
+users_file = "/data/users.db"
+
+[metrics]
+port = 9100
+
+[limits]
+max_connections = 1024
+idle_timeout_secs = 300

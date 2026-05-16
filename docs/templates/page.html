@@ -1,0 +1,37 @@
+{% import "macros/toc.html" as toc -%}
+{% import "macros/head.html" as head -%}
+{% import "macros/posts.html" as posts -%}
+{% import "macros/comments.html" as comments -%}
+{% extends "index.html" -%}
+
+{%- block math -%}
+  {% if page.extra.math %}
+  {{ head::katex() }}
+  {% endif %}
+{%- endblock math -%}
+
+{%- block title %}
+    <title>{{ page.title }} - {{ config.title }}</title>
+{%- endblock title -%}
+
+{%- block main -%}
+    <article class="post">
+        <header>
+            <h1 class="post-title">
+                <a href="{{ page.permalink  }}">{{ page.title }}</a>
+            </h1>
+            {{ posts::meta(page=page, author=config.extra.show_author) }}
+            {{ posts::langs(page=page) }}
+
+            {%- block ToC -%}
+                {%- if page.extra.ToC or config.extra.ToC -%}
+                    {{ toc::toc(t=page.toc) }}
+                {%- endif -%}
+            {%- endblock ToC -%}
+        </header>
+
+        {{ page.content | safe }}
+
+        {{ comments::comments() }}
+    </article>
+{%- endblock main -%}

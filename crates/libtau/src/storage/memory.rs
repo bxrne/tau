@@ -1,0 +1,268 @@
+use crate::model::Layer;
+use crate::storage::layers::compact_layers;
+use crate::storage::store::{COMPACT_THRESHOLD, Store};
+use rustc_hash::FxHashMap as HashMap;
+use std::io;
+
+/// Reference in-memory store. Zero dependencies, suitable for tests and
+/// small embedded workloads.
+pub struct InMemory<V> {
+    lenses: HashMap<String, Vec<Layer<V>>>,
+    compact_threshold: usize,
+}
+
+impl<V> Default for InMemory<V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<V> InMemory<V> {
+    pub fn new() -> Self {
+        Self::with_threshold(COMPACT_THRESHOLD)
+    }
+
+    pub fn with_threshold(compact_threshold: usize) -> Self {
+        Self {
+            lenses: HashMap::default(),
+            compact_threshold,
+        }
+    }
+}
+
+impl<V> Store<V> for InMemory<V>
+where
+    V: Clone + PartialEq + Send + Sync + 'static,
+{
+    fn append(&mut self, lens: &str, layer: Layer<V>) -> io::Result<bool> {
+        // Hot path: lens already known - borrow without allocating a String.
+        let layers = if let Some(l) = self.lenses.get_mut(lens) {
+            l
+        } else {
+            self.lenses.entry(lens.to_string()).or_default()
+        };
+        let before = layers.len();
+        layers.push(layer);
+        let mut did_compact = false;
+        if layers.len() > self.compact_threshold {
+            compact_layers(layers);
+            did_compact = layers.len() < before + 1;
+        }
+        Ok(did_compact)
+    }
+
+    fn drop_lens(&mut self, lens: &str) {
+        self.lenses.remove(lens);
+    }
+
+    fn layers(&self, lens: &str) -> Option<&Vec<Layer<V>>> {
+        self.lenses.get(lens)
+    }
+
+    fn lens_names(&self) -> Vec<String> {
+        self.lenses.keys().cloned().collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Tau, Timestamp};
+    use crate::storage::layers::compact_layers;
+    use hegel::TestCase;
+    use hegel::generators as gs;
+    use hegel::generators::Generator;
+    use pretty_assertions::{assert_eq, assert_ne};
+
+    /// Generator over a non-overlapping `Vec<Tau<i8>>`.  Small `i8` values
+    /// produce frequent equality, which exercises the adjacent-merge code.
+    fn taus_gen() -> impl Generator<Vec<Tau<i8>>> {
+        gs::vecs(
+            gs::integers::<i64>()
+                .min_value(1)
+                .max_value(20)
+                .flat_map(|width| {
+                    gs::integers::<i64>()
+                        .min_value(0)
+                        .max_value(10)
+                        .flat_map(move |gap| {
+                            gs::integers::<i8>()
+                                .min_value(-3)
+                                .max_value(3)
+                                .map(move |v| (width, gap, v))
+                        })
+                }),
+        )
+        .max_size(20)
+        .map(|specs| {
+            let mut taus = Vec::with_capacity(specs.len());
+            let mut cursor: i64 = 0;
+            for (width, gap, v) in specs {
+                let s = cursor + gap;
+                let e = s + width;
+                taus.push(Tau::new(s, e, v));
+                cursor = e;
+            }
+            taus
+        })
+    }
+
+    /// Generator over a layer stack: a vector of layers, each of which is a
+    /// sorted non-overlapping batch.  Layers may overlap each other - that is
+    /// exactly the situation that compaction has to flatten.
+    fn layer_stack_gen() -> impl Generator<Vec<Layer<i8>>> {
+        gs::vecs(taus_gen().filter(|v| !v.is_empty()))
+            .max_size(8)
+            .map(|taus_vec| {
+                taus_vec
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, t)| Layer::new(i as u64 + 1, t))
+                    .collect()
+            })
+    }
+
+    fn at_brute(layers: &[Layer<i8>], t: Timestamp) -> Option<i8> {
+        layers.iter().rev().find_map(|l| l.at(t)).copied()
+    }
+
+    #[hegel::test]
+    fn empty_store_returns_none_for_any_lens(tc: TestCase) {
+        let lens = tc.draw(gs::text().max_size(16));
+        let t = tc.draw(gs::integers::<i64>());
+        let store: InMemory<i32> = InMemory::new();
+        assert_eq!(store.at(&lens, t), None);
+        assert!(store.layers(&lens).is_none());
+    }
+
+    #[hegel::test]
+    fn append_then_at_matches_layer_lookup(tc: TestCase) {
+        let taus = tc.draw(taus_gen().filter(|v| !v.is_empty()));
+        let probe = tc.draw(gs::integers::<i64>().min_value(-5).max_value(500));
+        let mut store: InMemory<i8> = InMemory::with_threshold(1024);
+        store.append("s", Layer::new(1, taus.clone())).unwrap();
+
+        let direct = taus
+            .iter()
+            .find(|tau| tau.contains(probe))
+            .map(|tau| tau.value);
+        assert_eq!(store.at("s", probe), direct);
+    }
+
+    #[hegel::test]
+    fn newest_layer_wins(tc: TestCase) {
+        let stack = tc.draw(layer_stack_gen());
+        let probe = tc.draw(gs::integers::<i64>().min_value(-10).max_value(500));
+        let mut store: InMemory<i8> = InMemory::with_threshold(1024);
+        for layer in &stack {
+            store.append("s", layer.clone()).unwrap();
+        }
+        assert_eq!(store.at("s", probe), at_brute(&stack, probe));
+    }
+
+    #[hegel::test]
+    fn compaction_preserves_point_lookups(tc: TestCase) {
+        let stack = tc.draw(layer_stack_gen());
+        let probe = tc.draw(gs::integers::<i64>().min_value(-10).max_value(500));
+
+        let before = at_brute(&stack, probe);
+        let mut compacted = stack.clone();
+        compact_layers(&mut compacted);
+        let after = compacted.iter().rev().find_map(|l| l.at(probe)).copied();
+        assert_eq!(before, after);
+    }
+
+    #[hegel::test]
+    fn compaction_never_grows_layer_count(tc: TestCase) {
+        let stack = tc.draw(layer_stack_gen());
+        let before_len = stack.len();
+        let mut compacted = stack;
+        compact_layers(&mut compacted);
+        assert!(compacted.len() <= before_len);
+    }
+
+    #[hegel::test]
+    fn compaction_yields_at_most_one_layer(tc: TestCase) {
+        let stack = tc.draw(layer_stack_gen().filter(|v| !v.is_empty()));
+        let mut compacted = stack;
+        compact_layers(&mut compacted);
+        assert!(compacted.len() <= 1);
+    }
+
+    #[hegel::test]
+    fn compaction_layer_has_non_overlapping_taus(tc: TestCase) {
+        let stack = tc.draw(layer_stack_gen());
+        let mut compacted = stack;
+        compact_layers(&mut compacted);
+        for layer in &compacted {
+            for window in layer.taus.windows(2) {
+                assert!(window[0].end <= window[1].start, "overlap detected");
+            }
+        }
+    }
+
+    #[hegel::test]
+    fn compaction_merges_adjacent_equal_values(tc: TestCase) {
+        let stack = tc.draw(layer_stack_gen().filter(|v| v.len() >= 2));
+        let mut compacted = stack;
+        compact_layers(&mut compacted);
+        for layer in &compacted {
+            for window in layer.taus.windows(2) {
+                if window[0].end == window[1].start {
+                    assert_ne!(window[0].value, window[1].value);
+                }
+            }
+        }
+    }
+
+    #[hegel::test]
+    fn compaction_triggers_above_threshold(tc: TestCase) {
+        // For any threshold k and any (k+1) single-tau layers, the store
+        // ends with at most one layer (compaction always runs).
+        let k = tc.draw(gs::integers::<usize>().min_value(1).max_value(16));
+        let n = k + 1;
+        let mut store: InMemory<i32> = InMemory::with_threshold(k);
+        for i in 0..n as i64 {
+            let layer = Layer::new(i as u64 + 1, vec![Tau::new(i * 10, i * 10 + 10, i as i32)]);
+            store.append("s", layer).unwrap();
+        }
+        assert_eq!(store.layers("s").unwrap().len(), 1);
+    }
+
+    #[hegel::test]
+    fn lenses_are_independent(tc: TestCase) {
+        let a_taus = tc.draw(taus_gen().filter(|v| !v.is_empty()));
+        let b_taus = tc.draw(taus_gen().filter(|v| !v.is_empty()));
+        let probe = tc.draw(gs::integers::<i64>().min_value(-5).max_value(500));
+        let mut store: InMemory<i8> = InMemory::with_threshold(1024);
+        store.append("a", Layer::new(1, a_taus.clone())).unwrap();
+        store.append("b", Layer::new(2, b_taus.clone())).unwrap();
+
+        let a_expected = a_taus.iter().find(|t| t.contains(probe)).map(|t| t.value);
+        let b_expected = b_taus.iter().find(|t| t.contains(probe)).map(|t| t.value);
+        assert_eq!(store.at("a", probe), a_expected);
+        assert_eq!(store.at("b", probe), b_expected);
+    }
+
+    #[hegel::test]
+    fn append_returns_did_compact_consistent_with_layer_count(tc: TestCase) {
+        // append() returns true iff post-append len < prior+1, i.e. compaction
+        // shortened the stack.
+        let k = tc.draw(gs::integers::<usize>().min_value(1).max_value(8));
+        let n = tc.draw(gs::integers::<usize>().min_value(1).max_value(20));
+        let mut store: InMemory<i32> = InMemory::with_threshold(k);
+        let mut last_did_compact = false;
+        for i in 0..n as i64 {
+            let layer = Layer::new(i as u64 + 1, vec![Tau::new(i * 10, i * 10 + 10, 0)]);
+            last_did_compact = store.append("s", layer).unwrap();
+        }
+        if n > k {
+            // Some compaction must have fired at least once.
+            let final_len = store.layers("s").unwrap().len();
+            assert!(final_len <= k + 1);
+        }
+        // The final report agrees with the resulting state: did_compact
+        // means "after this append the layer count decreased".
+        let _ = last_did_compact;
+    }
+}

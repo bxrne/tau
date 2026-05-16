@@ -1,0 +1,25 @@
+[package]
+name = "tauctl"
+version = "0.0.0" # x-release-please-version
+edition.workspace = true
+license.workspace = true
+description.workspace = true
+publish = false
+
+[[bin]]
+name = "tauctl"
+path = "src/main.rs"
+
+[dependencies]
+libtau.workspace = true
+clap.workspace = true
+rustls.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+tui-textarea.workspace = true
+
+[dev-dependencies]
+hegeltest.workspace = true
+hegeltest-macros.workspace = true
+pretty_assertions.workspace = true
+tempfile.workspace = true
