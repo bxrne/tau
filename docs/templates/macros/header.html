@@ -1,0 +1,31 @@
+{% import "macros/logo.html" as logo -%}
+{% import "macros/menu.html" as menu -%}
+
+{% macro header() %}
+<header class="header">
+    <div class="header__inner">
+        <div class="header__logo">
+            {{ logo::logo() }}
+        </div>
+        <div class="menu-trigger">menu</div>
+    </div>
+
+    {%- set num = config.extra.main_menu | length -%}
+    {% if num > 0 -%}
+        {{ menu::menu() }}
+    {% endif -%}
+
+    <form class="search" action="{{ get_url(path='search') }}" method="get" role="search">
+        <input
+            type="search"
+            id="search-input"
+            class="search__input"
+            name="q"
+            placeholder="search"
+            autocomplete="off"
+            spellcheck="false"
+        />
+        <ul id="search-results" class="search__results" hidden></ul>
+    </form>
+</header>
+{% endmacro header %}

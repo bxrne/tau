@@ -1,1 +1,12 @@
-/target
+**/target
+*.wal
+**/.hegel
+/docs/public/
+/lcov.info
+/coverage.xml
+**/Cargo.lock
+.env
+**/.env
+crates/fuzztau/artifacts
+crates/fuzztau/corpus
+
