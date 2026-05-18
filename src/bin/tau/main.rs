@@ -41,7 +41,7 @@ use std::sync::{Arc, RwLock};
 use std::thread;
 
 use clap::Parser;
-use tau::{Codec, ExecError, Executor, Output, parse};
+use tau::{Codec, ExecError, Executor, Output, PreparedWrite, parse};
 use tracing::{error, info, warn};
 
 /// Tau time-series database TCP server.
@@ -165,14 +165,31 @@ fn handle_query(query: &str, exec: &Arc<RwLock<Executor>>) -> String {
         Ok((rest, _)) => return format!("ERR trailing input: {rest:?}"),
         Err(e) => return format!("ERR parse: {e}"),
     };
-    let result = if stmt.is_read_only() {
-        exec.read().unwrap().exec_read(&stmt)
+
+    if stmt.is_read_only() {
+        match exec.read().unwrap().exec_read(&stmt) {
+            Ok(o) => format_output(&o),
+            Err(e) => format!("ERR {}", format_error(&e)),
+        }
     } else {
-        exec.write().unwrap().exec(&stmt)
-    };
-    match result {
-        Ok(o) => format_output(&o),
-        Err(e) => format!("ERR {}", format_error(&e)),
+        // Phase 1: brief write lock — validate + push to WAL queue.
+        let prepared = exec.write().unwrap().exec_prepare(&stmt);
+        match prepared {
+            Err(e) => format!("ERR {}", format_error(&e)),
+            Ok(PreparedWrite::Done(o)) => format_output(&o),
+            Ok(PreparedWrite::Pending(mut pending)) => {
+                // Phase 2: wait for batch fsync — executor lock released.
+                if let Err(e) = pending.wait_for_durability() {
+                    warn!(error = %e, "WAL durability wait failed");
+                    return format!("ERR wal: {e}");
+                }
+                // Phase 3: brief write lock — apply layer to store.
+                match exec.write().unwrap().exec_commit(pending) {
+                    Ok(o) => format_output(&o),
+                    Err(e) => format!("ERR {}", format_error(&e)),
+                }
+            }
+        }
     }
 }
 

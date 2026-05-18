@@ -27,7 +27,9 @@ where
     V: Clone + Send + Sync + 'static,
 {
     fn append(&mut self, lens: &str, layer: Layer<V>) {
-        self.lenses.entry(lens.to_string()).or_default().push(layer);
+        let layers = self.lenses.entry(lens.to_string()).or_default();
+        let pos = layers.partition_point(|l| l.id < layer.id);
+        layers.insert(pos, layer);
     }
 
     /// Newest layer wins: iterate in reverse, return first hit.

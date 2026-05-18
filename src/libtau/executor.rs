@@ -38,6 +38,7 @@ use crate::libtau::database::Database;
 use crate::libtau::model::{Layer, Tau, Timestamp};
 use crate::libtau::ql::ast::{BinOp, Expr, Stmt, Type, UnOp};
 use crate::libtau::storage::InMemory;
+use crate::libtau::storage::wal::WalWaiter;
 use crate::libtau::value::Value;
 
 /// Output of a single executed statement.
@@ -109,6 +110,38 @@ impl DbState {
             derived: HashMap::new(),
         })
     }
+}
+
+/// In-flight append produced by [`Executor::exec_prepare`].  Holds a
+/// pre-built [`Layer`] plus an optional [`WalWaiter`] the caller must block
+/// on before calling [`Executor::exec_commit`].
+pub struct PendingAppend {
+    pub(crate) db: String,
+    pub(crate) lens: String,
+    pub(crate) layer: Layer<Value>,
+    pub(crate) waiter: Option<WalWaiter>,
+}
+
+impl PendingAppend {
+    /// Block until the WAL batch containing this append has been fsynced.
+    /// Call this outside the executor write lock so concurrent prepares can
+    /// continue to enqueue.
+    pub fn wait_for_durability(&mut self) -> io::Result<()> {
+        if let Some(w) = self.waiter.take() {
+            w.wait()?;
+        }
+        Ok(())
+    }
+}
+
+/// Result of [`Executor::exec_prepare`].
+pub enum PreparedWrite {
+    /// Statement completed entirely under the prepare lock — no further
+    /// work needed.  Covers DDL and appends to a WAL-less database.
+    Done(Output),
+    /// WAL-backed append waiting for durability confirmation.  The caller
+    /// must run `wait_for_durability()` then `exec_commit()`.
+    Pending(PendingAppend),
 }
 
 /// Runtime container for executing parsed [`Stmt`]s.
@@ -186,6 +219,97 @@ impl Executor {
                 filter,
             } => self.range_lens(name, *start, *end, filter.as_ref()),
             Stmt::Drop { name } => self.drop_lens(name),
+        }
+    }
+
+    /// Phase 1 of a two-phase write: validate the statement, allocate a
+    /// layer id, and enqueue the WAL entry without waiting for the fsync.
+    ///
+    /// * DDL and other non-`APPEND` mutations execute synchronously and
+    ///   return [`PreparedWrite::Done`].
+    /// * `APPEND` on a WAL-less database also runs to completion and
+    ///   returns `Done`.
+    /// * `APPEND` on a WAL-backed database returns
+    ///   [`PreparedWrite::Pending`] carrying the pre-built layer and a
+    ///   [`WalWaiter`].  The caller must call
+    ///   [`PendingAppend::wait_for_durability`] outside the executor lock
+    ///   and then [`Executor::exec_commit`] under the write lock again.
+    ///
+    /// Must be called under the executor write lock.
+    pub fn exec_prepare(&mut self, stmt: &Stmt) -> Result<PreparedWrite, ExecError> {
+        match stmt {
+            Stmt::Append {
+                name,
+                start,
+                end,
+                value,
+            } => self.prepare_append(name, *start, *end, value.clone().into()),
+            _ => self.exec(stmt).map(PreparedWrite::Done),
+        }
+    }
+
+    /// Phase 3 of a two-phase write: apply a pre-built layer to the active
+    /// database's in-memory store.  No WAL interaction — the caller must
+    /// have awaited durability already.  Must be called under the executor
+    /// write lock.
+    pub fn exec_commit(&mut self, pending: PendingAppend) -> Result<Output, ExecError> {
+        let state = self
+            .databases
+            .get_mut(&pending.db)
+            .ok_or_else(|| ExecError::UnknownDatabase(pending.db.clone()))?;
+        state.db.apply_layer(&pending.lens, pending.layer);
+        Ok(Output::Empty)
+    }
+
+    fn prepare_append(
+        &mut self,
+        name: &str,
+        start: Timestamp,
+        end: Timestamp,
+        value: Value,
+    ) -> Result<PreparedWrite, ExecError> {
+        if start >= end {
+            return Err(ExecError::InvalidRange);
+        }
+        let db_name = self
+            .active
+            .as_deref()
+            .ok_or(ExecError::NoActiveDatabase)?
+            .to_string();
+        let state = self
+            .databases
+            .get_mut(&db_name)
+            .ok_or_else(|| ExecError::UnknownDatabase(db_name.clone()))?;
+        let ty = state
+            .base_types
+            .get(name)
+            .cloned()
+            .ok_or_else(|| ExecError::UnknownLens(name.into()))?;
+        if let Some(got) = value.ty()
+            && got != ty
+        {
+            return Err(ExecError::TypeMismatch {
+                lens: name.into(),
+                expected: ty,
+                got: value.type_name().into(),
+            });
+        }
+        let id = state.next_layer_id;
+        state.next_layer_id += 1;
+        let layer = Layer::new(id, vec![Tau::new(start, end, value)]);
+        let lens = state.db.lens(name);
+        let waiter = state.db.push_wal(&lens, &layer);
+        if waiter.is_none() {
+            // No WAL: apply immediately, return Done.
+            state.db.apply_layer(name, layer);
+            Ok(PreparedWrite::Done(Output::Empty))
+        } else {
+            Ok(PreparedWrite::Pending(PendingAppend {
+                db: db_name,
+                lens: name.into(),
+                layer,
+                waiter,
+            }))
         }
     }
 

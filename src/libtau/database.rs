@@ -1,9 +1,9 @@
 use crate::libtau::model::{Eval, Layer, Lens, LensKind, Timestamp};
-use crate::libtau::storage::wal::Codec;
+use crate::libtau::storage::wal::{Codec, WalWaiter};
 use crate::libtau::storage::{Store, Wal, WalEntry};
 use std::io;
 use std::path::Path;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 use tracing::{debug, info, instrument, warn};
 
 /// Registry + orchestration layer.
@@ -20,7 +20,7 @@ where
     V: Clone + Send + Sync + 'static,
 {
     store: Arc<RwLock<Box<dyn Store<V>>>>,
-    wal: Option<Arc<Mutex<Wal>>>,
+    wal: Option<Arc<Wal>>,
 }
 
 impl<V> Clone for Database<V>
@@ -54,7 +54,7 @@ where
         info!("creating database with WAL enabled");
         Self {
             store: Arc::new(RwLock::new(Box::new(store))),
-            wal: Some(Arc::new(Mutex::new(wal))),
+            wal: Some(Arc::new(wal)),
         }
     }
 
@@ -112,10 +112,7 @@ where
                             .map(|t| (t.start, t.end, t.value.clone()))
                             .collect(),
                     };
-                    wal.lock()
-                        .unwrap()
-                        .append(&entry)
-                        .expect("WAL write failed");
+                    wal.append(&entry).expect("WAL write failed");
                     debug!(lens = %lens.name, layer_id = layer.id, "WAL entry written");
                 }
                 // Then memory.
@@ -126,6 +123,43 @@ where
                 panic!("cannot append to a derived lens");
             }
         }
+    }
+
+    /// Phase 1 of the two-phase append path: serialise the WAL entry and
+    /// push it to the background writer.  Returns a [`WalWaiter`] the caller
+    /// must `wait()` on before phase 3, or `None` if no WAL is configured.
+    ///
+    /// This call performs no IO and is safe to invoke under a short lock
+    /// since the background thread owns the file handle.
+    pub fn push_wal(&self, lens: &Lens<V>, layer: &Layer<V>) -> Option<WalWaiter>
+    where
+        V: Codec,
+    {
+        let wal = self.wal.as_ref()?;
+        let entry = WalEntry {
+            layer_id: layer.id,
+            lens: lens.name.to_string(),
+            taus: layer
+                .taus
+                .iter()
+                .map(|t| (t.start, t.end, t.value.clone()))
+                .collect::<Vec<_>>(),
+        };
+        debug!(lens = %lens.name, layer_id = layer.id, "queuing WAL entry");
+        Some(wal.push_entry(entry.serialise()))
+    }
+
+    /// Phase 3 of the two-phase append path: apply a pre-built layer to the
+    /// in-memory store.  Performs no WAL interaction — the caller is
+    /// expected to have already awaited durability via [`WalWaiter::wait`].
+    pub fn apply_layer(&self, lens_name: &str, layer: Layer<V>) {
+        debug!(
+            lens = %lens_name,
+            layer_id = layer.id,
+            tau_count = layer.taus.len(),
+            "applying layer to store"
+        );
+        self.store.write().unwrap().append(lens_name, layer);
     }
 
     /// Point lookup at timestamp `t`.

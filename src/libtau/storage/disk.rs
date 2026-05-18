@@ -265,7 +265,9 @@ impl<V: Clone + Codec> Disk<V> {
 impl<V: Clone + Send + Sync + 'static> Store<V> for Disk<V> {
     /// Append a new layer to the specified lens.
     fn append(&mut self, lens: &str, layer: Layer<V>) {
-        self.lenses.entry(lens.to_string()).or_default().push(layer);
+        let layers = self.lenses.entry(lens.to_string()).or_default();
+        let pos = layers.partition_point(|l| l.id < layer.id);
+        layers.insert(pos, layer);
     }
 
     /// Point lookup at timestamp `t`. Newest layer wins.
