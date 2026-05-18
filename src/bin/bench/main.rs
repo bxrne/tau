@@ -18,9 +18,10 @@
 //!   WAL                  opt-in with --with-wal; writes to temp dir
 
 use clap::{Parser, ValueEnum};
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
-use tau::libtau::ql::ast::{BinOp, Expr, Literal, Type};
-use tau::{Executor, Stmt};
+use tau::libtau::ql::ast::{AggFn, BinOp, Expr, Literal, Type};
+use tau::{Executor, PreparedWrite, Stmt};
 use tracing::{info, warn};
 
 // Seeded LCG — deterministic
@@ -91,6 +92,10 @@ struct Cli {
     /// Output format
     #[arg(long, value_enum, default_value = "text")]
     fmt: Fmt,
+
+    /// Writer threads for concurrent workloads (shows group-commit WAL batching)
+    #[arg(long, default_value = "1")]
+    threads: usize,
 }
 
 #[derive(ValueEnum, Debug, Clone, PartialEq)]
@@ -113,6 +118,10 @@ enum Workload {
     Derived,
     /// IoT-style ingestion: many lenses updated every tick
     IotIngest,
+    /// Layer compaction throughput: load overlapping corrections then COMPACT
+    Compact,
+    /// Aggregation: REDUCE LENS sum/avg/min/max over the preloaded series
+    Reduce,
 }
 
 #[derive(ValueEnum, Debug, Clone)]
@@ -181,6 +190,83 @@ fn time_stmts(exec: &mut Executor, label: &str, backend: &str, ops: &[Stmt]) -> 
     }
 }
 
+/// Execute each statement concurrently across `threads`, using the two-phase
+/// append path (`exec_prepare` / `wait_for_durability` / `exec_commit`) to
+/// release the write lock between WAL push and store update, enabling
+/// group-commit batching.
+fn time_stmts_concurrent(
+    exec: Arc<RwLock<Executor>>,
+    label: &str,
+    backend: &str,
+    ops: &[Stmt],
+    threads: usize,
+) -> Run {
+    use std::sync::Mutex;
+
+    let chunk = ops.len().div_ceil(threads);
+    let all_ns: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::with_capacity(ops.len())));
+    let rss_before = rss_kb();
+
+    let t0 = Instant::now();
+    let handles: Vec<_> = (0..threads)
+        .map(|t| {
+            let exec = Arc::clone(&exec);
+            let all_ns = Arc::clone(&all_ns);
+            let start = t * chunk;
+            let end = ((t + 1) * chunk).min(ops.len());
+            let ops: Vec<Stmt> = ops[start..end].to_vec();
+
+            std::thread::spawn(move || {
+                let mut local: Vec<u64> = Vec::with_capacity(ops.len());
+                for stmt in &ops {
+                    let t0 = Instant::now();
+                    if stmt.is_read_only() {
+                        exec.read().unwrap().exec_read(stmt).expect("read failed");
+                    } else {
+                        // Two-phase: releases write lock between WAL push and store update.
+                        let prepared = exec
+                            .write()
+                            .unwrap()
+                            .exec_prepare(stmt)
+                            .expect("prepare failed");
+                        match prepared {
+                            PreparedWrite::Done(_) => {}
+                            PreparedWrite::Pending(mut pending) => {
+                                pending.wait_for_durability().expect("WAL wait failed");
+                                exec.write()
+                                    .unwrap()
+                                    .exec_commit(pending)
+                                    .expect("commit failed");
+                            }
+                        }
+                    }
+                    local.push(t0.elapsed().as_nanos() as u64);
+                }
+                all_ns.lock().unwrap().extend(local);
+            })
+        })
+        .collect();
+
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    let elapsed = t0.elapsed();
+    let rss_after = rss_kb();
+    let mut latencies_ns = Arc::try_unwrap(all_ns).unwrap().into_inner().unwrap();
+    latencies_ns.sort_unstable();
+
+    Run {
+        label: label.to_string(),
+        backend: backend.to_string(),
+        ops: latencies_ns.len(),
+        elapsed,
+        latencies_ns,
+        rss_before_kb: rss_before,
+        rss_after_kb: rss_after,
+    }
+}
+
 // helpers
 
 fn rss_kb() -> Option<u64> {
@@ -222,11 +308,12 @@ fn make_executor(use_wal: bool) -> (Executor, Option<WalGuard>) {
     }
 }
 
-// Worklaods
+// Workloads
+// Each function sets up the executor, runs warmup, and returns measurement ops.
 
 const TICK: i64 = 10;
 
-fn wl_append_seq(cli: &Cli, exec: &mut Executor, backend: &str, rng: &mut Rng) -> Run {
+fn wl_append_seq(cli: &Cli, exec: &mut Executor, rng: &mut Rng) -> Vec<Stmt> {
     exec_ok(
         exec,
         &Stmt::CreateDatabase {
@@ -255,10 +342,10 @@ fn wl_append_seq(cli: &Cli, exec: &mut Executor, backend: &str, rng: &mut Rng) -
     for s in &stmts[..warmup] {
         exec_ok(exec, s);
     }
-    time_stmts(exec, "append-seq", backend, &stmts[warmup..])
+    stmts[warmup..].to_vec()
 }
 
-fn wl_append_correction(cli: &Cli, exec: &mut Executor, backend: &str, rng: &mut Rng) -> Run {
+fn wl_append_correction(cli: &Cli, exec: &mut Executor, rng: &mut Rng) -> Vec<Stmt> {
     exec_ok(
         exec,
         &Stmt::CreateDatabase {
@@ -304,10 +391,10 @@ fn wl_append_correction(cli: &Cli, exec: &mut Executor, backend: &str, rng: &mut
     for s in &stmts[..warmup] {
         exec_ok(exec, s);
     }
-    time_stmts(exec, "append-correction", backend, &stmts[warmup..])
+    stmts[warmup..].to_vec()
 }
 
-fn wl_at_lookup(cli: &Cli, exec: &mut Executor, backend: &str, rng: &mut Rng) -> Run {
+fn wl_at_lookup(cli: &Cli, exec: &mut Executor, rng: &mut Rng) -> Vec<Stmt> {
     exec_ok(
         exec,
         &Stmt::CreateDatabase {
@@ -348,10 +435,10 @@ fn wl_at_lookup(cli: &Cli, exec: &mut Executor, backend: &str, rng: &mut Rng) ->
     for s in &stmts[..warmup] {
         exec_ok(exec, s);
     }
-    time_stmts(exec, "at-lookup", backend, &stmts[warmup..])
+    stmts[warmup..].to_vec()
 }
 
-fn wl_range_scan(cli: &Cli, exec: &mut Executor, backend: &str, rng: &mut Rng) -> Run {
+fn wl_range_scan(cli: &Cli, exec: &mut Executor, rng: &mut Rng) -> Vec<Stmt> {
     exec_ok(
         exec,
         &Stmt::CreateDatabase {
@@ -399,10 +486,10 @@ fn wl_range_scan(cli: &Cli, exec: &mut Executor, backend: &str, rng: &mut Rng) -
     for s in &stmts[..warmup] {
         exec_ok(exec, s);
     }
-    time_stmts(exec, "range-scan", backend, &stmts[warmup..])
+    stmts[warmup..].to_vec()
 }
 
-fn wl_range_filter(cli: &Cli, exec: &mut Executor, backend: &str, rng: &mut Rng) -> Run {
+fn wl_range_filter(cli: &Cli, exec: &mut Executor, rng: &mut Rng) -> Vec<Stmt> {
     exec_ok(
         exec,
         &Stmt::CreateDatabase {
@@ -455,10 +542,10 @@ fn wl_range_filter(cli: &Cli, exec: &mut Executor, backend: &str, rng: &mut Rng)
     for s in &stmts[..warmup] {
         exec_ok(exec, s);
     }
-    time_stmts(exec, "range-filter", backend, &stmts[warmup..])
+    stmts[warmup..].to_vec()
 }
 
-fn wl_mixed(cli: &Cli, exec: &mut Executor, backend: &str, rng: &mut Rng) -> Run {
+fn wl_mixed(cli: &Cli, exec: &mut Executor, rng: &mut Rng) -> Vec<Stmt> {
     exec_ok(
         exec,
         &Stmt::CreateDatabase {
@@ -514,10 +601,10 @@ fn wl_mixed(cli: &Cli, exec: &mut Executor, backend: &str, rng: &mut Rng) -> Run
     for s in &stmts[..warmup] {
         exec_ok(exec, s);
     }
-    time_stmts(exec, "mixed", backend, &stmts[warmup..])
+    stmts[warmup..].to_vec()
 }
 
-fn wl_derived(cli: &Cli, exec: &mut Executor, backend: &str, rng: &mut Rng) -> Run {
+fn wl_derived(cli: &Cli, exec: &mut Executor, rng: &mut Rng) -> Vec<Stmt> {
     exec_ok(
         exec,
         &Stmt::CreateDatabase {
@@ -584,12 +671,15 @@ fn wl_derived(cli: &Cli, exec: &mut Executor, backend: &str, rng: &mut Rng) -> R
     for s in &stmts[..warmup] {
         exec_ok(exec, s);
     }
-    time_stmts(exec, "derived", backend, &stmts[warmup..])
+    stmts[warmup..].to_vec()
 }
 
 /// IoT ingestion: every tick writes to all `lenses` sensors.
 /// ops = ticks × sensors; throughput = individual sensor-writes/s.
-fn wl_iot_ingest(cli: &Cli, exec: &mut Executor, backend: &str, rng: &mut Rng) -> Run {
+///
+/// For concurrent mode each thread handles a disjoint range of ticks so all
+/// sensors, meaning the op slices are non-overlapping.
+fn wl_iot_ingest(cli: &Cli, exec: &mut Executor, rng: &mut Rng) -> Vec<Stmt> {
     exec_ok(
         exec,
         &Stmt::CreateDatabase {
@@ -625,20 +715,144 @@ fn wl_iot_ingest(cli: &Cli, exec: &mut Executor, backend: &str, rng: &mut Rng) -
     for s in &all_stmts[..warmup_ops] {
         exec_ok(exec, s);
     }
-    time_stmts(exec, "iot-ingest", backend, &all_stmts[warmup_ops..])
+    all_stmts[warmup_ops..].to_vec()
 }
 
-fn run_one(cli: &Cli, wl: &Workload, backend: &str, exec: &mut Executor, rng: &mut Rng) -> Run {
-    match wl {
-        Workload::AppendSeq => wl_append_seq(cli, exec, backend, rng),
-        Workload::AppendCorrection => wl_append_correction(cli, exec, backend, rng),
-        Workload::AtLookup => wl_at_lookup(cli, exec, backend, rng),
-        Workload::RangeScan => wl_range_scan(cli, exec, backend, rng),
-        Workload::RangeFilter => wl_range_filter(cli, exec, backend, rng),
-        Workload::Mixed => wl_mixed(cli, exec, backend, rng),
-        Workload::Derived => wl_derived(cli, exec, backend, rng),
-        Workload::IotIngest => wl_iot_ingest(cli, exec, backend, rng),
+/// COMPACT throughput: preload a lens with overlapping corrections, then
+/// measure repeated `COMPACT LENS` calls.  Each call after the first is a
+/// no-op (single layer), but the first amortises across the warmup window.
+fn wl_compact(cli: &Cli, exec: &mut Executor, rng: &mut Rng) -> Vec<Stmt> {
+    exec_ok(
+        exec,
+        &Stmt::CreateDatabase {
+            name: "bench".into(),
+        },
+    );
+    exec_ok(
+        exec,
+        &Stmt::Create {
+            name: "ts".into(),
+            ty: Type::Int,
+        },
+    );
+
+    // Pre-load overlapping layers so the first COMPACT does meaningful work.
+    let preload = (cli.ops / 10).max(1_000);
+    let timeline = preload as i64 * TICK;
+    exec_ok(
+        exec,
+        &Stmt::Append {
+            name: "ts".into(),
+            start: 0,
+            end: timeline,
+            value: Literal::Int(0),
+        },
+    );
+    for _ in 0..preload {
+        let lo = rng.range(0, (timeline - TICK).max(1));
+        let max_span = (TICK * 50).min(timeline - lo).max(TICK + 1);
+        let hi = lo + rng.range(TICK, max_span);
+        exec_ok(
+            exec,
+            &Stmt::Append {
+                name: "ts".into(),
+                start: lo,
+                end: hi,
+                value: Literal::Int(rng.range(1, 9_999)),
+            },
+        );
+    }
+
+    let warmup = cli.warmup.min(cli.ops);
+    let total = warmup + cli.ops;
+    let stmts: Vec<Stmt> = (0..total)
+        .map(|_| Stmt::Compact { name: "ts".into() })
+        .collect();
+
+    for s in &stmts[..warmup] {
+        exec_ok(exec, s);
+    }
+    stmts[warmup..].to_vec()
+}
+
+/// REDUCE throughput: preload a sequential series, then measure repeated
+/// `REDUCE LENS ts 0 <end> <fn>` calls cycling across all four aggregators.
+fn wl_reduce(cli: &Cli, exec: &mut Executor, rng: &mut Rng) -> Vec<Stmt> {
+    exec_ok(
+        exec,
+        &Stmt::CreateDatabase {
+            name: "bench".into(),
+        },
+    );
+    exec_ok(
+        exec,
+        &Stmt::Create {
+            name: "ts".into(),
+            ty: Type::Int,
+        },
+    );
+
+    let preload = (cli.ops / 10).max(1_000);
+    let timeline = preload as i64 * TICK;
+    for i in 0..preload as i64 {
+        exec_ok(
+            exec,
+            &Stmt::Append {
+                name: "ts".into(),
+                start: i * TICK,
+                end: i * TICK + TICK,
+                value: Literal::Int(rng.range(1, 9_999)),
+            },
+        );
+    }
+
+    let funcs = [AggFn::Sum, AggFn::Avg, AggFn::Min, AggFn::Max];
+    let warmup = cli.warmup.min(cli.ops);
+    let total = warmup + cli.ops;
+    let stmts: Vec<Stmt> = (0..total)
+        .map(|i| Stmt::Reduce {
+            name: "ts".into(),
+            start: 0,
+            end: timeline,
+            func: funcs[i % funcs.len()],
+        })
+        .collect();
+
+    for s in &stmts[..warmup] {
+        exec_ok(exec, s);
+    }
+    stmts[warmup..].to_vec()
+}
+
+fn run_one(cli: &Cli, wl: &Workload, backend_name: &str, use_wal: bool, rng: &mut Rng) -> Run {
+    let (mut exec, _guard) = make_executor(use_wal);
+    let label = wl.to_possible_value().unwrap().get_name().to_string();
+
+    let ops = match wl {
+        Workload::AppendSeq => wl_append_seq(cli, &mut exec, rng),
+        Workload::AppendCorrection => wl_append_correction(cli, &mut exec, rng),
+        Workload::AtLookup => wl_at_lookup(cli, &mut exec, rng),
+        Workload::RangeScan => wl_range_scan(cli, &mut exec, rng),
+        Workload::RangeFilter => wl_range_filter(cli, &mut exec, rng),
+        Workload::Mixed => wl_mixed(cli, &mut exec, rng),
+        Workload::Derived => wl_derived(cli, &mut exec, rng),
+        Workload::IotIngest => wl_iot_ingest(cli, &mut exec, rng),
+        Workload::Compact => wl_compact(cli, &mut exec, rng),
+        Workload::Reduce => wl_reduce(cli, &mut exec, rng),
         Workload::All => unreachable!(),
+    };
+
+    let effective_label = if cli.threads > 1 {
+        format!("{} ({}t)", label, cli.threads)
+    } else {
+        label
+    };
+
+    if cli.threads <= 1 {
+        time_stmts(&mut exec, &effective_label, backend_name, &ops)
+    } else {
+        let exec = Arc::new(RwLock::new(exec));
+        time_stmts_concurrent(exec, &effective_label, backend_name, &ops, cli.threads)
     }
 }
 
@@ -788,6 +1002,8 @@ const ALL: &[Workload] = &[
     Workload::Mixed,
     Workload::Derived,
     Workload::IotIngest,
+    Workload::Compact,
+    Workload::Reduce,
 ];
 
 fn main() {
@@ -833,12 +1049,12 @@ fn main() {
                 workload = %wl.to_possible_value().unwrap().get_name(),
                 backend = backend_name,
                 ops = %fmt_int(cli.ops),
+                threads = cli.threads,
                 "running workload"
             );
 
-            let (mut exec, _guard) = make_executor(use_wal);
             let mut rng = Rng::seed(cli.seed);
-            let run = run_one(&cli, wl, backend_name, &mut exec, &mut rng);
+            let run = run_one(&cli, wl, backend_name, use_wal, &mut rng);
             runs.push(run);
         }
     }

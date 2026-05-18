@@ -58,6 +58,17 @@ where
         }
     }
 
+    /// Attach an already-shared WAL.  Used by the executor when the WAL is
+    /// also being used for DDL persistence — both producers point at the
+    /// same background writer.
+    pub fn with_wal_arc(store: impl Store<V> + 'static, wal: Arc<Wal>) -> Self {
+        info!("creating database with shared WAL enabled");
+        Self {
+            store: Arc::new(RwLock::new(Box::new(store))),
+            wal: Some(wal),
+        }
+    }
+
     /// Open an existing WAL, replay it into `store`, then return a live
     /// `Database` with durability enabled.
     ///
@@ -173,6 +184,12 @@ where
         };
         debug!(lens = %lens.name, t, found = result.is_some(), "point lookup");
         result
+    }
+
+    /// Replace every layer of `lens` with the single provided layer.
+    /// Used by `COMPACT LENS` to collapse the stack.
+    pub fn replace_layers(&self, lens_name: &str, layer: Layer<V>) {
+        self.store.write().unwrap().replace_layers(lens_name, layer);
     }
 
     /// Snapshot of the layer stack for `lens`, cheap-cloned through the

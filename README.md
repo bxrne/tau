@@ -23,6 +23,8 @@ APPEND LENS <name> <start> <end> <value>
 DERIVE LENS <name> AS <expr>
 AT LENS <name> <timestamp>
 RANGE LENS <name> <start> <end> [WHERE <expr>]
+REDUCE LENS <name> <start> <end> <fn>   -- fn = sum | avg | min | max | count
+COMPACT LENS <name>                     -- merge all layers into one newest-wins layer
 DROP LENS <name>
 ```
 
@@ -31,8 +33,15 @@ Expressions: `+ - * / %`, `== != < <= > >=`, `&& ||`, unary `- !`, parentheses.
 ## Storage Backends
 
 - **InMemory**: Heap-backed layer stack for ephemeral workloads.
-- **Disk**: Binary file with header CRC32 + per-entry checksums.
-- **WAL**: Write-ahead log for durability; replays on startup.
+- **Disk**: Binary file with header CRC32 + per-entry checksums. The current
+  V2 format compresses tau timestamps with delta + LEB128 encoding; V1 files
+  remain readable for migration. Appends are written and fsynced immediately
+  — no manual `flush()` required.
+- **WAL**: Group-commit write-ahead log for durability; replays both
+  data entries and DDL (`CREATE`/`DROP`/`USE`/`DERIVE`/`COMPACT`) on
+  startup so schema survives restart alongside data.
+
+> Replication: planned for a future release.
 
 ## Server
 
@@ -44,6 +53,14 @@ tau --help                    # Show all options
 ```
 
 Wire protocol: line-oriented TCP. Values encode as `i<int>`, `f<float>`, `s<str>`, `b<0|1>`, `n<NIL>`.
+
+Response types:
+
+- `OK` — DDL / write completed
+- `VAL <encoded>` / `VAL NIL` — `AT LENS` result
+- `RANGE <n>; <s>:<e>:<encoded>; ...` — `RANGE LENS` segments
+- `SCALAR <encoded>` / `SCALAR NIL` — `REDUCE LENS` aggregation result
+- `ERR <message>` — parse or execution error
 
 ## Example
 

@@ -35,6 +35,8 @@ pub fn parse(input: &str) -> IResult<&str, Stmt> {
         stmt_range,
         stmt_drop,
         stmt_use,
+        stmt_compact,
+        stmt_reduce,
     ))
     .parse(input)?;
     let (input, _) = multispace0(input)?;
@@ -154,6 +156,48 @@ fn stmt_use(i: &str) -> IResult<&str, Stmt> {
     let (i, _) = kw("DATABASE").parse(i)?;
     let (i, name) = ident(i)?;
     Ok((i, Stmt::UseDatabase { name }))
+}
+
+/// `COMPACT LENS <name>` — merge all layers into a single newest-wins layer.
+fn stmt_compact(i: &str) -> IResult<&str, Stmt> {
+    let (i, _) = kw("COMPACT").parse(i)?;
+    let (i, _) = kw("LENS").parse(i)?;
+    let (i, name) = ident(i)?;
+    Ok((i, Stmt::Compact { name }))
+}
+
+/// `REDUCE LENS <name> <start> <end> <fn>` — fold values across `[start, end)`.
+fn stmt_reduce(i: &str) -> IResult<&str, Stmt> {
+    let (i, _) = kw("REDUCE").parse(i)?;
+    let (i, _) = kw("LENS").parse(i)?;
+    let (i, name) = ident(i)?;
+    let (i, _) = multispace1(i)?;
+    let (i, start) = integer(i)?;
+    let (i, _) = multispace1(i)?;
+    let (i, end) = integer(i)?;
+    let (i, _) = multispace1(i)?;
+    let (i, func) = agg_fn(i)?;
+    Ok((
+        i,
+        Stmt::Reduce {
+            name,
+            start,
+            end,
+            func,
+        },
+    ))
+}
+
+/// Aggregator name: `sum`, `avg`, `min`, `max`, or `count` (case-insensitive).
+fn agg_fn(i: &str) -> IResult<&str, AggFn> {
+    alt((
+        value(AggFn::Sum, tag_no_case("sum")),
+        value(AggFn::Avg, tag_no_case("avg")),
+        value(AggFn::Min, tag_no_case("min")),
+        value(AggFn::Max, tag_no_case("max")),
+        value(AggFn::Count, tag_no_case("count")),
+    ))
+    .parse(i)
 }
 
 /// Precedence climbing for expressions.  See the `expr_*` functions below

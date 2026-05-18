@@ -61,8 +61,15 @@ impl_codec_display_parse!(
     i8, i16, i32, i64, i128, u8, u16, u32, u64, u128, f32, f64, bool
 );
 
+/// Build a CRC-prefixed `STMT` WAL line for a DDL statement payload.
+pub fn serialise_stmt(text: &str) -> String {
+    let payload = format!("STMT {text}");
+    let checksum = crc32(&payload);
+    format!("{checksum} {payload}")
+}
+
 /// Compute CRC32 of a string slice.
-fn crc32(data: &str) -> u32 {
+pub(crate) fn crc32(data: &str) -> u32 {
     let mut hasher = Hasher::new();
     hasher.update(data.as_bytes());
     hasher.finalize()
@@ -248,6 +255,20 @@ impl Wal {
             "writing WAL entry"
         );
         self.push_entry(entry.serialise()).wait()
+    }
+
+    /// Path to the underlying WAL file.  Useful for tools that want to read
+    /// the log without taking a writer lock (e.g. the executor's replay
+    /// helper which decodes both DATA and STMT lines).
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Enqueue a DDL statement for durability.  The payload is prefixed with
+    /// `STMT ` and CRC32-checksummed identically to data entries; replay
+    /// distinguishes the two by sniffing the first token after the checksum.
+    pub fn push_stmt(&self, text: &str) -> WalWaiter {
+        self.push_entry(serialise_stmt(text))
     }
 
     /// Replay every persisted entry into `store` in write order.

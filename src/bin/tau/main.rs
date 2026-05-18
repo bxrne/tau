@@ -198,6 +198,8 @@ fn format_output(o: &Output) -> String {
         Output::Empty => "OK".into(),
         Output::Value(None) => "VAL NIL".into(),
         Output::Value(Some(v)) => format!("VAL {}", v.encode()),
+        Output::Scalar(None) => "SCALAR NIL".into(),
+        Output::Scalar(Some(v)) => format!("SCALAR {}", v.encode()),
         Output::Range(segments) => {
             // "RANGE <n>" followed by "; <s>:<e>:<codec>" per segment.
             let mut out = String::with_capacity(16 + segments.len() * 24);

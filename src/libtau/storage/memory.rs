@@ -38,12 +38,17 @@ where
             .get(lens)?
             .iter()
             .rev()
+            .filter(|l| l.min_ts <= t && t < l.max_ts)
             .find_map(|layer| layer.at(t))
             .cloned()
     }
 
     fn layers(&self, lens: &str) -> Option<&Vec<Layer<V>>> {
         self.lenses.get(lens)
+    }
+
+    fn replace_layers(&mut self, lens: &str, layer: Layer<V>) {
+        self.lenses.insert(lens.to_string(), vec![layer]);
     }
 }
 

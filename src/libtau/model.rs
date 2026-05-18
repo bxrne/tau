@@ -28,6 +28,12 @@ impl<V> Tau<V> {
 pub struct Layer<V> {
     pub id: LayerId,
     pub taus: Arc<[Tau<V>]>,
+    /// Minimum `tau.start` across all taus; `i64::MAX` if the layer is empty.
+    /// Used by the storage backends to skip whole layers during point/range
+    /// lookups that fall entirely outside the layer's coverage window.
+    pub min_ts: Timestamp,
+    /// Maximum `tau.end` across all taus; `i64::MIN` if the layer is empty.
+    pub max_ts: Timestamp,
 }
 
 impl<V> Layer<V> {
@@ -37,9 +43,13 @@ impl<V> Layer<V> {
             taus.windows(2).all(|w| w[0].end <= w[1].start),
             "Layer: taus must not overlap"
         );
+        let min_ts = taus.first().map(|t| t.start).unwrap_or(i64::MAX);
+        let max_ts = taus.last().map(|t| t.end).unwrap_or(i64::MIN);
         Self {
             id,
             taus: taus.into(),
+            min_ts,
+            max_ts,
         }
     }
 

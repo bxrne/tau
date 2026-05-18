@@ -15,6 +15,14 @@ where
 
     /// Expose the raw layer stack (e.g. for inspection / snapshotting).
     fn layers(&self, lens: &str) -> Option<&Vec<Layer<V>>>;
+
+    /// Replace every layer of `lens` with the single provided layer.
+    /// Used by `COMPACT LENS` to collapse a layer stack into one canonical
+    /// newest-wins layer.  Default impl assumes a simple Vec-backed store.
+    fn replace_layers(&mut self, lens: &str, layer: Layer<V>) {
+        let _ = (lens, layer);
+        unimplemented!("replace_layers not supported by this store");
+    }
 }
 
 #[cfg(test)]
