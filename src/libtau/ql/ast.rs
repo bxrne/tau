@@ -166,3 +166,102 @@ impl Stmt {
         )
     }
 }
+
+// ---------------------------------------------------------------------------
+// Display impls — used to serialise schema DDL statements to the WAL so they
+// survive a restart and can be replayed as text.
+// ---------------------------------------------------------------------------
+
+impl std::fmt::Display for Type {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Type::Int => write!(f, "int"),
+            Type::Float => write!(f, "float"),
+            Type::Str => write!(f, "str"),
+            Type::Bool => write!(f, "bool"),
+            Type::Bytes => write!(f, "bytes"),
+        }
+    }
+}
+
+impl std::fmt::Display for Literal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Literal::Int(v) => write!(f, "{}", v),
+            Literal::Float(v) => write!(f, "{}", v),
+            Literal::Str(s) => write!(f, "\"{}\"", s),
+            Literal::Bool(b) => write!(f, "{}", b),
+            Literal::Null => write!(f, "null"),
+        }
+    }
+}
+
+impl std::fmt::Display for AggFunc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AggFunc::Min => write!(f, "min"),
+            AggFunc::Max => write!(f, "max"),
+            AggFunc::Avg => write!(f, "avg"),
+            AggFunc::Sum => write!(f, "sum"),
+            AggFunc::Count => write!(f, "count"),
+        }
+    }
+}
+
+impl std::fmt::Display for BinOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            BinOp::Add => "+",
+            BinOp::Sub => "-",
+            BinOp::Mul => "*",
+            BinOp::Div => "/",
+            BinOp::Mod => "%",
+            BinOp::Eq => "==",
+            BinOp::NotEq => "!=",
+            BinOp::Lt => "<",
+            BinOp::LtEq => "<=",
+            BinOp::Gt => ">",
+            BinOp::GtEq => ">=",
+            BinOp::And => "and",
+            BinOp::Or => "or",
+        };
+        write!(f, "{s}")
+    }
+}
+
+impl std::fmt::Display for UnOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UnOp::Neg => write!(f, "-"),
+            UnOp::Not => write!(f, "not "),
+        }
+    }
+}
+
+impl std::fmt::Display for Expr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Expr::Lit(lit) => write!(f, "{lit}"),
+            Expr::Ident(name) => write!(f, "{name}"),
+            Expr::Unary { op, expr } => write!(f, "{op}{expr}"),
+            // Always parenthesize binary ops for unambiguous round-tripping.
+            Expr::Binary { op, lhs, rhs } => write!(f, "({lhs} {op} {rhs})"),
+            Expr::Agg {
+                func,
+                lens,
+                rel_start,
+                rel_end,
+            } => write!(f, "{func}({lens}, {rel_start}, {rel_end})"),
+        }
+    }
+}
+
+impl std::fmt::Display for Stmt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Stmt::Create { name, ty } => write!(f, "CREATE LENS {name} {ty}"),
+            Stmt::Derive { name, expr } => write!(f, "DERIVE LENS {name} AS {expr}"),
+            other => write!(f, "{other:?}"),
+        }
+    }
+}

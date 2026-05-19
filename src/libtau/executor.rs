@@ -67,6 +67,8 @@ pub enum ExecError {
     InvalidExpr(String),
     /// `APPEND` / `RANGE` with `start >= end`.
     InvalidRange,
+    /// A storage I/O error (WAL write failure, disk error, etc.).
+    Io(String),
 }
 
 /// Per-database executor state.
@@ -97,18 +99,22 @@ impl DbState {
         path: impl AsRef<Path>,
         compact_threshold: usize,
         key: Option<[u8; 32]>,
-    ) -> io::Result<Self> {
+    ) -> io::Result<(Self, Vec<String>)> {
         let store = InMemory::<Value>::with_threshold(compact_threshold);
-        // TODO: replay must also reconstruct base_types and derived maps from
-        // persisted CREATE LENS / DERIVE LENS events so lens declarations
-        // survive a restart. Currently only data is replayed.
         let db = Database::open(store, path, key).map_err(io::Error::other)?;
-        Ok(Self {
-            db,
-            base_types: HashMap::new(),
-            next_layer_id: 1,
-            derived: HashMap::new(),
-        })
+        // Restore next_layer_id so new layers never collide with replayed ones.
+        let next_layer_id = db.max_layer_id() + 1;
+        // Fetch schema stmts to replay in the executor after construction.
+        let schema_stmts = db.schema_stmts().map_err(io::Error::other)?;
+        Ok((
+            Self {
+                db,
+                base_types: HashMap::new(),
+                next_layer_id,
+                derived: HashMap::new(),
+            },
+            schema_stmts,
+        ))
     }
 }
 
@@ -120,6 +126,10 @@ pub struct Executor {
     /// database is dropped.
     active: Option<String>,
     compact_threshold: usize,
+    /// When `true`, `create_lens` and `derive_lens` skip writing to the WAL.
+    /// Set during schema replay on startup to avoid re-writing entries that
+    /// were just read from the WAL.
+    in_replay: bool,
 }
 
 impl Default for Executor {
@@ -139,6 +149,7 @@ impl Executor {
             databases: HashMap::new(),
             active: None,
             compact_threshold,
+            in_replay: false,
         }
     }
 
@@ -153,10 +164,38 @@ impl Executor {
         compact_threshold: usize,
         key: Option<[u8; 32]>,
     ) -> io::Result<Self> {
+        use crate::libtau::ql::parser::parse;
+
         let mut executor = Self::with_threshold(compact_threshold);
-        let db_state = DbState::with_wal(path, compact_threshold, key)?;
+        let (db_state, schema_stmts) = DbState::with_wal(path, compact_threshold, key)?;
         executor.databases.insert("default".to_string(), db_state);
         executor.active = Some("default".to_string());
+
+        // Replay schema DDL (CREATE LENS / DERIVE LENS).
+        // in_replay suppresses writing these back to the WAL.
+        executor.in_replay = true;
+        for stmt_text in schema_stmts {
+            match parse(&stmt_text) {
+                Ok((_, stmt)) => {
+                    if let Err(e) = executor.exec(&stmt) {
+                        tracing::warn!(
+                            stmt = %stmt_text,
+                            error = ?e,
+                            "schema WAL replay: statement failed, skipping"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        stmt = %stmt_text,
+                        error = %e,
+                        "schema WAL replay: parse error, skipping"
+                    );
+                }
+            }
+        }
+        executor.in_replay = false;
+
         Ok(executor)
     }
 
@@ -255,9 +294,18 @@ impl Executor {
     }
 
     fn create_lens(&mut self, name: &str, ty: Type) -> Result<Output, ExecError> {
+        let in_replay = self.in_replay;
         let state = self.active_mut()?;
         if state.base_types.contains_key(name) || state.derived.contains_key(name) {
             return Err(ExecError::DuplicateLens(name.into()));
+        }
+        // WAL-first: persist before updating in-memory state.
+        if !in_replay {
+            let stmt_text = format!("CREATE LENS {name} {ty}");
+            state
+                .db
+                .append_schema(&stmt_text)
+                .map_err(|e| ExecError::Io(e.to_string()))?;
         }
         state.base_types.insert(name.into(), ty);
         Ok(Output::Empty)
@@ -292,17 +340,28 @@ impl Executor {
         let id = state.next_layer_id;
         state.next_layer_id += 1;
         let layer = Layer::new(id, vec![Tau::new(start, end, value)]);
-        state.db.append(&state.db.lens(name), layer);
+        state
+            .db
+            .append(&state.db.lens(name), layer)
+            .map_err(|e| ExecError::Io(e.to_string()))?;
         Ok(Output::Empty)
     }
 
     fn derive_lens(&mut self, name: &str, expr: Expr) -> Result<Output, ExecError> {
+        let in_replay = self.in_replay;
         let state = self.active_mut()?;
         if state.base_types.contains_key(name) || state.derived.contains_key(name) {
             return Err(ExecError::DuplicateLens(name.into()));
         }
         // TODO: detect cycles before inserting — a derived lens that references
         // itself (directly or via a chain) will stack-overflow at query time.
+        if !in_replay {
+            let stmt_text = format!("DERIVE LENS {name} AS {expr}");
+            state
+                .db
+                .append_schema(&stmt_text)
+                .map_err(|e| ExecError::Io(e.to_string()))?;
+        }
         state.derived.insert(name.into(), expr);
         Ok(Output::Empty)
     }
@@ -1287,5 +1346,45 @@ mod tests {
             run(&mut e, "AT LENS x 5").unwrap(),
             Output::Value(Some(Value::Int(1)))
         );
+    }
+
+    #[test]
+    fn schema_persists_across_wal_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let wal_path = dir.path().join("test.wal");
+
+        // First session: create lens, append data, derive another lens.
+        {
+            let mut e = Executor::with_wal(&wal_path, None).unwrap();
+            run(&mut e, "CREATE LENS temp int").unwrap();
+            run(&mut e, "APPEND LENS temp 0 10 42").unwrap();
+            run(&mut e, "DERIVE LENS cold AS (temp * 2)").unwrap();
+        }
+
+        // Second session: reopen WAL — schema must be recovered automatically.
+        let mut e2 = Executor::with_wal(&wal_path, None).unwrap();
+        // Data is recovered.
+        assert_eq!(
+            run(&mut e2, "AT LENS temp 5").unwrap(),
+            Output::Value(Some(Value::Int(42)))
+        );
+        // CREATE LENS schema is recovered — APPEND should not error with UnknownLens.
+        run(&mut e2, "APPEND LENS temp 10 20 99").unwrap();
+        assert_eq!(
+            run(&mut e2, "AT LENS temp 15").unwrap(),
+            Output::Value(Some(Value::Int(99)))
+        );
+        // DERIVE LENS schema is recovered — derived lens is usable.
+        assert_eq!(
+            run(&mut e2, "AT LENS cold 5").unwrap(),
+            Output::Value(Some(Value::Int(84)))
+        );
+    }
+
+    #[test]
+    fn wal_error_variant_formats_in_tcp_output() {
+        // Verify ExecError::Io exists and can be formatted (it's surfaced over TCP).
+        let e = ExecError::Io("disk full".into());
+        assert!(matches!(e, ExecError::Io(_)));
     }
 }

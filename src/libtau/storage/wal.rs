@@ -261,7 +261,11 @@ impl Wal {
                     .map(|(s, e, v)| Tau::new(s, e, v))
                     .collect();
 
-                store.append(&entry.lens, Layer::new(entry.layer_id, taus));
+                if let Err(e) = store.append(&entry.lens, Layer::new(entry.layer_id, taus)) {
+                    warn!(error = %e, "WAL replay: store append failed, skipping");
+                    skipped += 1;
+                    continue;
+                }
                 count += 1;
             } else {
                 skipped += 1;
@@ -274,6 +278,166 @@ impl Wal {
             "WAL replay complete"
         );
         Ok(())
+    }
+
+    /// Append a schema DDL statement (e.g. `CREATE LENS temp int`) to the log.
+    ///
+    /// Plaintext format: `S:<crc32> <stmt_text>`
+    /// Encrypted format: `SE:<base64>` where the plaintext is `<crc32> <stmt_text>`
+    pub fn append_schema(&mut self, stmt_text: &str) -> io::Result<()> {
+        let ck = crc32(stmt_text);
+        let inner = format!("{} {}", ck, stmt_text);
+        if let Some(key) = &self.key {
+            let blob = crypto::encrypt(key, inner.as_bytes());
+            writeln!(self.writer, "SE:{}", B64.encode(&blob))?;
+        } else {
+            writeln!(self.writer, "S:{}", inner)?;
+        }
+        self.writer.flush()?;
+        self.writer.get_ref().sync_data()
+    }
+
+    /// Return the raw `S:` / `SE:` lines as they appear in the WAL file.
+    ///
+    /// Used by `Wal::rewrite` so that schema lines are preserved verbatim
+    /// during WAL rotation without needing to re-encrypt them.
+    pub fn raw_schema_lines(&self) -> io::Result<Vec<String>> {
+        let file = File::open(&self.path)?;
+        let reader = BufReader::new(file);
+        let mut lines = Vec::new();
+        for line in reader.lines() {
+            let line = line?;
+            let trimmed = line.trim();
+            if trimmed.starts_with("S:") || trimmed.starts_with("SE:") {
+                lines.push(line);
+            }
+        }
+        Ok(lines)
+    }
+
+    /// Return the decoded schema DDL statements stored in the WAL.
+    ///
+    /// Each returned string is a raw statement text such as
+    /// `CREATE LENS temp int` or `DERIVE LENS fast AS avg(slow, -3600, 0)`.
+    /// Corrupt or undecryptable entries are skipped with a warning.
+    pub fn replay_schemas(&self) -> io::Result<Vec<String>> {
+        let file = File::open(&self.path)?;
+        let reader = BufReader::new(file);
+        let mut stmts = Vec::new();
+
+        for line in reader.lines() {
+            let line = line?;
+            let trimmed = line.trim();
+
+            let inner: String = if let Some(rest) = trimmed.strip_prefix("SE:") {
+                let key = match &self.key {
+                    Some(k) => k,
+                    None => {
+                        warn!("encrypted schema WAL entry found but no key configured, skipping");
+                        continue;
+                    }
+                };
+                let blob = match B64.decode(rest) {
+                    Ok(b) => b,
+                    Err(_) => {
+                        warn!("schema WAL entry base64 decode failed, skipping");
+                        continue;
+                    }
+                };
+                match crypto::decrypt(key, &blob) {
+                    Ok(bytes) => match String::from_utf8(bytes) {
+                        Ok(s) => s,
+                        Err(_) => {
+                            warn!("schema WAL entry decrypted but not valid UTF-8, skipping");
+                            continue;
+                        }
+                    },
+                    Err(_) => {
+                        warn!("schema WAL entry decryption failed, skipping");
+                        continue;
+                    }
+                }
+            } else if let Some(rest) = trimmed.strip_prefix("S:") {
+                rest.to_string()
+            } else {
+                continue;
+            };
+
+            // inner = "<crc32> <stmt_text>"
+            if let Some((ck_str, stmt)) = inner.split_once(' ') {
+                match ck_str.parse::<u32>() {
+                    Ok(ck) if ck == crc32(stmt) => stmts.push(stmt.to_string()),
+                    Ok(_) => warn!("schema WAL entry checksum mismatch, discarding"),
+                    Err(_) => warn!("schema WAL entry malformed checksum, discarding"),
+                }
+            } else {
+                warn!("schema WAL entry missing checksum, discarding");
+            }
+        }
+        Ok(stmts)
+    }
+
+    /// Rewrite the WAL atomically with `raw_schema_lines` followed by the
+    /// provided data `entries`.
+    ///
+    /// Writes to a `.tmp` sibling, fsyncs, then renames over the live WAL file
+    /// so the operation is crash-safe.  Reopens the internal writer in append
+    /// mode after the rename.
+    pub fn rewrite<V: Codec>(
+        &mut self,
+        raw_schema_lines: &[String],
+        entries: &[WalEntry<V>],
+    ) -> io::Result<()> {
+        let tmp = self.path.with_extension("wal.tmp");
+        {
+            let tmp_file = File::create(&tmp)?;
+            let mut writer = BufWriter::new(tmp_file);
+            for line in raw_schema_lines {
+                writeln!(writer, "{}", line)?;
+            }
+            for entry in entries {
+                if let Some(key) = &self.key {
+                    let plaintext = entry.serialise();
+                    let blob = crypto::encrypt(key, plaintext.as_bytes());
+                    writeln!(writer, "E:{}", B64.encode(&blob))?;
+                } else {
+                    writeln!(writer, "{}", entry.serialise())?;
+                }
+            }
+            writer.flush()?;
+            writer.get_ref().sync_data()?;
+        }
+        std::fs::rename(&tmp, &self.path)?;
+        let file = OpenOptions::new().append(true).open(&self.path)?;
+        self.writer = BufWriter::new(file);
+        Ok(())
+    }
+
+    /// Return the set of layer IDs present as data entries in the WAL.
+    ///
+    /// Used internally to verify WAL rotation in tests.
+    #[cfg(test)]
+    pub fn data_layer_ids(&self) -> io::Result<std::collections::HashSet<LayerId>> {
+        let file = File::open(&self.path)?;
+        let reader = BufReader::new(file);
+        let mut ids = std::collections::HashSet::new();
+        for line in reader.lines() {
+            let line = line?;
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with("S:") || trimmed.starts_with("SE:") {
+                continue;
+            }
+            // Data line: "<crc32> <layer_id> <lens> [taus...]"
+            // We only need layer_id; skip checksum verification here.
+            let mut parts = trimmed.splitn(3, ' ');
+            let _ck = parts.next();
+            if let Some(id_str) = parts.next()
+                && let Ok(id) = id_str.parse::<LayerId>()
+            {
+                ids.insert(id);
+            }
+        }
+        Ok(ids)
     }
 }
 
@@ -609,5 +773,103 @@ mod tests {
             None,
             "entries must be skipped without key"
         );
+    }
+
+    #[test]
+    fn wal_append_and_replay_schema() {
+        let tmp = NamedTempFile::new().unwrap();
+        {
+            let mut wal = Wal::open(tmp.path(), None).unwrap();
+            wal.append_schema("CREATE LENS temp int").unwrap();
+            wal.append_schema("DERIVE LENS fast AS avg(slow, -3600, 0)")
+                .unwrap();
+        }
+
+        let wal = Wal::open(tmp.path(), None).unwrap();
+        let stmts = wal.replay_schemas().unwrap();
+        assert_eq!(
+            stmts,
+            vec![
+                "CREATE LENS temp int",
+                "DERIVE LENS fast AS avg(slow, -3600, 0)"
+            ]
+        );
+    }
+
+    #[test]
+    fn wal_schema_encrypted_roundtrip() {
+        let key = [0xAAu8; 32];
+        let tmp = NamedTempFile::new().unwrap();
+        {
+            let mut wal = Wal::open(tmp.path(), Some(key)).unwrap();
+            wal.append_schema("CREATE LENS secret float").unwrap();
+        }
+
+        // Raw file must not contain the plaintext stmt
+        let raw = std::fs::read_to_string(tmp.path()).unwrap();
+        assert!(!raw.contains("secret"), "plaintext schema leaked into WAL");
+        assert!(raw.contains("SE:"), "encrypted schema must use SE: prefix");
+
+        let wal = Wal::open(tmp.path(), Some(key)).unwrap();
+        let stmts = wal.replay_schemas().unwrap();
+        assert_eq!(stmts, vec!["CREATE LENS secret float"]);
+    }
+
+    #[test]
+    fn wal_schema_and_data_are_independent() {
+        let tmp = NamedTempFile::new().unwrap();
+        {
+            let mut wal = Wal::open(tmp.path(), None).unwrap();
+            wal.append_schema("CREATE LENS x int").unwrap();
+            wal.append(&WalEntry::<i64> {
+                layer_id: 1,
+                lens: "x".to_string(),
+                taus: vec![(0, 10, 42)],
+            })
+            .unwrap();
+        }
+
+        let wal = Wal::open(tmp.path(), None).unwrap();
+        // Schemas returned separately from data replay
+        let stmts = wal.replay_schemas().unwrap();
+        assert_eq!(stmts, vec!["CREATE LENS x int"]);
+
+        let mut store: InMemory<i64> = InMemory::new();
+        wal.replay(&mut store).unwrap();
+        assert_eq!(store.at("x", 5), Some(42));
+    }
+
+    #[test]
+    fn wal_rewrite_drops_superseded_entries() {
+        let tmp = NamedTempFile::new().unwrap();
+        let mut wal = Wal::open(tmp.path(), None).unwrap();
+        wal.append_schema("CREATE LENS x int").unwrap();
+        for i in 1_u64..=3 {
+            wal.append(&WalEntry::<i64> {
+                layer_id: i,
+                lens: "x".to_string(),
+                taus: vec![(i as i64 * 10, i as i64 * 10 + 10, i as i64)],
+            })
+            .unwrap();
+        }
+
+        // Rewrite keeping only layer 3, plus schema.
+        let schema_lines = wal.raw_schema_lines().unwrap();
+        let live_entry = WalEntry::<i64> {
+            layer_id: 3,
+            lens: "x".to_string(),
+            taus: vec![(30, 40, 3)],
+        };
+        wal.rewrite(&schema_lines, &[live_entry]).unwrap();
+
+        // After rewrite: only layer 3 remains in the WAL.
+        let ids = wal.data_layer_ids().unwrap();
+        assert!(!ids.contains(&1), "layer 1 should have been removed");
+        assert!(!ids.contains(&2), "layer 2 should have been removed");
+        assert!(ids.contains(&3), "layer 3 must be retained");
+
+        // Schema lines must survive.
+        let stmts = wal.replay_schemas().unwrap();
+        assert_eq!(stmts, vec!["CREATE LENS x int"]);
     }
 }

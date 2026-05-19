@@ -370,6 +370,7 @@ fn format_error(e: &ExecError) -> String {
         }
         ExecError::InvalidExpr(m) => format!("invalid expression: {m}"),
         ExecError::InvalidRange => "invalid range (start >= end)".into(),
+        ExecError::Io(m) => format!("storage error: {m}"),
     }
 }
 

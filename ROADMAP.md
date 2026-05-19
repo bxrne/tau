@@ -23,10 +23,10 @@ This document tracks what has been built and what remains before Tau can be cons
 - [x] Write-ahead log (`Wal`) — append-only flat file, fsync before returning, per-line CRC32 checksums
 - [x] WAL encryption — per-entry AES-256-GCM, base64-encoded with `E:` prefix, plaintext entries remain readable without a key
 - [x] WAL replay on startup — reconstruct in-memory state from durable log
-- [ ] **WAL log rotation / truncation** — WAL grows unbounded; after a compaction checkpoint it should be safe to truncate entries that are fully covered by the merged layer
-- [ ] **Schema persistence in WAL** — `CREATE LENS` statements are not written to the WAL, so declared lens types are lost on restart; the replay path only reconstructs data, not the schema
-- [ ] **Disk backend append mode** — `Disk::flush` rewrites the whole file; a proper append path would make individual writes O(entry) rather than O(total data)
-- [ ] **WAL write failure handling** — currently panics if the WAL fsync fails; should return an error to the caller and leave the in-memory state unchanged
+- [x] **WAL log rotation / truncation** — after auto-compaction, `Database::checkpoint` rewrites the WAL to contain only the live (post-compaction) layers; WAL growth is bounded
+- [x] **Schema persistence in WAL** — `CREATE LENS` and `DERIVE LENS` are written as `S:` lines in the WAL; replay restores both data and schema so lens declarations survive a restart
+- [x] **Disk backend append mode** — unencrypted `Disk` now holds an open append-mode file handle; `Store::append` writes each entry in O(entry) time; a full rewrite only occurs when compaction fires
+- [x] **WAL write failure handling** — `Database::append` returns `io::Result<()>`; a WAL fsync failure leaves the in-memory store unchanged; `ExecError::Io` surfaces the error to the client over TCP
 
 ---
 

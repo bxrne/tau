@@ -14,7 +14,8 @@ use crate::libtau::crypto;
 use crate::libtau::model::{Layer, LayerId, Tau};
 use crate::libtau::storage::store::{COMPACT_THRESHOLD, Store, compact_layers};
 use std::collections::BTreeMap;
-use std::io::{self, BufReader, Cursor, Read, Write};
+use std::fs::OpenOptions;
+use std::io::{self, BufReader, BufWriter, Cursor, Read, Write};
 use std::path::Path;
 
 const MAGIC: &[u8] = b"TAU";
@@ -142,6 +143,9 @@ pub struct Disk<V> {
     lenses: BTreeMap<String, Vec<Layer<V>>>,
     compact_threshold: usize,
     key: Option<[u8; 32]>,
+    /// Open file handle for O(entry) appends.  `None` when encryption is
+    /// enabled — encrypted files are written atomically via `flush()`.
+    append_writer: Option<BufWriter<std::fs::File>>,
 }
 
 impl<V: Clone + Codec> Disk<V> {
@@ -235,11 +239,19 @@ impl<V: Clone + Codec> Disk<V> {
             }
         }
 
+        let append_writer = if key.is_none() {
+            let f = OpenOptions::new().append(true).open(&path)?;
+            Some(BufWriter::new(f))
+        } else {
+            None
+        };
+
         Ok(Self {
             path,
             lenses,
             compact_threshold: COMPACT_THRESHOLD,
             key,
+            append_writer,
         })
     }
 
@@ -266,11 +278,19 @@ impl<V: Clone + Codec> Disk<V> {
         }
         file.sync_data()?;
 
+        let append_writer = if key.is_none() {
+            let f = OpenOptions::new().append(true).open(&path)?;
+            Some(BufWriter::new(f))
+        } else {
+            None
+        };
+
         Ok(Self {
             path,
             lenses: BTreeMap::new(),
             compact_threshold: COMPACT_THRESHOLD,
             key,
+            append_writer,
         })
     }
 
@@ -314,17 +334,49 @@ impl<V: Clone + Codec> Disk<V> {
     }
 }
 
-impl<V: Clone + PartialEq + Send + Sync + 'static> Store<V> for Disk<V> {
-    fn append(&mut self, lens: &str, layer: Layer<V>) {
+impl<V: Clone + PartialEq + Codec + Send + Sync + 'static> Store<V> for Disk<V> {
+    fn append(&mut self, lens: &str, layer: Layer<V>) -> io::Result<()> {
+        // Write to disk in O(entry) time when unencrypted append mode is active.
+        if let Some(writer) = &mut self.append_writer {
+            let entry = DiskEntry {
+                layer_id: layer.id,
+                lens: lens.to_string(),
+                taus: layer
+                    .taus
+                    .iter()
+                    .map(|t| Tau::new(t.start, t.end, t.value.clone()))
+                    .collect(),
+            };
+            entry.write(writer)?;
+            writer.flush()?;
+            writer.get_ref().sync_data()?;
+        }
+
         let layers = self.lenses.entry(lens.to_string()).or_default();
+        let before = layers.len();
         layers.push(layer);
         if layers.len() > self.compact_threshold {
             compact_layers(layers);
         }
+        let did_compact = self.lenses.get(lens).map(|l| l.len()).unwrap_or(0) < before + 1;
+
+        // After compaction, rewrite the file to drop superseded entries.
+        if did_compact && self.append_writer.is_some() {
+            self.append_writer = None; // close old fd before rewrite
+            self.flush()?;
+            let f = OpenOptions::new().append(true).open(&self.path)?;
+            self.append_writer = Some(BufWriter::new(f));
+        }
+
+        Ok(())
     }
 
     fn layers(&self, lens: &str) -> Option<&Vec<Layer<V>>> {
         self.lenses.get(lens)
+    }
+
+    fn lens_names(&self) -> Vec<String> {
+        self.lenses.keys().cloned().collect()
     }
 }
 
@@ -345,7 +397,7 @@ mod tests {
     fn create_and_append() {
         let tmp = NamedTempFile::new().unwrap();
         let mut store = Disk::create(tmp.path(), None).unwrap();
-        store.append("x", layer(1, &[(0, 10, 42)]));
+        store.append("x", layer(1, &[(0, 10, 42)])).unwrap();
         assert_eq!(store.at("x", 5), Some(42));
         assert_eq!(store.at("x", 10), None);
     }
@@ -355,7 +407,7 @@ mod tests {
         let tmp = NamedTempFile::new().unwrap();
         {
             let mut store = Disk::create(tmp.path(), None).unwrap();
-            store.append("x", layer(1, &[(0, 10, 42)]));
+            store.append("x", layer(1, &[(0, 10, 42)])).unwrap();
             store.flush().unwrap();
         }
 
@@ -368,8 +420,8 @@ mod tests {
         let tmp = NamedTempFile::new().unwrap();
         {
             let mut store = Disk::create(tmp.path(), None).unwrap();
-            store.append("s", layer(1, &[(0, 20, 1)]));
-            store.append("s", layer(2, &[(5, 15, 2)]));
+            store.append("s", layer(1, &[(0, 20, 1)])).unwrap();
+            store.append("s", layer(2, &[(5, 15, 2)])).unwrap();
             store.flush().unwrap();
         }
 
@@ -384,8 +436,8 @@ mod tests {
         let tmp = NamedTempFile::new().unwrap();
         {
             let mut store = Disk::create(tmp.path(), None).unwrap();
-            store.append("a", layer(1, &[(0, 10, 1)]));
-            store.append("b", layer(1, &[(0, 10, 2)]));
+            store.append("a", layer(1, &[(0, 10, 1)])).unwrap();
+            store.append("b", layer(1, &[(0, 10, 2)])).unwrap();
             store.flush().unwrap();
         }
 
@@ -409,7 +461,7 @@ mod tests {
         let tmp = NamedTempFile::new().unwrap();
         {
             let mut store = Disk::create(tmp.path(), Some(key)).unwrap();
-            store.append("x", layer(1, &[(0, 10, 42)]));
+            store.append("x", layer(1, &[(0, 10, 42)])).unwrap();
             store.flush().unwrap();
         }
 
@@ -428,7 +480,7 @@ mod tests {
         let tmp = NamedTempFile::new().unwrap();
         {
             let mut store = Disk::create(tmp.path(), Some(key)).unwrap();
-            store.append("x", layer(1, &[(0, 10, 1)]));
+            store.append("x", layer(1, &[(0, 10, 1)])).unwrap();
             store.flush().unwrap();
         }
 
