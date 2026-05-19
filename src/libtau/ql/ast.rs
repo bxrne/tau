@@ -41,6 +41,16 @@ pub enum Literal {
     Null,
 }
 
+/// Aggregation function applied to a lens over a time range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AggFunc {
+    Min,
+    Max,
+    Avg,
+    Sum,
+    Count,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinOp {
     Add,
@@ -78,6 +88,14 @@ pub enum Expr {
         op: BinOp,
         lhs: Box<Expr>,
         rhs: Box<Expr>,
+    },
+    /// `func(lens, rel_start, rel_end)` — aggregate `lens` over the window
+    /// `[t + rel_start, t + rel_end)` relative to the evaluation timestamp.
+    Agg {
+        func: AggFunc,
+        lens: String,
+        rel_start: i64,
+        rel_end: i64,
     },
 }
 
@@ -125,6 +143,14 @@ pub enum Stmt {
     Drop {
         name: String,
     },
+    /// `REDUCE LENS <name> <start> <end> USING <func>` — collapse a lens over
+    /// an absolute range to a single scalar via an aggregation function.
+    Reduce {
+        name: String,
+        start: i64,
+        end: i64,
+        func: AggFunc,
+    },
 }
 
 impl Stmt {
@@ -134,6 +160,9 @@ impl Stmt {
     /// instead of an exclusive write lock, allowing concurrent point and
     /// range lookups.
     pub fn is_read_only(&self) -> bool {
-        matches!(self, Stmt::At { .. } | Stmt::Range { .. })
+        matches!(
+            self,
+            Stmt::At { .. } | Stmt::Range { .. } | Stmt::Reduce { .. }
+        )
     }
 }
