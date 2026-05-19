@@ -16,7 +16,7 @@ A binary file with a fixed header followed by length-prefixed entries. Each entr
 
 The binary format uses two magic prefixes: `TAU\x01` for plaintext and `TAUE` for encrypted. When a 32-byte key is provided, `flush` encrypts the entire payload with AES-256-GCM before writing. The AEAD authentication tag makes tampering detectable without a separate checksum in the encrypted path; the plaintext path uses CRC32 per-header.
 
-**TODO:** The current flush path is O(total data) because it rewrites the whole file. An append-only mode that writes new entries at the end would make writes O(entry), at the cost of needing a separate compaction pass to reclaim space.
+Unencrypted `Disk` stores hold an open append-mode file handle; writes are O(entry). Encrypted stores still rewrite on flush — the AEAD tag covers the entire payload, so partial appends aren't possible. A compaction triggers a full rewrite in both cases.
 
 ### `Wal`
 
@@ -30,7 +30,7 @@ Encrypted entries are prefixed with `E:` and base64-encoded. On startup, `Wal::r
 
 Every call to `Wal::append` issues an `fsync` (via `sync_data`) before returning. This is intentionally synchronous and conservative — it means write latency is bounded below by disk sync latency, but crash recovery guarantees are strong.
 
-**TODO:** The WAL grows without bound. Once a compaction checkpoint is taken, entries that are fully covered by the compacted layer can be truncated from the front of the file. This is the standard log-structured database pattern (see Kleppmann §3, or any LSM-tree implementation).
+After auto-compaction fires, `Database::checkpoint` rewrites the WAL atomically (write to `.tmp`, fsync, rename) to contain only the live post-compaction layers plus any schema lines. WAL growth is therefore bounded to the current live data set.
 
 ## Compaction
 

@@ -9,12 +9,15 @@ A small, purpose-built query language for temporal interval data. It is delibera
 ## Grammar overview
 
 ```
-stmt   := create | append | derive | at | range | reduce | drop | use
+stmt   := create | append | copy | derive | show | at | range | reduce | drop | use
 
 create := CREATE DATABASE <name>
         | CREATE LENS <name> <type>
-append := APPEND LENS <name> <start> <end> <value>
+append := APPEND LENS <name> <s> <e> <v> [, <s> <e> <v> …]
+copy   := COPY LENS <name> FROM "<path>"
 derive := DERIVE LENS <name> AS <expr>
+show   := SHOW DATABASES
+        | SHOW LENSES
 at     := AT LENS <name> <timestamp>
 range  := RANGE LENS <name> <start> <end> [WHERE <expr>]
 reduce := REDUCE LENS <name> <start> <end> USING <func>
@@ -29,6 +32,14 @@ func   := min | max | avg | sum | count
 Keywords are case-insensitive. Identifiers and string literals are not.
 
 Expressions have standard C-style operator precedence: `||` < `&&` < comparisons < additive < multiplicative < unary. Aggregation calls (`avg(lens, rel_start, rel_end)`) bind as primary expressions.
+
+### Bulk `APPEND`
+
+`APPEND LENS name s0 e0 v0, s1 e1 v1, …` batches multiple taus into a single layer write. All taus are validated before any data is written — a type mismatch on any entry rejects the whole statement. This is the preferred form for loading a time series in one shot; it is equivalent to `COPY` for in-memory data.
+
+### `COPY` CSV ingestion
+
+`COPY LENS name FROM "/path/to/file.csv"` reads a CSV file where every non-blank, non-comment (`#`) line is `start,end,value`. The entire file is parsed and appended as a single layer, so the ingest is atomic from the perspective of concurrent readers.
 
 ## AST (`ast.rs`)
 
@@ -56,11 +67,15 @@ The parser is intentionally not streaming — it expects a complete statement as
 
 `CREATE LENS x int` records that `x` has type `int`. This is enforced by the executor at append time: a float value will be rejected. But the storage engine itself is generic — it can hold any `V`. The type information lives only in the executor's `DbState::base_types` map.
 
-This has a current consequence: **lens type declarations are not persisted to the WAL**, so they are lost on restart. The executor must be taught to write `CREATE LENS` events to the WAL during startup recovery. This is tracked in the roadmap.
+`CREATE LENS` and `DERIVE LENS` statements are written as `S:` schema lines in the WAL when WAL mode is active. On restart, `Wal::replay_schemas` returns these lines and the executor replays them before accepting new writes, so both data and schema survive a restart.
 
 ### `null` is always permitted
 
 Appending `null` to an `int` lens is allowed. This is the correct behaviour for a time-series that has gaps: a null tau explicitly records "no value over this interval," which is different from "no tau exists here." The executor propagates null as `None` through derived expressions — if a source lens is null, derived lenses that depend on it also return none.
+
+### Cycle detection in derived lenses
+
+`DERIVE LENS z AS z + 1` or any chain that eventually references itself is rejected at definition time with `CycleDetected`. The executor performs a DFS through the existing derived graph starting from the new expression before inserting it. The `visited` set prevents the DFS from looping even if the graph were already cyclic (e.g. from a pre-existing data file).
 
 ### `REDUCE` vs. aggregation in `DERIVE`
 
