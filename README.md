@@ -175,8 +175,8 @@ See [`src/bin/tau/`](src/bin/tau/README.md) for concurrency model, connection ha
 | Backend | Use case |
 |---------|---------|
 | `InMemory` | Tests and ephemeral workloads. HashMap-backed, lost on shutdown. |
-| `Disk` | Persisted binary file. Plain (`TAU\x01` magic) or AES-256-GCM encrypted (`TAUE` magic). Per-entry CRC32 when unencrypted; AEAD tag when encrypted. |
-| `Wal` | Append-only durability log. Per-line CRC32 (plain) or `E:<base64>` (encrypted). Replayed into a fresh store on startup. |
+| `Disk` | Persisted binary file. Plain (`TAU\x01` magic) or AES-256-GCM encrypted (`TAUE` magic). Unencrypted stores use an open append-mode file handle so each write is O(entry); encrypted stores flush atomically. |
+| `Wal` | Append-only durability log. Per-line CRC32 (plain) or `E:<base64>` (encrypted). Replayed into a fresh store on startup. `S:` / `SE:` lines persist schema DDL (`CREATE LENS`, `DERIVE LENS`) so declarations survive a restart. After auto-compaction a checkpoint rewrites the WAL to contain only live layers, keeping disk usage bounded. |
 
 See [`src/libtau/storage/`](src/libtau/storage/README.md) for format details, compaction algorithm, and backend tradeoffs.
 

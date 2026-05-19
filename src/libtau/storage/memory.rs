@@ -1,6 +1,7 @@
 use crate::libtau::model::Layer;
 use crate::libtau::storage::store::{COMPACT_THRESHOLD, Store, compact_layers};
 use std::collections::HashMap;
+use std::io;
 
 /// Reference in-memory store. Zero dependencies, suitable for tests and
 /// small embedded workloads.
@@ -32,16 +33,21 @@ impl<V> Store<V> for InMemory<V>
 where
     V: Clone + PartialEq + Send + Sync + 'static,
 {
-    fn append(&mut self, lens: &str, layer: Layer<V>) {
+    fn append(&mut self, lens: &str, layer: Layer<V>) -> io::Result<()> {
         let layers = self.lenses.entry(lens.to_string()).or_default();
         layers.push(layer);
         if layers.len() > self.compact_threshold {
             compact_layers(layers);
         }
+        Ok(())
     }
 
     fn layers(&self, lens: &str) -> Option<&Vec<Layer<V>>> {
         self.lenses.get(lens)
+    }
+
+    fn lens_names(&self) -> Vec<String> {
+        self.lenses.keys().cloned().collect()
     }
 }
 
@@ -68,7 +74,7 @@ mod tests {
     #[test]
     fn append_then_at_returns_value() {
         let mut store = InMemory::new();
-        store.append("temp", layer(1, &[(0, 10, 42)]));
+        store.append("temp", layer(1, &[(0, 10, 42)])).unwrap();
         assert_eq!(store.at("temp", 0), Some(42));
         assert_eq!(store.at("temp", 9), Some(42));
     }
@@ -76,7 +82,7 @@ mod tests {
     #[test]
     fn at_exclusive_end_returns_none() {
         let mut store = InMemory::new();
-        store.append("temp", layer(1, &[(0, 10, 1)]));
+        store.append("temp", layer(1, &[(0, 10, 1)])).unwrap();
         assert_eq!(store.at("temp", 10), None);
     }
 
@@ -89,7 +95,9 @@ mod tests {
     #[test]
     fn at_returns_none_in_gap_between_taus() {
         let mut store = InMemory::new();
-        store.append("s", layer(1, &[(0, 5, 10), (10, 20, 20)]));
+        store
+            .append("s", layer(1, &[(0, 5, 10), (10, 20, 20)]))
+            .unwrap();
         assert_eq!(store.at("s", 5), None);
         assert_eq!(store.at("s", 7), None);
     }
@@ -97,8 +105,8 @@ mod tests {
     #[test]
     fn newest_layer_shadows_older_layer() {
         let mut store = InMemory::new();
-        store.append("s", layer(1, &[(0, 20, 1)]));
-        store.append("s", layer(2, &[(5, 15, 2)]));
+        store.append("s", layer(1, &[(0, 20, 1)])).unwrap();
+        store.append("s", layer(2, &[(5, 15, 2)])).unwrap();
         assert_eq!(store.at("s", 3), Some(1)); // only layer 1
         assert_eq!(store.at("s", 7), Some(2)); // layer 2 shadows
         assert_eq!(store.at("s", 17), Some(1)); // only layer 1 again
@@ -107,8 +115,8 @@ mod tests {
     #[test]
     fn multiple_lenses_stored_independently() {
         let mut store = InMemory::new();
-        store.append("a", layer(1, &[(0, 10, 1)]));
-        store.append("b", layer(2, &[(0, 10, 2)]));
+        store.append("a", layer(1, &[(0, 10, 1)])).unwrap();
+        store.append("b", layer(2, &[(0, 10, 2)])).unwrap();
         assert_eq!(store.at("a", 5), Some(1));
         assert_eq!(store.at("b", 5), Some(2));
     }
@@ -122,8 +130,8 @@ mod tests {
     #[test]
     fn layers_returns_all_appended_layers_in_order() {
         let mut store = InMemory::new();
-        store.append("s", layer(1, &[(0, 5, 10)]));
-        store.append("s", layer(2, &[(5, 10, 20)]));
+        store.append("s", layer(1, &[(0, 5, 10)])).unwrap();
+        store.append("s", layer(2, &[(5, 10, 20)])).unwrap();
         let layers = store.layers("s").unwrap();
         assert_eq!(layers.len(), 2);
         assert_eq!(layers[0].id, 1);
@@ -134,7 +142,7 @@ mod tests {
     fn append_creates_lens_entry_on_first_insert() {
         let mut store: InMemory<i32> = InMemory::new();
         assert!(store.layers("new").is_none());
-        store.append("new", layer(1, &[(0, 1, 0)]));
+        store.append("new", layer(1, &[(0, 1, 0)])).unwrap();
         assert!(store.layers("new").is_some());
     }
 
@@ -144,7 +152,9 @@ mod tests {
         let mut store: InMemory<i32> = InMemory::new();
         // Push COMPACT_THRESHOLD + 1 non-overlapping layers to trigger compaction.
         for i in 0..(COMPACT_THRESHOLD + 1) as i64 {
-            store.append("s", layer(i as u64 + 1, &[(i * 10, i * 10 + 10, i as i32)]));
+            store
+                .append("s", layer(i as u64 + 1, &[(i * 10, i * 10 + 10, i as i32)]))
+                .unwrap();
         }
         // After compaction the lens has exactly one layer.
         assert_eq!(store.layers("s").unwrap().len(), 1);
@@ -154,12 +164,14 @@ mod tests {
     fn compaction_preserves_newest_wins_semantics() {
         let mut store: InMemory<i32> = InMemory::new();
         // Layer 1: [0,20) = 1
-        store.append("s", layer(1, &[(0, 20, 1)]));
+        store.append("s", layer(1, &[(0, 20, 1)])).unwrap();
         // Layer 2: [5,15) = 2  (shadows middle of layer 1)
-        store.append("s", layer(2, &[(5, 15, 2)]));
+        store.append("s", layer(2, &[(5, 15, 2)])).unwrap();
         // Push enough extra layers to trigger compaction.
         for i in 3..=10 {
-            store.append("s", layer(i, &[(100, 101, i as i32)]));
+            store
+                .append("s", layer(i, &[(100, 101, i as i32)]))
+                .unwrap();
         }
         // Compaction must have happened; query the original range.
         assert_eq!(store.at("s", 3), Some(1));
@@ -172,7 +184,9 @@ mod tests {
         let mut store: InMemory<i32> = InMemory::new();
         // Two consecutive layers with the same value → should merge into one tau.
         for i in 0..=(COMPACT_THRESHOLD as i64) {
-            store.append("s", layer(i as u64 + 1, &[(i * 5, i * 5 + 5, 42)]));
+            store
+                .append("s", layer(i as u64 + 1, &[(i * 5, i * 5 + 5, 42)]))
+                .unwrap();
         }
         let layers = store.layers("s").unwrap();
         assert_eq!(layers.len(), 1);

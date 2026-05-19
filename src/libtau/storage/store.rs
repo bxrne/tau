@@ -1,4 +1,5 @@
 use crate::libtau::model::{Layer, Tau, Timestamp};
+use std::io;
 
 /// Compact `layers` down to a single layer representing the same newest-wins
 /// truth.  Every unique tau boundary becomes a potential split point; the
@@ -56,7 +57,11 @@ where
     V: Clone + Send + Sync + 'static,
 {
     /// Push a new layer onto the named lens.
-    fn append(&mut self, lens: &str, layer: Layer<V>);
+    ///
+    /// Returns an error if the underlying storage write fails.  Callers must
+    /// treat a returned error as meaning the layer was **not** persisted; they
+    /// should not update any higher-level state after receiving one.
+    fn append(&mut self, lens: &str, layer: Layer<V>) -> io::Result<()>;
 
     /// Point lookup: newest layer wins, returns cloned value.
     fn at(&self, lens: &str, t: Timestamp) -> Option<V> {
@@ -69,4 +74,11 @@ where
 
     /// Expose the raw layer stack (e.g. for inspection / snapshotting).
     fn layers(&self, lens: &str) -> Option<&Vec<Layer<V>>>;
+
+    /// Names of all lenses that have at least one layer.  Used by the WAL
+    /// checkpoint to enumerate live data for compaction.  Default returns an
+    /// empty vec; backends should override.
+    fn lens_names(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
