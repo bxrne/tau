@@ -27,8 +27,10 @@
 //! has no dependency on `serde` and callers supply their own wire format
 //! (e.g. plain integers, base64, JSON fragments).
 
+use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use crc32fast::Hasher;
 
+use crate::libtau::crypto;
 use crate::libtau::model::{Layer, LayerId, Tau, Timestamp};
 use crate::libtau::storage::Store;
 use std::fs::{File, OpenOptions};
@@ -141,22 +143,29 @@ impl<V: Codec> WalEntry<V> {
 pub struct Wal {
     writer: BufWriter<File>,
     path: std::path::PathBuf,
+    key: Option<[u8; 32]>,
 }
 
 impl Wal {
-    /// Open (or create) the WAL at `path`.
+    /// Open (or create) the WAL at `path`. Pass `Some(key)` to enable AES-256-GCM
+    /// encryption of every entry. An existing unencrypted WAL remains readable when
+    /// `key` is `None`; encrypted entries require the same key used to write them.
     #[instrument(fields(path = %path.as_ref().display()))]
-    pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
+    pub fn open(path: impl AsRef<Path>, key: Option<[u8; 32]>) -> io::Result<Self> {
         let path = path.as_ref().to_path_buf();
         debug!("opening WAL file");
         let file = OpenOptions::new().create(true).append(true).open(&path)?;
         Ok(Self {
             writer: BufWriter::new(file),
             path,
+            key,
         })
     }
 
-    /// Write one entry to disk with checksum, flush before returning.
+    /// Write one entry to disk, flush before returning.
+    ///
+    /// If a key is configured, the serialised entry is encrypted with AES-256-GCM
+    /// (random 12-byte nonce per entry) and stored base64-encoded with an `E:` prefix.
     pub fn append<V: Codec>(&mut self, entry: &WalEntry<V>) -> io::Result<()> {
         debug!(
             lens = %entry.lens,
@@ -164,14 +173,21 @@ impl Wal {
             tau_count = entry.taus.len(),
             "writing WAL entry"
         );
-        writeln!(self.writer, "{}", entry.serialise())?;
+        if let Some(key) = &self.key {
+            let plaintext = entry.serialise();
+            let blob = crypto::encrypt(key, plaintext.as_bytes());
+            writeln!(self.writer, "E:{}", B64.encode(&blob))?;
+        } else {
+            writeln!(self.writer, "{}", entry.serialise())?;
+        }
         self.writer.flush()?;
         self.writer.get_ref().sync_data()
     }
 
     /// Replay every persisted entry into `store` in write order.
     ///
-    /// Corrupt entries (checksum mismatch) are skipped with a warning.
+    /// Lines prefixed with `E:` are base64-decoded and decrypted before parsing.
+    /// Corrupt or undecryptable entries are skipped with a warning.
     /// Call this once during startup, before accepting new writes.
     #[instrument(skip(self, store), fields(path = %self.path.display()))]
     pub fn replay<V>(&self, store: &mut dyn Store<V>) -> io::Result<()>
@@ -191,7 +207,43 @@ impl Wal {
                 continue;
             }
 
-            if let Some(entry) = WalEntry::<V>::deserialise(line) {
+            let plaintext: String = if let Some(rest) = line.strip_prefix("E:") {
+                let key = match &self.key {
+                    Some(k) => k,
+                    None => {
+                        warn!("encrypted WAL entry found but no key configured, skipping");
+                        skipped += 1;
+                        continue;
+                    }
+                };
+                let blob = match B64.decode(rest) {
+                    Ok(b) => b,
+                    Err(_) => {
+                        warn!("WAL entry base64 decode failed, skipping");
+                        skipped += 1;
+                        continue;
+                    }
+                };
+                match crypto::decrypt(key, &blob) {
+                    Ok(bytes) => match String::from_utf8(bytes) {
+                        Ok(s) => s,
+                        Err(_) => {
+                            warn!("WAL entry decrypted but not valid UTF-8, skipping");
+                            skipped += 1;
+                            continue;
+                        }
+                    },
+                    Err(_) => {
+                        warn!("WAL entry decryption failed, skipping");
+                        skipped += 1;
+                        continue;
+                    }
+                }
+            } else {
+                line.to_string()
+            };
+
+            if let Some(entry) = WalEntry::<V>::deserialise(&plaintext) {
                 debug!(
                     lens = %entry.lens,
                     layer_id = entry.layer_id,
@@ -350,7 +402,7 @@ mod tests {
     fn wal_appends_and_replays_into_store() {
         let tmp = NamedTempFile::new().unwrap();
         {
-            let mut wal = Wal::open(tmp.path()).unwrap();
+            let mut wal = Wal::open(tmp.path(), None).unwrap();
             let entry = WalEntry::<i64> {
                 layer_id: 1,
                 lens: "x".to_string(),
@@ -360,8 +412,10 @@ mod tests {
         }
 
         let mut store: InMemory<i64> = InMemory::new();
-        let wal = Wal::open(tmp.path()).unwrap();
-        wal.replay(&mut store).unwrap();
+        Wal::open(tmp.path(), None)
+            .unwrap()
+            .replay(&mut store)
+            .unwrap();
 
         assert_eq!(store.at("x", 5), Some(42));
         assert_eq!(store.at("x", 10), None);
@@ -371,7 +425,7 @@ mod tests {
     fn wal_replays_multiple_entries_in_order() {
         let tmp = NamedTempFile::new().unwrap();
         {
-            let mut wal = Wal::open(tmp.path()).unwrap();
+            let mut wal = Wal::open(tmp.path(), None).unwrap();
             wal.append(&WalEntry::<i64> {
                 layer_id: 1,
                 lens: "s".to_string(),
@@ -387,7 +441,10 @@ mod tests {
         }
 
         let mut store: InMemory<i64> = InMemory::new();
-        Wal::open(tmp.path()).unwrap().replay(&mut store).unwrap();
+        Wal::open(tmp.path(), None)
+            .unwrap()
+            .replay(&mut store)
+            .unwrap();
 
         // newest layer (id=2) must shadow the earlier one
         assert_eq!(store.at("s", 3), Some(1));
@@ -399,7 +456,7 @@ mod tests {
     fn wal_replays_multiple_lenses() {
         let tmp = NamedTempFile::new().unwrap();
         {
-            let mut wal = Wal::open(tmp.path()).unwrap();
+            let mut wal = Wal::open(tmp.path(), None).unwrap();
             wal.append(&WalEntry::<i64> {
                 layer_id: 1,
                 lens: "a".to_string(),
@@ -415,7 +472,10 @@ mod tests {
         }
 
         let mut store: InMemory<i64> = InMemory::new();
-        Wal::open(tmp.path()).unwrap().replay(&mut store).unwrap();
+        Wal::open(tmp.path(), None)
+            .unwrap()
+            .replay(&mut store)
+            .unwrap();
 
         assert_eq!(store.at("a", 5), Some(10));
         assert_eq!(store.at("b", 5), Some(20));
@@ -437,7 +497,10 @@ mod tests {
         }
 
         let mut store: InMemory<i64> = InMemory::new();
-        Wal::open(tmp.path()).unwrap().replay(&mut store).unwrap();
+        Wal::open(tmp.path(), None)
+            .unwrap()
+            .replay(&mut store)
+            .unwrap();
 
         assert_eq!(store.at("x", 5), Some(42));
         assert_eq!(store.at("x", 15), Some(99));
@@ -448,7 +511,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("new.wal");
         assert!(!path.exists());
-        Wal::open(&path).unwrap();
+        Wal::open(&path, None).unwrap();
         assert!(path.exists());
     }
 
@@ -456,7 +519,10 @@ mod tests {
     fn wal_replay_on_empty_file_is_a_noop() {
         let tmp = NamedTempFile::new().unwrap();
         let mut store: InMemory<i64> = InMemory::new();
-        Wal::open(tmp.path()).unwrap().replay(&mut store).unwrap();
+        Wal::open(tmp.path(), None)
+            .unwrap()
+            .replay(&mut store)
+            .unwrap();
         assert_eq!(store.at("anything", 0), None);
     }
 
@@ -477,10 +543,67 @@ mod tests {
         }
 
         let mut store: InMemory<i64> = InMemory::new();
-        Wal::open(tmp.path()).unwrap().replay(&mut store).unwrap();
+        Wal::open(tmp.path(), None)
+            .unwrap()
+            .replay(&mut store)
+            .unwrap();
 
         // First and third entries replayed, second skipped
         assert_eq!(store.at("x", 5), Some(42));
         assert_eq!(store.at("x", 25), Some(7));
+    }
+
+    #[test]
+    fn wal_encrypted_roundtrip() {
+        let key = [0x42u8; 32];
+        let tmp = NamedTempFile::new().unwrap();
+        {
+            let mut wal = Wal::open(tmp.path(), Some(key)).unwrap();
+            wal.append(&WalEntry::<i64> {
+                layer_id: 1,
+                lens: "secret".to_string(),
+                taus: vec![(0, 10, 99)],
+            })
+            .unwrap();
+        }
+
+        // File must not contain the plaintext value
+        let raw = std::fs::read_to_string(tmp.path()).unwrap();
+        assert!(!raw.contains("99"), "plaintext value leaked into WAL file");
+        assert!(raw.starts_with("E:"), "encrypted line must start with E:");
+
+        // Replay with correct key succeeds
+        let mut store: InMemory<i64> = InMemory::new();
+        Wal::open(tmp.path(), Some(key))
+            .unwrap()
+            .replay(&mut store)
+            .unwrap();
+        assert_eq!(store.at("secret", 5), Some(99));
+    }
+
+    #[test]
+    fn wal_encrypted_replay_without_key_skips_entries() {
+        let key = [0x11u8; 32];
+        let tmp = NamedTempFile::new().unwrap();
+        {
+            let mut wal = Wal::open(tmp.path(), Some(key)).unwrap();
+            wal.append(&WalEntry::<i64> {
+                layer_id: 1,
+                lens: "x".to_string(),
+                taus: vec![(0, 10, 7)],
+            })
+            .unwrap();
+        }
+
+        let mut store: InMemory<i64> = InMemory::new();
+        Wal::open(tmp.path(), None)
+            .unwrap()
+            .replay(&mut store)
+            .unwrap();
+        assert_eq!(
+            store.at("x", 5),
+            None,
+            "entries must be skipped without key"
+        );
     }
 }

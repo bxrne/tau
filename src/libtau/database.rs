@@ -61,14 +61,19 @@ where
     /// Open an existing WAL, replay it into `store`, then return a live
     /// `Database` with durability enabled.
     ///
+    /// Pass `Some(key)` to enable AES-256-GCM encryption of WAL entries.
     /// This is the standard startup path when persistence is required.
-    #[instrument(skip(store, path), fields(path = %path.as_ref().display()))]
-    pub fn open(mut store: impl Store<V> + 'static, path: impl AsRef<Path>) -> io::Result<Self>
+    #[instrument(skip(store, path, key), fields(path = %path.as_ref().display()))]
+    pub fn open(
+        mut store: impl Store<V> + 'static,
+        path: impl AsRef<Path>,
+        key: Option<[u8; 32]>,
+    ) -> io::Result<Self>
     where
         V: Codec,
     {
         info!("opening WAL and replaying into store");
-        let wal = Wal::open(path)?;
+        let wal = Wal::open(path, key)?;
         wal.replay(&mut store)?;
         info!("replay complete");
         Ok(Self::with_wal(store, wal))
@@ -289,8 +294,8 @@ mod tests {
         let wal_path = tmp_dir.path().join("test.wal");
 
         // Create disk store + WAL
-        let disk_store = Disk::<i64>::create(&disk_path).unwrap();
-        let wal = Wal::open(&wal_path).unwrap();
+        let disk_store = Disk::<i64>::create(&disk_path, None).unwrap();
+        let wal = Wal::open(&wal_path, None).unwrap();
         let db = Database::with_wal(disk_store, wal);
 
         let sensor = db.lens("temp");

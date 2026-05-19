@@ -10,13 +10,15 @@
 
 use crc32fast::Hasher;
 
+use crate::libtau::crypto;
 use crate::libtau::model::{Layer, LayerId, Tau};
 use crate::libtau::storage::store::{COMPACT_THRESHOLD, Store, compact_layers};
 use std::collections::BTreeMap;
-use std::io::{self, BufReader, Read, Write};
+use std::io::{self, BufReader, Cursor, Read, Write};
 use std::path::Path;
 
 const MAGIC: &[u8] = b"TAU";
+const MAGIC_ENC: &[u8] = b"TAUE";
 const VERSION: u8 = 1;
 const HEADER_OVERHEAD: usize = MAGIC.len() + 1; // + version
 
@@ -139,20 +141,50 @@ pub struct Disk<V> {
     path: std::path::PathBuf,
     lenses: BTreeMap<String, Vec<Layer<V>>>,
     compact_threshold: usize,
+    key: Option<[u8; 32]>,
 }
 
 impl<V: Clone + Codec> Disk<V> {
-    /// Open existing store or create new one.
-    pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
+    /// Open existing store or create new one at `path`.
+    ///
+    /// Pass `Some(key)` to enable AES-256-GCM encryption at rest. If the file
+    /// starts with the `TAUE` magic it is decrypted before parsing; an
+    /// unencrypted `TAU` file is always readable regardless of `key`.
+    pub fn open(path: impl AsRef<Path>, key: Option<[u8; 32]>) -> io::Result<Self> {
         let path = path.as_ref().to_path_buf();
         let mut lenses: BTreeMap<String, Vec<Layer<V>>> = BTreeMap::new();
 
         if path.exists() {
             let file = std::fs::File::open(&path)?;
-            let mut reader = BufReader::new(file);
+            let mut file_reader = BufReader::new(file);
 
-            // Read and verify header
-            let mut header = [0u8; HEADER_OVERHEAD + 4]; // + checksum
+            // Peek at the first 4 bytes to detect encryption.
+            let mut magic4 = [0u8; 4];
+            file_reader.read_exact(&mut magic4)?;
+
+            let mut reader: Box<dyn Read> = if magic4 == MAGIC_ENC {
+                // Encrypted format: decrypt the remainder, wrap in a Cursor.
+                let enc_key = key.ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "disk file is encrypted but no TAU_ENCRYPTION_KEY is set",
+                    )
+                })?;
+                let mut blob = Vec::new();
+                file_reader.read_to_end(&mut blob)?;
+                let plaintext = crypto::decrypt(&enc_key, &blob)?;
+                Box::new(Cursor::new(plaintext))
+            } else {
+                // Unencrypted format: the 4 bytes we already read are TAU + version.
+                // Push them back via a chain reader.
+                Box::new(std::io::Read::chain(
+                    Cursor::new(magic4.to_vec()),
+                    file_reader,
+                ))
+            };
+
+            // Read and verify the standard 8-byte header (TAU + version + CRC32).
+            let mut header = [0u8; HEADER_OVERHEAD + 4];
             reader.read_exact(&mut header)?;
 
             let (magic, version, stored_checksum) = (
@@ -177,8 +209,7 @@ impl<V: Clone + Codec> Disk<V> {
                 ));
             }
 
-            let header_without_checksum = &header[0..HEADER_OVERHEAD];
-            let computed_checksum = checksum(header_without_checksum);
+            let computed_checksum = checksum(&header[0..HEADER_OVERHEAD]);
             if stored_checksum != computed_checksum {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -208,45 +239,53 @@ impl<V: Clone + Codec> Disk<V> {
             path,
             lenses,
             compact_threshold: COMPACT_THRESHOLD,
+            key,
         })
     }
 
-    /// Create a new store at `path`.
-    pub fn create(path: impl AsRef<Path>) -> io::Result<Self> {
+    /// Create a new store at `path`. Pass `Some(key)` to encrypt at rest.
+    pub fn create(path: impl AsRef<Path>, key: Option<[u8; 32]>) -> io::Result<Self> {
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
 
+        let mut plain_header = Vec::new();
+        plain_header.extend_from_slice(MAGIC);
+        plain_header.push(VERSION);
+        let hck = checksum(&plain_header);
+        plain_header.extend_from_slice(&hck.to_le_bytes());
+
         let mut file = std::fs::File::create(&path)?;
-        let mut header = Vec::new();
-        header.extend_from_slice(MAGIC);
-        header.push(VERSION);
-        let header_checksum = checksum(&header);
-        header.extend_from_slice(&header_checksum.to_le_bytes());
-        file.write_all(&header)?;
+        if let Some(ref enc_key) = key {
+            let blob = crypto::encrypt(enc_key, &plain_header);
+            file.write_all(MAGIC_ENC)?;
+            file.write_all(&blob)?;
+        } else {
+            file.write_all(&plain_header)?;
+        }
         file.sync_data()?;
 
         Ok(Self {
             path,
             lenses: BTreeMap::new(),
             compact_threshold: COMPACT_THRESHOLD,
+            key,
         })
     }
 
     /// Flush all in-memory state to disk.
     pub fn flush(&self) -> io::Result<()> {
-        let mut file = std::fs::File::create(&self.path)?;
+        // Build the standard unencrypted payload in memory.
+        let mut payload = Vec::new();
 
-        // Write header
         let mut header = Vec::new();
         header.extend_from_slice(MAGIC);
         header.push(VERSION);
-        let header_checksum = checksum(&header);
-        header.extend_from_slice(&header_checksum.to_le_bytes());
-        file.write_all(&header)?;
+        let hck = checksum(&header);
+        header.extend_from_slice(&hck.to_le_bytes());
+        payload.extend_from_slice(&header);
 
-        // Write entries
         for (lens_name, layers) in &self.lenses {
             for layer in layers {
                 let entry = DiskEntry {
@@ -258,10 +297,18 @@ impl<V: Clone + Codec> Disk<V> {
                         .map(|t| Tau::new(t.start, t.end, t.value.clone()))
                         .collect(),
                 };
-                DiskEntry::write(&entry, &mut file)?;
+                DiskEntry::write(&entry, &mut payload)?;
             }
         }
 
+        let mut file = std::fs::File::create(&self.path)?;
+        if let Some(ref enc_key) = self.key {
+            let blob = crypto::encrypt(enc_key, &payload);
+            file.write_all(MAGIC_ENC)?;
+            file.write_all(&blob)?;
+        } else {
+            file.write_all(&payload)?;
+        }
         file.sync_data()?;
         Ok(())
     }
@@ -297,7 +344,7 @@ mod tests {
     #[test]
     fn create_and_append() {
         let tmp = NamedTempFile::new().unwrap();
-        let mut store = Disk::create(tmp.path()).unwrap();
+        let mut store = Disk::create(tmp.path(), None).unwrap();
         store.append("x", layer(1, &[(0, 10, 42)]));
         assert_eq!(store.at("x", 5), Some(42));
         assert_eq!(store.at("x", 10), None);
@@ -307,12 +354,12 @@ mod tests {
     fn open_replays_data() {
         let tmp = NamedTempFile::new().unwrap();
         {
-            let mut store = Disk::create(tmp.path()).unwrap();
+            let mut store = Disk::create(tmp.path(), None).unwrap();
             store.append("x", layer(1, &[(0, 10, 42)]));
             store.flush().unwrap();
         }
 
-        let store = Disk::open(tmp.path()).unwrap();
+        let store = Disk::open(tmp.path(), None).unwrap();
         assert_eq!(store.at("x", 5), Some(42));
     }
 
@@ -320,13 +367,13 @@ mod tests {
     fn multiple_layers_shadow() {
         let tmp = NamedTempFile::new().unwrap();
         {
-            let mut store = Disk::create(tmp.path()).unwrap();
+            let mut store = Disk::create(tmp.path(), None).unwrap();
             store.append("s", layer(1, &[(0, 20, 1)]));
             store.append("s", layer(2, &[(5, 15, 2)]));
             store.flush().unwrap();
         }
 
-        let store = Disk::open(tmp.path()).unwrap();
+        let store = Disk::open(tmp.path(), None).unwrap();
         assert_eq!(store.at("s", 3), Some(1));
         assert_eq!(store.at("s", 7), Some(2));
         assert_eq!(store.at("s", 17), Some(1));
@@ -336,13 +383,13 @@ mod tests {
     fn multiple_lenses_independent() {
         let tmp = NamedTempFile::new().unwrap();
         {
-            let mut store = Disk::create(tmp.path()).unwrap();
+            let mut store = Disk::create(tmp.path(), None).unwrap();
             store.append("a", layer(1, &[(0, 10, 1)]));
             store.append("b", layer(1, &[(0, 10, 2)]));
             store.flush().unwrap();
         }
 
-        let store = Disk::open(tmp.path()).unwrap();
+        let store = Disk::open(tmp.path(), None).unwrap();
         assert_eq!(store.at("a", 5), Some(1));
         assert_eq!(store.at("b", 5), Some(2));
     }
@@ -352,7 +399,43 @@ mod tests {
         let tmp = NamedTempFile::new().unwrap();
         // Write garbage header
         std::fs::write(tmp.path(), b"GARB").unwrap();
-        let result = Disk::<i32>::open(tmp.path());
+        let result = Disk::<i32>::open(tmp.path(), None);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn encrypted_create_and_flush_roundtrip() {
+        let key = [0x77u8; 32];
+        let tmp = NamedTempFile::new().unwrap();
+        {
+            let mut store = Disk::create(tmp.path(), Some(key)).unwrap();
+            store.append("x", layer(1, &[(0, 10, 42)]));
+            store.flush().unwrap();
+        }
+
+        // Raw file must start with TAUE magic
+        let raw = std::fs::read(tmp.path()).unwrap();
+        assert_eq!(&raw[..4], b"TAUE", "encrypted file must start with TAUE");
+
+        // Re-open with key — data must be intact
+        let store = Disk::open(tmp.path(), Some(key)).unwrap();
+        assert_eq!(store.at("x", 5), Some(42));
+    }
+
+    #[test]
+    fn encrypted_open_without_key_returns_error() {
+        let key = [0x88u8; 32];
+        let tmp = NamedTempFile::new().unwrap();
+        {
+            let mut store = Disk::create(tmp.path(), Some(key)).unwrap();
+            store.append("x", layer(1, &[(0, 10, 1)]));
+            store.flush().unwrap();
+        }
+
+        let result = Disk::<i32>::open(tmp.path(), None);
+        assert!(
+            result.is_err(),
+            "opening encrypted file without key must fail"
+        );
     }
 }

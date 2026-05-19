@@ -93,9 +93,13 @@ impl DbState {
         }
     }
 
-    fn with_wal(path: impl AsRef<Path>, compact_threshold: usize) -> io::Result<Self> {
+    fn with_wal(
+        path: impl AsRef<Path>,
+        compact_threshold: usize,
+        key: Option<[u8; 32]>,
+    ) -> io::Result<Self> {
         let store = InMemory::<Value>::with_threshold(compact_threshold);
-        let db = Database::open(store, path).map_err(io::Error::other)?;
+        let db = Database::open(store, path, key).map_err(io::Error::other)?;
         Ok(Self {
             db,
             base_types: HashMap::new(),
@@ -136,17 +140,18 @@ impl Executor {
     }
 
     /// Open a WAL-backed executor with the default compaction threshold.
-    pub fn with_wal(path: impl AsRef<Path>) -> io::Result<Self> {
-        Self::with_wal_threshold(path, crate::libtau::storage::COMPACT_THRESHOLD)
+    pub fn with_wal(path: impl AsRef<Path>, key: Option<[u8; 32]>) -> io::Result<Self> {
+        Self::with_wal_threshold(path, crate::libtau::storage::COMPACT_THRESHOLD, key)
     }
 
     /// Open a WAL-backed executor with a custom compaction threshold.
     pub fn with_wal_threshold(
         path: impl AsRef<Path>,
         compact_threshold: usize,
+        key: Option<[u8; 32]>,
     ) -> io::Result<Self> {
         let mut executor = Self::with_threshold(compact_threshold);
-        let db_state = DbState::with_wal(path, compact_threshold)?;
+        let db_state = DbState::with_wal(path, compact_threshold, key)?;
         executor.databases.insert("default".to_string(), db_state);
         executor.active = Some("default".to_string());
         Ok(executor)
