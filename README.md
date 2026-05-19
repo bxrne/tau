@@ -23,14 +23,16 @@ Connect with any TCP client:
 ← OK
 → CREATE LENS temp float
 ← OK
-→ APPEND LENS temp 0 100 18.5
+→ APPEND LENS temp 0 50 18.5, 50 100 21.0
 ← OK
-→ AT LENS temp 50
+→ AT LENS temp 25
 ← VAL f18.5
 → RANGE LENS temp 0 100
-← RANGE 1; 0:100:f18.5
+← RANGE 2; 0:50:f18.5; 50:100:f21
 → REDUCE LENS temp 0 100 USING avg
-← VAL f18.5
+← VAL f19.75
+→ SHOW LENSES
+← NAMES 1; temp
 ```
 
 ---
@@ -55,9 +57,12 @@ See [`src/libtau/`](src/libtau/README.md) for design decisions and module layout
 CREATE DATABASE <name>                              -- first created becomes active
 DROP DATABASE <name>
 USE DATABASE <name>
+SHOW DATABASES                                      -- list all database names
+SHOW LENSES                                         -- list all lens names in active database
 
 CREATE LENS <name> <type>                           -- int | float | str | bool | bytes
-APPEND LENS <name> <start> <end> <value>
+APPEND LENS <name> <s> <e> <v> [, <s> <e> <v> …]  -- single or bulk tau write
+COPY   LENS <name> FROM "<path>"                    -- ingest from CSV (start,end,value)
 DERIVE LENS <name> AS <expr>
 AT     LENS <name> <timestamp>
 RANGE  LENS <name> <start> <end> [WHERE <expr>]
@@ -164,7 +169,17 @@ Environment:
   TAU_ENCRYPTION_KEY   64 hex chars — enables AES-256-GCM encryption at rest
 ```
 
-Wire format: one statement per line in, one response per line out. Values encode as `i<int>`, `f<float>`, `s<percent-escaped>`, `b<0|1>`, `n` (null).
+Wire format: one statement per line in, one response per line out.
+
+| Response | Meaning |
+|----------|---------|
+| `OK` | DDL or write succeeded |
+| `VAL <v>` | Point lookup value; `VAL NIL` when no tau covers the timestamp |
+| `RANGE <n>; <s>:<e>:<v> …` | Range scan, `n` segments |
+| `NAMES <n>; name …` | Name list from `SHOW DATABASES` / `SHOW LENSES` |
+| `ERR <message>` | Parse or executor error |
+
+Values encode as `i<int>`, `f<float>`, `s<percent-escaped>`, `b<0|1>`, `n` (null).
 
 See [`src/bin/tau/`](src/bin/tau/README.md) for concurrency model, connection handling, and known limitations.
 
@@ -194,15 +209,20 @@ let mut e = Executor::new();
 for q in [
     "CREATE DATABASE main",
     "CREATE LENS celsius float",
-    "APPEND LENS celsius 0 100 18.0",
+    "APPEND LENS celsius 0 50 18.0, 50 100 22.0",   // bulk append — one layer
     "DERIVE LENS f AS celsius * 9.0 / 5.0 + 32.0",
     "DERIVE LENS smooth AS avg(celsius, -20, 0)",
 ] {
     e.exec(&parse(q).unwrap().1).unwrap();
 }
 
-let (_, stmt) = parse("AT LENS f 50").unwrap();
+let (_, stmt) = parse("AT LENS f 25").unwrap();
 assert_eq!(e.exec(&stmt).unwrap(), Output::Value(Some(Value::Float(64.4))));
+
+// Introspect what lenses exist.
+let (_, stmt) = parse("SHOW LENSES").unwrap();
+let Output::Names(names) = e.exec(&stmt).unwrap() else { panic!() };
+assert!(names.contains(&"celsius".to_string()));
 ```
 
 ---
@@ -222,4 +242,4 @@ Toolchain is pinned to Rust **1.94.1** (edition 2024) via `rust-toolchain.toml`.
 
 ## Roadmap
 
-See [`ROADMAP.md`](ROADMAP.md) for what's done and what remains before 1.0. The major open items are schema persistence across restarts, WAL log rotation, connection limits, and end-to-end integration tests.
+See [`ROADMAP.md`](ROADMAP.md) for what's done and what remains before 1.0. The major open items are connection limits, graceful shutdown, end-to-end integration tests, and the operational tooling suite.

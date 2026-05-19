@@ -30,12 +30,14 @@ pub fn parse(input: &str) -> IResult<&str, Stmt> {
     let (input, s) = alt((
         stmt_create,
         stmt_append,
+        stmt_copy,
         stmt_derive,
         stmt_at,
         stmt_range,
         stmt_reduce,
         stmt_drop,
         stmt_use,
+        stmt_show,
     ))
     .parse(input)?;
     let (input, _) = multispace0(input)?;
@@ -62,25 +64,53 @@ fn stmt_create_database(i: &str) -> IResult<&str, Stmt> {
     Ok((i, Stmt::CreateDatabase { name }))
 }
 
-fn stmt_append(i: &str) -> IResult<&str, Stmt> {
-    let (i, _) = kw("APPEND").parse(i)?;
-    let (i, _) = kw("LENS").parse(i)?;
-    let (i, name) = ident(i)?;
-    let (i, _) = multispace1(i)?;
+/// Parse a single `start end value` triple (no comma prefix).
+fn tau_triple(i: &str) -> IResult<&str, (i64, i64, Literal)> {
     let (i, start) = integer(i)?;
     let (i, _) = multispace1(i)?;
     let (i, end) = integer(i)?;
     let (i, _) = multispace1(i)?;
     let (i, value) = literal(i)?;
-    Ok((
-        i,
-        Stmt::Append {
-            name,
-            start,
-            end,
-            value,
-        },
+    Ok((i, (start, end, value)))
+}
+
+fn stmt_append(i: &str) -> IResult<&str, Stmt> {
+    let (i, _) = kw("APPEND").parse(i)?;
+    let (i, _) = kw("LENS").parse(i)?;
+    let (i, name) = ident(i)?;
+    let (i, _) = multispace1(i)?;
+    let (i, first) = tau_triple(i)?;
+    // Optional additional taus: ", start end value"
+    let (i, rest) = many0(preceded(
+        delimited(multispace0, char(','), multispace0),
+        tau_triple,
     ))
+    .parse(i)?;
+    let mut taus = vec![first];
+    taus.extend(rest);
+    Ok((i, Stmt::Append { name, taus }))
+}
+
+/// `COPY LENS <name> FROM "<path>"` — bulk-ingest from a CSV file.
+fn stmt_copy(i: &str) -> IResult<&str, Stmt> {
+    let (i, _) = kw("COPY").parse(i)?;
+    let (i, _) = kw("LENS").parse(i)?;
+    let (i, name) = ident(i)?;
+    let (i, _) = multispace1(i)?;
+    let (i, _) = tag_no_case("FROM")(i)?;
+    let (i, _) = multispace1(i)?;
+    let (i, path) = string_lit(i)?;
+    Ok((i, Stmt::Copy { name, path }))
+}
+
+/// `SHOW DATABASES` or `SHOW LENSES` — introspection queries.
+fn stmt_show(i: &str) -> IResult<&str, Stmt> {
+    let (i, _) = kw("SHOW").parse(i)?;
+    alt((
+        value(Stmt::ShowDatabases, tag_no_case("DATABASES")),
+        value(Stmt::ShowLenses, tag_no_case("LENSES")),
+    ))
+    .parse(i)
 }
 
 fn stmt_derive(i: &str) -> IResult<&str, Stmt> {
@@ -497,9 +527,7 @@ mod tests {
             parsed("APPEND LENS test 0 10 42"),
             Stmt::Append {
                 name: "test".into(),
-                start: 0,
-                end: 10,
-                value: Literal::Int(42),
+                taus: vec![(0, 10, Literal::Int(42))],
             }
         );
     }
@@ -510,9 +538,7 @@ mod tests {
             parsed("APPEND LENS temp 0 10 18.5"),
             Stmt::Append {
                 name: "temp".into(),
-                start: 0,
-                end: 10,
-                value: Literal::Float(18.5),
+                taus: vec![(0, 10, Literal::Float(18.5))],
             }
         );
     }
@@ -523,9 +549,7 @@ mod tests {
             parsed("APPEND LENS msg 0 10 \"hello world\""),
             Stmt::Append {
                 name: "msg".into(),
-                start: 0,
-                end: 10,
-                value: Literal::Str("hello world".into()),
+                taus: vec![(0, 10, Literal::Str("hello world".into()))],
             }
         );
     }
@@ -536,18 +560,14 @@ mod tests {
             parsed("APPEND LENS f 0 5 true"),
             Stmt::Append {
                 name: "f".into(),
-                start: 0,
-                end: 5,
-                value: Literal::Bool(true),
+                taus: vec![(0, 5, Literal::Bool(true))],
             }
         );
         assert_eq!(
             parsed("APPEND LENS f 0 5 null"),
             Stmt::Append {
                 name: "f".into(),
-                start: 0,
-                end: 5,
-                value: Literal::Null,
+                taus: vec![(0, 5, Literal::Null)],
             }
         );
     }
@@ -558,11 +578,51 @@ mod tests {
             parsed("APPEND LENS x -10 -5 -1"),
             Stmt::Append {
                 name: "x".into(),
-                start: -10,
-                end: -5,
-                value: Literal::Int(-1),
+                taus: vec![(-10, -5, Literal::Int(-1))],
             }
         );
+    }
+
+    #[test]
+    fn append_lens_multi_tau() {
+        assert_eq!(
+            parsed("APPEND LENS x 0 5 1, 5 10 2, 10 15 3"),
+            Stmt::Append {
+                name: "x".into(),
+                taus: vec![
+                    (0, 5, Literal::Int(1)),
+                    (5, 10, Literal::Int(2)),
+                    (10, 15, Literal::Int(3)),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn copy_lens_parses() {
+        assert_eq!(
+            parsed("COPY LENS temp FROM \"/data/temps.csv\""),
+            Stmt::Copy {
+                name: "temp".into(),
+                path: "/data/temps.csv".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn show_databases_parses() {
+        assert_eq!(parsed("SHOW DATABASES"), Stmt::ShowDatabases);
+    }
+
+    #[test]
+    fn show_lenses_parses() {
+        assert_eq!(parsed("SHOW LENSES"), Stmt::ShowLenses);
+    }
+
+    #[test]
+    fn show_is_case_insensitive() {
+        assert_eq!(parsed("show databases"), Stmt::ShowDatabases);
+        assert_eq!(parsed("SHOW lenses"), Stmt::ShowLenses);
     }
 
     #[test]

@@ -13,17 +13,20 @@
 //!   does not match the declared type is rejected with [`ExecError::TypeMismatch`].
 //! * *Derived* lenses are pure expressions over other lenses.  Their result
 //!   type is whatever the expression yields, which may differ from the
-//!   underlying base type (e.g. a `bool` derived from an `int` lens).
+//!   underlying base type (e.g. a `bool` derived from an `int` lens).  A
+//!   cycle in the derivation graph is rejected at `DERIVE` time with
+//!   [`ExecError::CycleDetected`].
 //! * Every lookup walks the AST live — derived lenses never cache.
 //!
 //! # Statement semantics
 //!
-//! DDL (`CREATE`/`DROP`/`USE`/`APPEND`/`DERIVE`) returns [`Output::Empty`].
+//! DDL (`CREATE`/`DROP`/`USE`/`APPEND`/`COPY`/`DERIVE`) returns [`Output::Empty`].
 //! `AT` returns [`Output::Value`] (`None` when no tau covers `t`).
 //! `RANGE` returns [`Output::Range`] — a vec of `(start, end, value)` segments.
 //! `REDUCE` returns [`Output::Value`] — a single scalar aggregate.
+//! `SHOW DATABASES` / `SHOW LENSES` return [`Output::Names`] — a sorted name list.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::Path;
 
@@ -42,6 +45,8 @@ pub enum Output {
     Value(Option<Value>),
     /// Sequence of `(start, end, value)` segments covering the queried range.
     Range(Vec<(Timestamp, Timestamp, Value)>),
+    /// List of names returned by `SHOW DATABASES` / `SHOW LENSES`.
+    Names(Vec<String>),
 }
 
 /// All errors the executor can produce.
@@ -69,6 +74,8 @@ pub enum ExecError {
     InvalidRange,
     /// A storage I/O error (WAL write failure, disk error, etc.).
     Io(String),
+    /// `DERIVE LENS` would introduce a reference cycle.
+    CycleDetected(String),
 }
 
 /// Per-database executor state.
@@ -225,6 +232,8 @@ impl Executor {
                 end,
                 func,
             } => self.reduce_lens(name, *start, *end, *func),
+            Stmt::ShowDatabases => self.show_databases(),
+            Stmt::ShowLenses => self.show_lenses(),
             _ => Err(ExecError::InvalidExpr(
                 "exec_read called on a mutating statement".into(),
             )),
@@ -238,12 +247,14 @@ impl Executor {
             Stmt::DropDatabase { name } => self.drop_database(name),
             Stmt::UseDatabase { name } => self.use_database(name),
             Stmt::Create { name, ty } => self.create_lens(name, ty.clone()),
-            Stmt::Append {
-                name,
-                start,
-                end,
-                value,
-            } => self.append_lens(name, *start, *end, value.clone().into()),
+            Stmt::Append { name, taus } => {
+                let taus: Vec<(Timestamp, Timestamp, Value)> = taus
+                    .iter()
+                    .map(|(s, e, v)| (*s, *e, v.clone().into()))
+                    .collect();
+                self.append_lens(name, taus)
+            }
+            Stmt::Copy { name, path } => self.copy_lens(name, path),
             Stmt::Derive { name, expr } => self.derive_lens(name, expr.clone()),
             Stmt::At { name, t } => self.at_lens(name, *t),
             Stmt::Range {
@@ -253,6 +264,8 @@ impl Executor {
                 filter,
             } => self.range_lens(name, *start, *end, filter.as_ref()),
             Stmt::Drop { name } => self.drop_lens(name),
+            Stmt::ShowDatabases => self.show_databases(),
+            Stmt::ShowLenses => self.show_lenses(),
             Stmt::Reduce {
                 name,
                 start,
@@ -314,37 +327,110 @@ impl Executor {
     fn append_lens(
         &mut self,
         name: &str,
-        start: Timestamp,
-        end: Timestamp,
-        value: Value,
+        taus: Vec<(Timestamp, Timestamp, Value)>,
     ) -> Result<Output, ExecError> {
-        if start >= end {
-            return Err(ExecError::InvalidRange);
+        if taus.is_empty() {
+            return Ok(Output::Empty);
         }
+        // Validate ranges and types before touching the store.
         let state = self.active_mut()?;
         let ty = state
             .base_types
             .get(name)
             .cloned()
             .ok_or_else(|| ExecError::UnknownLens(name.into()))?;
-        // Null is type-compatible with any declared type.
-        if let Some(got) = value.ty()
-            && got != ty
-        {
-            return Err(ExecError::TypeMismatch {
-                lens: name.into(),
-                expected: ty,
-                got: value.type_name().into(),
-            });
+        for (start, end, value) in &taus {
+            if start >= end {
+                return Err(ExecError::InvalidRange);
+            }
+            if let Some(got) = value.ty()
+                && got != ty
+            {
+                return Err(ExecError::TypeMismatch {
+                    lens: name.into(),
+                    expected: ty.clone(),
+                    got: value.type_name().into(),
+                });
+            }
         }
         let id = state.next_layer_id;
         state.next_layer_id += 1;
-        let layer = Layer::new(id, vec![Tau::new(start, end, value)]);
+        let layer = Layer::new(
+            id,
+            taus.into_iter()
+                .map(|(s, e, v)| Tau::new(s, e, v))
+                .collect(),
+        );
         state
             .db
             .append(&state.db.lens(name), layer)
             .map_err(|e| ExecError::Io(e.to_string()))?;
         Ok(Output::Empty)
+    }
+
+    fn copy_lens(&mut self, name: &str, path: &str) -> Result<Output, ExecError> {
+        use crate::libtau::ql::parser::parse as ql_parse;
+        let content = std::fs::read_to_string(path).map_err(|e| ExecError::Io(e.to_string()))?;
+        // Validate the lens exists and get its type before parsing all rows.
+        {
+            let state = self.active_state()?;
+            if !state.base_types.contains_key(name) {
+                return Err(ExecError::UnknownLens(name.into()));
+            }
+        }
+        let mut taus: Vec<(Timestamp, Timestamp, Value)> = Vec::new();
+        for (lineno, line) in content.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut parts = line.splitn(3, ',');
+            let start_str = parts
+                .next()
+                .ok_or_else(|| ExecError::Io(format!("line {}: missing start", lineno + 1)))?
+                .trim();
+            let end_str = parts
+                .next()
+                .ok_or_else(|| ExecError::Io(format!("line {}: missing end", lineno + 1)))?
+                .trim();
+            let val_str = parts
+                .next()
+                .ok_or_else(|| ExecError::Io(format!("line {}: missing value", lineno + 1)))?
+                .trim();
+            let start: Timestamp = start_str.parse().map_err(|_| {
+                ExecError::Io(format!(
+                    "line {}: invalid start {:?}",
+                    lineno + 1,
+                    start_str
+                ))
+            })?;
+            let end: Timestamp = end_str.parse().map_err(|_| {
+                ExecError::Io(format!("line {}: invalid end {:?}", lineno + 1, end_str))
+            })?;
+            // Parse the value as a literal via the QL parser (handles all types).
+            let lit_input = format!("APPEND LENS _dummy_ {start} {end} {val_str}");
+            let value: Value = match ql_parse(&lit_input) {
+                Ok((
+                    _,
+                    Stmt::Append {
+                        taus: ref parsed_taus,
+                        ..
+                    },
+                )) if !parsed_taus.is_empty() => {
+                    let (_, _, lit) = &parsed_taus[0];
+                    lit.clone().into()
+                }
+                _ => {
+                    return Err(ExecError::Io(format!(
+                        "line {}: cannot parse value {:?}",
+                        lineno + 1,
+                        val_str
+                    )));
+                }
+            };
+            taus.push((start, end, value));
+        }
+        self.append_lens(name, taus)
     }
 
     fn derive_lens(&mut self, name: &str, expr: Expr) -> Result<Output, ExecError> {
@@ -353,8 +439,11 @@ impl Executor {
         if state.base_types.contains_key(name) || state.derived.contains_key(name) {
             return Err(ExecError::DuplicateLens(name.into()));
         }
-        // TODO: detect cycles before inserting — a derived lens that references
-        // itself (directly or via a chain) will stack-overflow at query time.
+        // Reject self-referential or transitively cyclic expressions.
+        let mut visited = HashSet::new();
+        if would_cycle(&state.derived, name, &expr, &mut visited) {
+            return Err(ExecError::CycleDetected(name.into()));
+        }
         if !in_replay {
             let stmt_text = format!("DERIVE LENS {name} AS {expr}");
             state
@@ -433,6 +522,24 @@ impl Executor {
         eval_agg(state, name, func, start, end).map(Output::Value)
     }
 
+    fn show_databases(&self) -> Result<Output, ExecError> {
+        let mut names: Vec<String> = self.databases.keys().cloned().collect();
+        names.sort();
+        Ok(Output::Names(names))
+    }
+
+    fn show_lenses(&self) -> Result<Output, ExecError> {
+        let state = self.active_state()?;
+        let mut names: Vec<String> = state
+            .base_types
+            .keys()
+            .chain(state.derived.keys())
+            .cloned()
+            .collect();
+        names.sort();
+        Ok(Output::Names(names))
+    }
+
     fn drop_lens(&mut self, name: &str) -> Result<Output, ExecError> {
         let state = self.active_mut()?;
         if state.base_types.remove(name).is_some() || state.derived.remove(name).is_some() {
@@ -459,6 +566,44 @@ impl Executor {
             .get_mut(&name)
             .ok_or(ExecError::UnknownDatabase(name))
     }
+}
+
+/// Returns `true` if adding `DERIVE LENS target AS expr` would create a cycle.
+///
+/// Performs a DFS through `expr`'s identifiers, following derived lens
+/// definitions already in `derived`.  The `visited` set prevents revisiting
+/// nodes so the traversal terminates even if `derived` already contains cycles
+/// from before this check was introduced.
+fn would_cycle(
+    derived: &HashMap<String, Expr>,
+    target: &str,
+    expr: &Expr,
+    visited: &mut HashSet<String>,
+) -> bool {
+    let names: Vec<&str> = match expr {
+        Expr::Ident(n) => vec![n.as_str()],
+        Expr::Agg { lens, .. } => vec![lens.as_str()],
+        Expr::Lit(_) => return false,
+        Expr::Unary { expr, .. } => return would_cycle(derived, target, expr, visited),
+        Expr::Binary { lhs, rhs, .. } => {
+            return would_cycle(derived, target, lhs, visited)
+                || would_cycle(derived, target, rhs, visited);
+        }
+    };
+    for name in names {
+        if name == target {
+            return true;
+        }
+        if visited.insert(name.to_string())
+            && let Some(dep_expr) = derived.get(name)
+        {
+            let dep_expr = dep_expr.clone();
+            if would_cycle(derived, target, &dep_expr, visited) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn eval_lens(state: &DbState, name: &str, t: Timestamp) -> Result<Option<Value>, ExecError> {
@@ -677,17 +822,19 @@ fn collect_expr_bounds(
             ..
         } => {
             // The aggregate's value changes when a boundary of the underlying
-            // lens enters or exits the sliding window [t+rel_start, t+rel_end).
-            // A lens boundary at position p causes a change at t = p - rel_start
-            // (enters) and t = p - rel_end (exits), so collect over the wider
-            // underlying range and project back.
-            let wstart = start.saturating_add(*rel_start).min(start);
-            let wend = end.saturating_add(*rel_end).max(end);
+            // lens at position p enters the window (t = p - rel_start) or exits
+            // it (t = p - rel_end).  We need p values that project t_change into
+            // (start, end), which means p ∈ (start+rel_start, end+rel_start) ∪
+            // (start+rel_end, end+rel_end).  Collect the bounding superset.
+            let lo = start.saturating_add((*rel_start).min(*rel_end));
+            let hi = end.saturating_add((*rel_start).max(*rel_end));
             let mut inner = Vec::new();
-            collect_lens_bounds(state, lens, wstart, wend, &mut inner)?;
+            if lo < hi {
+                collect_lens_bounds(state, lens, lo, hi, &mut inner)?;
+            }
             for p in inner {
                 for shift in [*rel_start, *rel_end] {
-                    let t_change = p - shift;
+                    let t_change = p.saturating_sub(shift);
                     if t_change > start && t_change < end {
                         out.push(t_change);
                     }
@@ -1383,8 +1530,137 @@ mod tests {
 
     #[test]
     fn wal_error_variant_formats_in_tcp_output() {
-        // Verify ExecError::Io exists and can be formatted (it's surfaced over TCP).
         let e = ExecError::Io("disk full".into());
         assert!(matches!(e, ExecError::Io(_)));
+    }
+
+    #[test]
+    fn append_multi_tau_single_layer() {
+        let mut e = setup();
+        run(&mut e, "CREATE LENS x int").unwrap();
+        run(&mut e, "APPEND LENS x 0 5 1, 5 10 2, 10 15 3").unwrap();
+        assert_eq!(
+            run(&mut e, "AT LENS x 3").unwrap(),
+            Output::Value(Some(Value::Int(1)))
+        );
+        assert_eq!(
+            run(&mut e, "AT LENS x 7").unwrap(),
+            Output::Value(Some(Value::Int(2)))
+        );
+        assert_eq!(
+            run(&mut e, "AT LENS x 12").unwrap(),
+            Output::Value(Some(Value::Int(3)))
+        );
+    }
+
+    #[test]
+    fn append_multi_tau_type_mismatch_rejects_all() {
+        let mut e = setup();
+        run(&mut e, "CREATE LENS x int").unwrap();
+        assert!(matches!(
+            run(&mut e, "APPEND LENS x 0 5 1, 5 10 1.5"),
+            Err(ExecError::TypeMismatch { .. })
+        ));
+        // No partial write — lens should still have no data.
+        assert_eq!(run(&mut e, "AT LENS x 3").unwrap(), Output::Value(None));
+    }
+
+    #[test]
+    fn show_databases_lists_all() {
+        let mut e = Executor::new();
+        run(&mut e, "CREATE DATABASE alpha").unwrap();
+        run(&mut e, "CREATE DATABASE beta").unwrap();
+        let Output::Names(mut names) = run(&mut e, "SHOW DATABASES").unwrap() else {
+            panic!("expected Names output");
+        };
+        names.sort();
+        assert_eq!(names, vec!["alpha", "beta"]);
+    }
+
+    #[test]
+    fn show_lenses_lists_base_and_derived() {
+        let mut e = setup();
+        run(&mut e, "CREATE LENS a int").unwrap();
+        run(&mut e, "CREATE LENS b float").unwrap();
+        run(&mut e, "DERIVE LENS c AS a + 1").unwrap();
+        let Output::Names(mut names) = run(&mut e, "SHOW LENSES").unwrap() else {
+            panic!("expected Names output");
+        };
+        names.sort();
+        assert_eq!(names, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn show_lenses_requires_active_database() {
+        let e = Executor::new();
+        assert_eq!(
+            e.exec_read(&crate::libtau::ql::parse("SHOW LENSES").unwrap().1),
+            Err(ExecError::NoActiveDatabase)
+        );
+    }
+
+    #[test]
+    fn cycle_detection_direct_self_reference() {
+        let mut e = setup();
+        run(&mut e, "CREATE LENS x int").unwrap();
+        assert_eq!(
+            run(&mut e, "DERIVE LENS x2 AS x2 + 1"),
+            Err(ExecError::CycleDetected("x2".into()))
+        );
+    }
+
+    #[test]
+    fn cycle_detection_transitive() {
+        let mut e = setup();
+        run(&mut e, "CREATE LENS x int").unwrap();
+        run(&mut e, "DERIVE LENS y AS x + 1").unwrap();
+        run(&mut e, "DERIVE LENS z AS y + 1").unwrap();
+        // z → y → x (fine). Now try w → z → y → w (cycle).
+        assert_eq!(
+            run(&mut e, "DERIVE LENS w AS z + w"),
+            Err(ExecError::CycleDetected("w".into()))
+        );
+    }
+
+    #[test]
+    fn copy_lens_from_csv() {
+        let dir = tempfile::tempdir().unwrap();
+        let csv_path = dir.path().join("data.csv");
+        std::fs::write(&csv_path, "0,10,42\n10,20,99\n").unwrap();
+
+        let mut e = setup();
+        run(&mut e, "CREATE LENS sensor int").unwrap();
+        run(
+            &mut e,
+            &format!("COPY LENS sensor FROM \"{}\"", csv_path.display()),
+        )
+        .unwrap();
+        assert_eq!(
+            run(&mut e, "AT LENS sensor 5").unwrap(),
+            Output::Value(Some(Value::Int(42)))
+        );
+        assert_eq!(
+            run(&mut e, "AT LENS sensor 15").unwrap(),
+            Output::Value(Some(Value::Int(99)))
+        );
+    }
+
+    #[test]
+    fn copy_lens_skips_blank_lines_and_comments() {
+        let dir = tempfile::tempdir().unwrap();
+        let csv_path = dir.path().join("data.csv");
+        std::fs::write(&csv_path, "# header\n\n0,10,7\n").unwrap();
+
+        let mut e = setup();
+        run(&mut e, "CREATE LENS x int").unwrap();
+        run(
+            &mut e,
+            &format!("COPY LENS x FROM \"{}\"", csv_path.display()),
+        )
+        .unwrap();
+        assert_eq!(
+            run(&mut e, "AT LENS x 5").unwrap(),
+            Output::Value(Some(Value::Int(7)))
+        );
     }
 }

@@ -3,16 +3,24 @@
 //! The grammar is deliberately minimal:
 //!
 //! ```text
-//! stmt   := create | append | derive | at | range | drop
+//! stmt   := create | append | copy | derive | show | at | range | reduce | drop | use
 //!
-//! create := CREATE LENS <ident> <type>
-//! append := APPEND LENS <ident> <int> <int> <literal>
+//! create := CREATE DATABASE <ident>
+//!         | CREATE LENS <ident> <type>
+//! append := APPEND LENS <ident> <int> <int> <literal> [, <int> <int> <literal> …]
+//! copy   := COPY LENS <ident> FROM "<path>"
 //! derive := DERIVE LENS <ident> AS <expr>
+//! show   := SHOW DATABASES
+//!         | SHOW LENSES
 //! at     := AT     LENS <ident> <int>
 //! range  := RANGE  LENS <ident> <int> <int> [WHERE <expr>]
+//! reduce := REDUCE LENS <ident> <int> <int> USING <func>
 //! drop   := DROP   LENS <ident>
+//!         | DROP   DATABASE <ident>
+//! use    := USE    DATABASE <ident>
 //!
 //! type    := int | float | str | bool | bytes
+//! func    := min | max | avg | sum | count
 //! literal := int | float | string | bool | null
 //! expr    := disjunction      (full operator-precedence grammar; see parser)
 //! ```
@@ -120,11 +128,17 @@ pub enum Stmt {
         name: String,
         ty: Type,
     },
+    /// `APPEND LENS <name> <s0> <e0> <v0> [, <s1> <e1> <v1> …]` — write one
+    /// or more taus into a single layer.  Bulk form reduces per-write overhead.
     Append {
         name: String,
-        start: i64,
-        end: i64,
-        value: Literal,
+        taus: Vec<(i64, i64, Literal)>,
+    },
+    /// `COPY LENS <name> FROM "<path>"` — ingest taus from a CSV file where
+    /// each line is `start,end,value`.
+    Copy {
+        name: String,
+        path: String,
     },
     Derive {
         name: String,
@@ -143,6 +157,10 @@ pub enum Stmt {
     Drop {
         name: String,
     },
+    /// `SHOW DATABASES` — list all registered database names.
+    ShowDatabases,
+    /// `SHOW LENSES` — list all lens names in the active database.
+    ShowLenses,
     /// `REDUCE LENS <name> <start> <end> USING <func>` — collapse a lens over
     /// an absolute range to a single scalar via an aggregation function.
     Reduce {
@@ -162,15 +180,17 @@ impl Stmt {
     pub fn is_read_only(&self) -> bool {
         matches!(
             self,
-            Stmt::At { .. } | Stmt::Range { .. } | Stmt::Reduce { .. }
+            Stmt::At { .. }
+                | Stmt::Range { .. }
+                | Stmt::Reduce { .. }
+                | Stmt::ShowDatabases
+                | Stmt::ShowLenses
         )
     }
 }
 
-// ---------------------------------------------------------------------------
 // Display impls — used to serialise schema DDL statements to the WAL so they
 // survive a restart and can be replayed as text.
-// ---------------------------------------------------------------------------
 
 impl std::fmt::Display for Type {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -259,6 +279,7 @@ impl std::fmt::Display for Expr {
 impl std::fmt::Display for Stmt {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            // These two are the only statements replayed via the schema WAL.
             Stmt::Create { name, ty } => write!(f, "CREATE LENS {name} {ty}"),
             Stmt::Derive { name, expr } => write!(f, "DERIVE LENS {name} AS {expr}"),
             other => write!(f, "{other:?}"),

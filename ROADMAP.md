@@ -35,16 +35,15 @@ This document tracks what has been built and what remains before Tau can be cons
 - [x] Parser — nom-based combinator, case-insensitive keywords, full operator-precedence grammar
 - [x] `CREATE / DROP / USE DATABASE`
 - [x] `CREATE / DROP LENS` with static type declarations (`int`, `float`, `str`, `bool`, `bytes`)
-- [x] `APPEND LENS` — write a single tau to a base lens
+- [x] **Multi-tau `APPEND`** — `APPEND LENS name s0 e0 v0 [, s1 e1 v1 …]` writes one or more taus as a single layer; bulk form reduces per-write overhead and is atomic (all-or-nothing type validation)
+- [x] **`COPY LENS <name> FROM "<path>"`** — ingest taus from a CSV file (`start,end,value` per line); blank lines and `#` comments skipped; entire file batched into one layer
 - [x] `DERIVE LENS AS <expr>` — define a computed lens
+- [x] **`SHOW DATABASES` / `SHOW LENSES`** — introspection queries; `NAMES <n>; name …` wire response; read-only, uses shared lock
 - [x] `AT LENS <t>` — point lookup
 - [x] `RANGE LENS <start> <end> [WHERE <expr>]` — materialise segments with optional filter
 - [x] `REDUCE LENS <start> <end> USING <func>` — scalar aggregate over a range (`min`, `max`, `avg`, `sum`, `count`)
 - [x] Rolling / windowed aggregation in expressions — `avg(lens, rel_start, rel_end)`
 - [x] Arithmetic, comparison, and logical operators in expressions
-- [ ] **Multi-tau `APPEND`** — currently each `APPEND` writes exactly one tau; bulk append would reduce per-write overhead
-- [ ] **`COPY` / import statement** — ingest from CSV or line-delimited payloads
-- [ ] **`SHOW DATABASES` / `SHOW LENSES`** — introspection queries; currently you must track what you created
 - [ ] **Named timestamp aliases** — allow symbolic names (e.g. Unix epoch offsets, ISO-8601 parsing) rather than raw integers only
 
 ---
@@ -55,9 +54,9 @@ This document tracks what has been built and what remains before Tau can be cons
 - [x] Null is type-compatible with any declared type
 - [x] Derived lens definitions stored as AST nodes — re-evaluated live on every query
 - [x] `exec_read` / `exec` split for lock routing
-- [ ] **Schema persistence** — `DbState::base_types` and `derived` maps are lost on restart; must be serialised alongside the WAL
-- [ ] **Cycle detection in derived lenses** — a derived lens that references itself (directly or transitively) will stack-overflow at query time
-- [ ] **`RANGE` on aggregation-backed derived lenses** — boundary collection for nested `Agg` expressions inside `RANGE` filters is approximated; edge cases exist
+- [x] **Schema persistence** — `CREATE LENS` and `DERIVE LENS` are written as `S:` WAL entries; replay restores both data and schema declarations on restart
+- [x] **Cycle detection in derived lenses** — `DERIVE LENS` performs a DFS through the existing derived graph before inserting; returns `CycleDetected` error for direct or transitive cycles
+- [x] **`RANGE` on aggregation-backed derived lenses** — boundary collection for `Agg` expressions corrected; enter/exit projection ranges computed from `min`/`max` of relative offsets, covering all sign combinations
 
 ---
 
@@ -118,8 +117,6 @@ Tau speaks plain TCP so any language with a socket library can drive it directly
 The following must all be true before tagging 1.0:
 
 - All items above this line marked done (or explicitly deferred with a documented reason)
-- Schema persistence: a server restart recovers both data **and** lens declarations
-- WAL rotation is implemented so disk usage is bounded
 - The `bench` binary reports stable numbers on the reference hardware
 - End-to-end TCP tests pass in CI
 - The protocol specification document exists

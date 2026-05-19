@@ -16,15 +16,26 @@
 //! # Wire format
 //!
 //! ```text
-//! → AUTH admin s3cr3t            (if --auth is set)
+//! → AUTH admin s3cr3t                  (if --auth is set)
 //! ← OK
 //! → CREATE DATABASE main
 //! ← OK
-//! → AT LENS x 5
-//! ← VAL i42
+//! → CREATE LENS x int
+//! ← OK
+//! → APPEND LENS x 0 5 1, 5 10 2
+//! ← OK
+//! → AT LENS x 3
+//! ← VAL i1
+//! → RANGE LENS x 0 10
+//! ← RANGE 2; 0:5:i1; 5:10:i2
+//! → SHOW LENSES
+//! ← NAMES 1; x
 //! → QUIT
 //! ← OK BYE
 //! ```
+//!
+//! Response codes: `OK`, `OK BYE`, `VAL <v>`, `VAL NIL`, `RANGE <n>; …`,
+//! `NAMES <n>; …`, `ERR <message>`.
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -351,6 +362,15 @@ fn format_output(o: &Output) -> String {
             }
             out
         }
+        Output::Names(names) => {
+            let mut out = format!("NAMES {}", names.len());
+            for n in names {
+                out.push(';');
+                out.push(' ');
+                out.push_str(n);
+            }
+            out
+        }
     }
 }
 
@@ -371,6 +391,7 @@ fn format_error(e: &ExecError) -> String {
         ExecError::InvalidExpr(m) => format!("invalid expression: {m}"),
         ExecError::InvalidRange => "invalid range (start >= end)".into(),
         ExecError::Io(m) => format!("storage error: {m}"),
+        ExecError::CycleDetected(n) => format!("cycle detected in derived lens: {n}"),
     }
 }
 

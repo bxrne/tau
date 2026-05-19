@@ -13,6 +13,7 @@ One statement per line in, one response line out. Statements are the same querie
 | `VAL <codec>` | Point lookup returned a value |
 | `VAL NIL` | Point lookup: no tau covers that timestamp |
 | `RANGE <n>; <s>:<e>:<v> …` | Range scan returned `n` segments |
+| `NAMES <n>; name …` | Name list from `SHOW DATABASES` / `SHOW LENSES` |
 | `ERR <message>` | Parse failure or executor error |
 
 Values are encoded with a one-character type tag: `i<int>`, `f<float>`, `s<percent-escaped>`, `b<0|1>`, `n` (null).
@@ -30,7 +31,7 @@ When `--auth` is set, the first message from every client must be `AUTH <usernam
 
 ## Concurrency model
 
-Each incoming connection gets its own OS thread. All threads share one `Arc<RwLock<Executor>>`. Read-only statements (`AT`, `RANGE`, `REDUCE`) take the read lock and run concurrently. Mutating statements (`CREATE`, `APPEND`, `DERIVE`, `DROP`) take the write lock exclusively.
+Each incoming connection gets its own OS thread. All threads share one `Arc<RwLock<Executor>>`. Read-only statements (`AT`, `RANGE`, `REDUCE`, `SHOW DATABASES`, `SHOW LENSES`) take the read lock and run concurrently. Mutating statements (`CREATE`, `APPEND`, `COPY`, `DERIVE`, `DROP`) take the write lock exclusively.
 
 This is a simple and correct model. The tradeoff is that a slow write (e.g. a WAL fsync with a slow disk) blocks all concurrent reads. For write-heavy workloads this can become a bottleneck. A per-database lock rather than a single global lock would improve write-read concurrency, but adds complexity.
 
