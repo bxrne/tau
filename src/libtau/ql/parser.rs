@@ -33,6 +33,7 @@ pub fn parse(input: &str) -> IResult<&str, Stmt> {
         stmt_derive,
         stmt_at,
         stmt_range,
+        stmt_reduce,
         stmt_drop,
         stmt_use,
     ))
@@ -144,12 +145,75 @@ fn stmt_drop_database(i: &str) -> IResult<&str, Stmt> {
     Ok((i, Stmt::DropDatabase { name }))
 }
 
+/// `REDUCE LENS <name> <start> <end> USING <func>` — aggregate over a range.
+fn stmt_reduce(i: &str) -> IResult<&str, Stmt> {
+    let (i, _) = kw("REDUCE").parse(i)?;
+    let (i, _) = kw("LENS").parse(i)?;
+    let (i, name) = ident(i)?;
+    let (i, _) = multispace1(i)?;
+    let (i, start) = integer(i)?;
+    let (i, _) = multispace1(i)?;
+    let (i, end) = integer(i)?;
+    let (i, _) = multispace1(i)?;
+    let (i, _) = tag_no_case("USING")(i)?;
+    let (i, _) = multispace1(i)?;
+    let (i, func) = agg_func(i)?;
+    Ok((
+        i,
+        Stmt::Reduce {
+            name,
+            start,
+            end,
+            func,
+        },
+    ))
+}
+
 /// `USE DATABASE <name>` — switches the active database.
 fn stmt_use(i: &str) -> IResult<&str, Stmt> {
     let (i, _) = kw("USE").parse(i)?;
     let (i, _) = kw("DATABASE").parse(i)?;
     let (i, name) = ident(i)?;
     Ok((i, Stmt::UseDatabase { name }))
+}
+
+fn agg_func(i: &str) -> IResult<&str, AggFunc> {
+    alt((
+        value(AggFunc::Min, tag_no_case("min")),
+        value(AggFunc::Max, tag_no_case("max")),
+        value(AggFunc::Avg, tag_no_case("avg")),
+        value(AggFunc::Sum, tag_no_case("sum")),
+        value(AggFunc::Count, tag_no_case("count")),
+    ))
+    .parse(i)
+}
+
+/// `func(lens, rel_start, rel_end)` — aggregate call usable in expressions.
+fn agg_call(i: &str) -> IResult<&str, Expr> {
+    let (i, func) = agg_func(i)?;
+    let (i, _) = multispace0(i)?;
+    let (i, _) = char('(')(i)?;
+    let (i, _) = multispace0(i)?;
+    let (i, lens) = ident(i)?;
+    let (i, _) = multispace0(i)?;
+    let (i, _) = char(',')(i)?;
+    let (i, _) = multispace0(i)?;
+    let (i, rel_start) = integer(i)?;
+    let (i, _) = multispace0(i)?;
+    let (i, _) = char(',')(i)?;
+    let (i, _) = multispace0(i)?;
+    let (i, rel_end) = integer(i)?;
+    let (i, _) = multispace0(i)?;
+    let (i, _) = char(')')(i)?;
+    Ok((
+        i,
+        Expr::Agg {
+            func,
+            lens,
+            rel_start,
+            rel_end,
+        },
+    ))
 }
 
 /// Precedence climbing for expressions.  See the `expr_*` functions below
@@ -231,7 +295,7 @@ fn expr_unary(i: &str) -> IResult<&str, Expr> {
     .parse(i)
 }
 
-/// Primary expressions are literals, identifiers, or parenthesized expressions.
+/// Primary expressions are literals, identifiers, agg calls, or parenthesized expressions.
 fn expr_primary(i: &str) -> IResult<&str, Expr> {
     let (i, _) = multispace0(i)?;
     alt((
@@ -242,6 +306,8 @@ fn expr_primary(i: &str) -> IResult<&str, Expr> {
         ),
         // literal MUST come before ident so `true`/`false`/`null` win.
         map(literal, Expr::Lit),
+        // agg_call before ident so avg(...) etc. are not parsed as bare idents.
+        agg_call,
         map(ident, Expr::Ident),
     ))
     .parse(i)
@@ -746,6 +812,102 @@ mod tests {
                 op: UnOp::Not,
                 expr: Box::new(Expr::Ident("flag".into())),
             }
+        );
+    }
+
+    #[test]
+    fn reduce_lens_parses() {
+        assert_eq!(
+            parsed("REDUCE LENS temp 0 100 USING avg"),
+            Stmt::Reduce {
+                name: "temp".into(),
+                start: 0,
+                end: 100,
+                func: AggFunc::Avg,
+            }
+        );
+    }
+
+    #[test]
+    fn reduce_all_agg_funcs() {
+        for (s, func) in [
+            ("min", AggFunc::Min),
+            ("max", AggFunc::Max),
+            ("avg", AggFunc::Avg),
+            ("sum", AggFunc::Sum),
+            ("count", AggFunc::Count),
+        ] {
+            assert_eq!(
+                parsed(&format!("REDUCE LENS x 0 10 USING {s}")),
+                Stmt::Reduce {
+                    name: "x".into(),
+                    start: 0,
+                    end: 10,
+                    func
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn agg_call_in_expr() {
+        let (_, e) = expr("avg(temp, -10, 0)").unwrap();
+        assert_eq!(
+            e,
+            Expr::Agg {
+                func: AggFunc::Avg,
+                lens: "temp".into(),
+                rel_start: -10,
+                rel_end: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn agg_call_in_derive() {
+        assert_eq!(
+            parsed("DERIVE LENS smooth AS avg(temp, -10, 0)"),
+            Stmt::Derive {
+                name: "smooth".into(),
+                expr: Expr::Agg {
+                    func: AggFunc::Avg,
+                    lens: "temp".into(),
+                    rel_start: -10,
+                    rel_end: 0,
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn agg_call_composable_in_binary_expr() {
+        // x > avg(x, -10, 0)
+        let (_, e) = expr("x > avg(x, -10, 0)").unwrap();
+        assert_eq!(
+            e,
+            Expr::Binary {
+                op: BinOp::Gt,
+                lhs: Box::new(Expr::Ident("x".into())),
+                rhs: Box::new(Expr::Agg {
+                    func: AggFunc::Avg,
+                    lens: "x".into(),
+                    rel_start: -10,
+                    rel_end: 0,
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn reduce_is_read_only() {
+        assert!(
+            Stmt::Reduce {
+                name: "x".into(),
+                start: 0,
+                end: 10,
+                func: AggFunc::Min
+            }
+            .is_read_only()
         );
     }
 }

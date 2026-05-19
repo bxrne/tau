@@ -1,33 +1,43 @@
 use crate::libtau::model::Layer;
-use crate::libtau::storage::store::Store;
+use crate::libtau::storage::store::{COMPACT_THRESHOLD, Store, compact_layers};
 use std::collections::HashMap;
 
 /// Reference in-memory store. Zero dependencies, suitable for tests and
 /// small embedded workloads.
 pub struct InMemory<V> {
     lenses: HashMap<String, Vec<Layer<V>>>,
+    compact_threshold: usize,
 }
 
 impl<V> Default for InMemory<V> {
     fn default() -> Self {
-        Self {
-            lenses: HashMap::new(),
-        }
+        Self::new()
     }
 }
 
 impl<V> InMemory<V> {
     pub fn new() -> Self {
-        Self::default()
+        Self::with_threshold(COMPACT_THRESHOLD)
+    }
+
+    pub fn with_threshold(compact_threshold: usize) -> Self {
+        Self {
+            lenses: HashMap::new(),
+            compact_threshold,
+        }
     }
 }
 
 impl<V> Store<V> for InMemory<V>
 where
-    V: Clone + Send + Sync + 'static,
+    V: Clone + PartialEq + Send + Sync + 'static,
 {
     fn append(&mut self, lens: &str, layer: Layer<V>) {
-        self.lenses.entry(lens.to_string()).or_default().push(layer);
+        let layers = self.lenses.entry(lens.to_string()).or_default();
+        layers.push(layer);
+        if layers.len() > self.compact_threshold {
+            compact_layers(layers);
+        }
     }
 
     fn layers(&self, lens: &str) -> Option<&Vec<Layer<V>>> {
@@ -126,5 +136,50 @@ mod tests {
         assert!(store.layers("new").is_none());
         store.append("new", layer(1, &[(0, 1, 0)]));
         assert!(store.layers("new").is_some());
+    }
+
+    #[test]
+    fn compaction_triggers_after_threshold() {
+        use crate::libtau::storage::store::COMPACT_THRESHOLD;
+        let mut store: InMemory<i32> = InMemory::new();
+        // Push COMPACT_THRESHOLD + 1 non-overlapping layers to trigger compaction.
+        for i in 0..(COMPACT_THRESHOLD + 1) as i64 {
+            store.append("s", layer(i as u64 + 1, &[(i * 10, i * 10 + 10, i as i32)]));
+        }
+        // After compaction the lens has exactly one layer.
+        assert_eq!(store.layers("s").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn compaction_preserves_newest_wins_semantics() {
+        let mut store: InMemory<i32> = InMemory::new();
+        // Layer 1: [0,20) = 1
+        store.append("s", layer(1, &[(0, 20, 1)]));
+        // Layer 2: [5,15) = 2  (shadows middle of layer 1)
+        store.append("s", layer(2, &[(5, 15, 2)]));
+        // Push enough extra layers to trigger compaction.
+        for i in 3..=10 {
+            store.append("s", layer(i, &[(100, 101, i as i32)]));
+        }
+        // Compaction must have happened; query the original range.
+        assert_eq!(store.at("s", 3), Some(1));
+        assert_eq!(store.at("s", 7), Some(2));
+        assert_eq!(store.at("s", 17), Some(1));
+    }
+
+    #[test]
+    fn compaction_merges_adjacent_equal_value_taus() {
+        let mut store: InMemory<i32> = InMemory::new();
+        // Two consecutive layers with the same value → should merge into one tau.
+        for i in 0..=(COMPACT_THRESHOLD as i64) {
+            store.append("s", layer(i as u64 + 1, &[(i * 5, i * 5 + 5, 42)]));
+        }
+        let layers = store.layers("s").unwrap();
+        assert_eq!(layers.len(), 1);
+        assert_eq!(
+            layers[0].taus.len(),
+            1,
+            "adjacent equal-value segments should merge"
+        );
     }
 }
