@@ -18,17 +18,10 @@
 //!
 //! # Statement semantics
 //!
-//! | Statement         | Returns                                            |
-//! | ----------------- | -------------------------------------------------- |
-//! | `CREATE DATABASE` | [`Output::Empty`]                                  |
-//! | `DROP DATABASE`   | [`Output::Empty`]                                  |
-//! | `USE DATABASE`    | [`Output::Empty`]                                  |
-//! | `CREATE LENS`     | [`Output::Empty`]                                  |
-//! | `APPEND LENS`     | [`Output::Empty`]                                  |
-//! | `DERIVE LENS`     | [`Output::Empty`]                                  |
-//! | `AT LENS`         | [`Output::Value`] (`None` if no tau covers `t`)    |
-//! | `RANGE LENS`      | [`Output::Range`] — `(start, end, value)` segments |
-//! | `DROP LENS`       | [`Output::Empty`]                                  |
+//! DDL (`CREATE`/`DROP`/`USE`/`APPEND`/`DERIVE`) returns [`Output::Empty`].
+//! `AT` returns [`Output::Value`] (`None` when no tau covers `t`).
+//! `RANGE` returns [`Output::Range`] — a vec of `(start, end, value)` segments.
+//! `REDUCE` returns [`Output::Value`] — a single scalar aggregate.
 
 use std::collections::HashMap;
 use std::io;
@@ -36,7 +29,7 @@ use std::path::Path;
 
 use crate::libtau::database::Database;
 use crate::libtau::model::{Layer, Tau, Timestamp};
-use crate::libtau::ql::ast::{BinOp, Expr, Stmt, Type, UnOp};
+use crate::libtau::ql::ast::{AggFunc, BinOp, Expr, Stmt, Type, UnOp};
 use crate::libtau::storage::InMemory;
 use crate::libtau::value::Value;
 
@@ -91,17 +84,18 @@ struct DbState {
 }
 
 impl DbState {
-    fn new() -> Self {
+    fn new(compact_threshold: usize) -> Self {
         Self {
-            db: Database::new(InMemory::<Value>::new()),
+            db: Database::new(InMemory::<Value>::with_threshold(compact_threshold)),
             base_types: HashMap::new(),
             next_layer_id: 1,
             derived: HashMap::new(),
         }
     }
 
-    fn with_wal(path: impl AsRef<Path>) -> io::Result<Self> {
-        let db = Database::open(InMemory::<Value>::new(), path).map_err(io::Error::other)?;
+    fn with_wal(path: impl AsRef<Path>, compact_threshold: usize) -> io::Result<Self> {
+        let store = InMemory::<Value>::with_threshold(compact_threshold);
+        let db = Database::open(store, path).map_err(io::Error::other)?;
         Ok(Self {
             db,
             base_types: HashMap::new(),
@@ -112,13 +106,19 @@ impl DbState {
 }
 
 /// Runtime container for executing parsed [`Stmt`]s.
-#[derive(Default)]
 pub struct Executor {
     databases: HashMap<String, DbState>,
     /// Name of the currently active database (set by the first
     /// `CREATE DATABASE` and by `USE DATABASE`).  Cleared if the active
     /// database is dropped.
     active: Option<String>,
+    compact_threshold: usize,
+}
+
+impl Default for Executor {
+    fn default() -> Self {
+        Self::with_threshold(crate::libtau::storage::COMPACT_THRESHOLD)
+    }
 }
 
 impl Executor {
@@ -126,13 +126,27 @@ impl Executor {
         Self::default()
     }
 
-    /// Create an executor with WAL for durability.
-    /// Opens or creates the WAL at the given path and replays any
-    /// existing entries into the in-memory store.
+    /// Create an executor with a custom layer compaction threshold.
+    pub fn with_threshold(compact_threshold: usize) -> Self {
+        Self {
+            databases: HashMap::new(),
+            active: None,
+            compact_threshold,
+        }
+    }
+
+    /// Open a WAL-backed executor with the default compaction threshold.
     pub fn with_wal(path: impl AsRef<Path>) -> io::Result<Self> {
-        let mut executor = Self::default();
-        let db_state = DbState::with_wal(path)?;
-        // Create a default database that uses the WAL-backed store
+        Self::with_wal_threshold(path, crate::libtau::storage::COMPACT_THRESHOLD)
+    }
+
+    /// Open a WAL-backed executor with a custom compaction threshold.
+    pub fn with_wal_threshold(
+        path: impl AsRef<Path>,
+        compact_threshold: usize,
+    ) -> io::Result<Self> {
+        let mut executor = Self::with_threshold(compact_threshold);
+        let db_state = DbState::with_wal(path, compact_threshold)?;
         executor.databases.insert("default".to_string(), db_state);
         executor.active = Some("default".to_string());
         Ok(executor)
@@ -158,6 +172,12 @@ impl Executor {
                 end,
                 filter,
             } => self.range_lens(name, *start, *end, filter.as_ref()),
+            Stmt::Reduce {
+                name,
+                start,
+                end,
+                func,
+            } => self.reduce_lens(name, *start, *end, *func),
             _ => Err(ExecError::InvalidExpr(
                 "exec_read called on a mutating statement".into(),
             )),
@@ -186,16 +206,21 @@ impl Executor {
                 filter,
             } => self.range_lens(name, *start, *end, filter.as_ref()),
             Stmt::Drop { name } => self.drop_lens(name),
+            Stmt::Reduce {
+                name,
+                start,
+                end,
+                func,
+            } => self.reduce_lens(name, *start, *end, *func),
         }
     }
-
-    // ---- database management ------------------------------------------------
 
     fn create_database(&mut self, name: &str) -> Result<Output, ExecError> {
         if self.databases.contains_key(name) {
             return Err(ExecError::DuplicateDatabase(name.into()));
         }
-        self.databases.insert(name.into(), DbState::new());
+        self.databases
+            .insert(name.into(), DbState::new(self.compact_threshold));
         // First database created becomes active by convention.
         if self.active.is_none() {
             self.active = Some(name.into());
@@ -220,8 +245,6 @@ impl Executor {
         self.active = Some(name.into());
         Ok(Output::Empty)
     }
-
-    // ---- lens management ----------------------------------------------------
 
     fn create_lens(&mut self, name: &str, ty: Type) -> Result<Output, ExecError> {
         let state = self.active_mut()?;
@@ -324,6 +347,23 @@ impl Executor {
         Ok(Output::Range(out))
     }
 
+    fn reduce_lens(
+        &self,
+        name: &str,
+        start: Timestamp,
+        end: Timestamp,
+        func: AggFunc,
+    ) -> Result<Output, ExecError> {
+        if start >= end {
+            return Err(ExecError::InvalidRange);
+        }
+        let state = self.active_state()?;
+        if !state.base_types.contains_key(name) && !state.derived.contains_key(name) {
+            return Err(ExecError::UnknownLens(name.into()));
+        }
+        eval_agg(state, name, func, start, end).map(Output::Value)
+    }
+
     fn drop_lens(&mut self, name: &str) -> Result<Output, ExecError> {
         let state = self.active_mut()?;
         if state.base_types.remove(name).is_some() || state.derived.remove(name).is_some() {
@@ -332,8 +372,6 @@ impl Executor {
             Err(ExecError::UnknownLens(name.into()))
         }
     }
-
-    // ---- helpers ------------------------------------------------------------
 
     fn active_state(&self) -> Result<&DbState, ExecError> {
         let name = self.active.as_deref().ok_or(ExecError::NoActiveDatabase)?;
@@ -353,8 +391,6 @@ impl Executor {
             .ok_or(ExecError::UnknownDatabase(name))
     }
 }
-
-// ---- lens evaluation --------------------------------------------------------
 
 fn eval_lens(state: &DbState, name: &str, t: Timestamp) -> Result<Option<Value>, ExecError> {
     if state.base_types.contains_key(name) {
@@ -381,6 +417,19 @@ fn eval_expr(state: &DbState, expr: &Expr, t: Timestamp) -> Result<Option<Value>
                 (Some(a), Some(b)) => apply_binary(*op, a, b).map(Some),
                 _ => Ok(None),
             }
+        }
+        Expr::Agg {
+            func,
+            lens,
+            rel_start,
+            rel_end,
+        } => {
+            let abs_start = t + rel_start;
+            let abs_end = t + rel_end;
+            if abs_start >= abs_end {
+                return Ok(None);
+            }
+            eval_agg(state, lens, *func, abs_start, abs_end)
         }
     }
 }
@@ -507,8 +556,6 @@ fn values_equal(a: &Value, b: &Value) -> Result<bool, ExecError> {
     }
 }
 
-// ---- boundary collection (for RANGE) ----------------------------------------
-
 fn collect_lens_bounds(
     state: &DbState,
     name: &str,
@@ -554,6 +601,136 @@ fn collect_expr_bounds(
             collect_expr_bounds(state, lhs, start, end, out)?;
             collect_expr_bounds(state, rhs, start, end, out)
         }
+        Expr::Agg {
+            lens,
+            rel_start,
+            rel_end,
+            ..
+        } => {
+            // The aggregate's value changes when a boundary of the underlying
+            // lens enters or exits the sliding window [t+rel_start, t+rel_end).
+            // A lens boundary at position p causes a change at t = p - rel_start
+            // (enters) and t = p - rel_end (exits), so collect over the wider
+            // underlying range and project back.
+            let wstart = start.saturating_add(*rel_start).min(start);
+            let wend = end.saturating_add(*rel_end).max(end);
+            let mut inner = Vec::new();
+            collect_lens_bounds(state, lens, wstart, wend, &mut inner)?;
+            for p in inner {
+                for shift in [*rel_start, *rel_end] {
+                    let t_change = p - shift;
+                    if t_change > start && t_change < end {
+                        out.push(t_change);
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+fn eval_agg(
+    state: &DbState,
+    lens: &str,
+    func: AggFunc,
+    start: Timestamp,
+    end: Timestamp,
+) -> Result<Option<Value>, ExecError> {
+    let mut bounds = vec![start, end];
+    collect_lens_bounds(state, lens, start, end, &mut bounds)?;
+    bounds.sort();
+    bounds.dedup();
+
+    let mut segments: Vec<(i64, Value)> = Vec::new();
+    for w in bounds.windows(2) {
+        let (s, e) = (w[0], w[1]);
+        if let Some(v) = eval_lens(state, lens, s)? {
+            segments.push((e - s, v));
+        }
+    }
+
+    if segments.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(match func {
+        AggFunc::Count => Value::Int(segments.len() as i64),
+        AggFunc::Min => segments
+            .into_iter()
+            .map(|(_, v)| v)
+            .try_fold(None::<Value>, |acc, v| match acc {
+                None => Ok(Some(v)),
+                Some(a) => numeric_min_max(a, v, false).map(Some),
+            })?
+            .unwrap(),
+        AggFunc::Max => segments
+            .into_iter()
+            .map(|(_, v)| v)
+            .try_fold(None::<Value>, |acc, v| match acc {
+                None => Ok(Some(v)),
+                Some(a) => numeric_min_max(a, v, true).map(Some),
+            })?
+            .unwrap(),
+        AggFunc::Sum => {
+            let mut int_sum: i64 = 0;
+            let mut float_sum: Option<f64> = None;
+            for (_, v) in &segments {
+                match v {
+                    Value::Int(i) => match &mut float_sum {
+                        Some(f) => *f += *i as f64,
+                        None => int_sum = int_sum.wrapping_add(*i),
+                    },
+                    Value::Float(f) => {
+                        *float_sum.get_or_insert(int_sum as f64) += f;
+                    }
+                    _ => {
+                        return Err(ExecError::InvalidExpr(format!(
+                            "sum requires numeric values, got {}",
+                            v.type_name()
+                        )));
+                    }
+                }
+            }
+            float_sum.map(Value::Float).unwrap_or(Value::Int(int_sum))
+        }
+        AggFunc::Avg => {
+            let total: i64 = segments.iter().map(|(d, _)| *d).sum();
+            if total == 0 {
+                return Ok(None);
+            }
+            let mut weighted = 0.0f64;
+            for (d, v) in &segments {
+                match v {
+                    Value::Int(i) => weighted += *i as f64 * *d as f64,
+                    Value::Float(f) => weighted += f * *d as f64,
+                    _ => {
+                        return Err(ExecError::InvalidExpr(format!(
+                            "avg requires numeric values, got {}",
+                            v.type_name()
+                        )));
+                    }
+                }
+            }
+            Value::Float(weighted / total as f64)
+        }
+    }))
+}
+
+fn numeric_min_max(a: Value, b: Value, want_max: bool) -> Result<Value, ExecError> {
+    match (&a, &b) {
+        (Value::Int(x), Value::Int(y)) => Ok(Value::Int(if want_max {
+            (*x).max(*y)
+        } else {
+            (*x).min(*y)
+        })),
+        _ => match (as_f64(&a), as_f64(&b)) {
+            (Some(x), Some(y)) => Ok(Value::Float(if want_max { x.max(y) } else { x.min(y) })),
+            _ => Err(ExecError::InvalidExpr(format!(
+                "min/max requires numeric values, got {}/{}",
+                a.type_name(),
+                b.type_name()
+            ))),
+        },
     }
 }
 
@@ -574,8 +751,6 @@ mod tests {
         run(&mut e, "CREATE DATABASE main").unwrap();
         e
     }
-
-    // ---- database management ------------------------------------------------
 
     #[test]
     fn create_database_sets_active_on_first_create() {
@@ -641,8 +816,6 @@ mod tests {
         );
     }
 
-    // ---- lens DDL -----------------------------------------------------------
-
     #[test]
     fn create_lens_without_active_database_errors() {
         let mut e = Executor::new();
@@ -670,8 +843,6 @@ mod tests {
             Err(ExecError::UnknownLens("missing".into()))
         );
     }
-
-    // ---- append + type enforcement ------------------------------------------
 
     #[test]
     fn append_to_unknown_lens_errors() {
@@ -717,8 +888,6 @@ mod tests {
         );
     }
 
-    // ---- AT lookup ----------------------------------------------------------
-
     #[test]
     fn at_returns_none_for_uncovered_time() {
         let mut e = setup();
@@ -757,8 +926,6 @@ mod tests {
             Output::Value(Some(Value::Int(1)))
         );
     }
-
-    // ---- DERIVE -------------------------------------------------------------
 
     #[test]
     fn derive_simple_arithmetic() {
@@ -839,8 +1006,6 @@ mod tests {
             Err(ExecError::InvalidExpr("divide by zero".into()))
         );
     }
-
-    // ---- RANGE --------------------------------------------------------------
 
     #[test]
     fn range_returns_segments_split_at_change_points() {
@@ -933,7 +1098,165 @@ mod tests {
         );
     }
 
-    // ---- isolation between databases ---------------------------------------
+    #[test]
+    fn reduce_count_segments() {
+        let mut e = setup();
+        run(&mut e, "CREATE LENS x int").unwrap();
+        run(&mut e, "APPEND LENS x 0 5 1").unwrap();
+        run(&mut e, "APPEND LENS x 5 10 2").unwrap();
+        assert_eq!(
+            run(&mut e, "REDUCE LENS x 0 10 USING count").unwrap(),
+            Output::Value(Some(Value::Int(2)))
+        );
+    }
+
+    #[test]
+    fn reduce_sum_integers() {
+        let mut e = setup();
+        run(&mut e, "CREATE LENS x int").unwrap();
+        run(&mut e, "APPEND LENS x 0 5 3").unwrap();
+        run(&mut e, "APPEND LENS x 5 10 7").unwrap();
+        assert_eq!(
+            run(&mut e, "REDUCE LENS x 0 10 USING sum").unwrap(),
+            Output::Value(Some(Value::Int(10)))
+        );
+    }
+
+    #[test]
+    fn reduce_min_max() {
+        let mut e = setup();
+        run(&mut e, "CREATE LENS x int").unwrap();
+        run(&mut e, "APPEND LENS x 0 5 3").unwrap();
+        run(&mut e, "APPEND LENS x 5 10 7").unwrap();
+        assert_eq!(
+            run(&mut e, "REDUCE LENS x 0 10 USING min").unwrap(),
+            Output::Value(Some(Value::Int(3)))
+        );
+        assert_eq!(
+            run(&mut e, "REDUCE LENS x 0 10 USING max").unwrap(),
+            Output::Value(Some(Value::Int(7)))
+        );
+    }
+
+    #[test]
+    fn reduce_avg_time_weighted() {
+        // Two equal-duration segments: avg = (3+7)/2 = 5.0
+        let mut e = setup();
+        run(&mut e, "CREATE LENS x int").unwrap();
+        run(&mut e, "APPEND LENS x 0 5 3").unwrap();
+        run(&mut e, "APPEND LENS x 5 10 7").unwrap();
+        let Output::Value(Some(Value::Float(v))) =
+            run(&mut e, "REDUCE LENS x 0 10 USING avg").unwrap()
+        else {
+            panic!("expected float");
+        };
+        assert!((v - 5.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn reduce_avg_weighted_by_duration() {
+        // [0,1) = 1, [1,10) = 10  →  weighted avg = (1*1 + 9*10) / 10 = 91/10 = 9.1
+        let mut e = setup();
+        run(&mut e, "CREATE LENS x int").unwrap();
+        run(&mut e, "APPEND LENS x 0 1 1").unwrap();
+        run(&mut e, "APPEND LENS x 1 10 10").unwrap();
+        let Output::Value(Some(Value::Float(v))) =
+            run(&mut e, "REDUCE LENS x 0 10 USING avg").unwrap()
+        else {
+            panic!("expected float");
+        };
+        assert!((v - 9.1).abs() < 1e-9);
+    }
+
+    #[test]
+    fn reduce_returns_none_for_uncovered_range() {
+        let mut e = setup();
+        run(&mut e, "CREATE LENS x int").unwrap();
+        run(&mut e, "APPEND LENS x 0 5 1").unwrap();
+        assert_eq!(
+            run(&mut e, "REDUCE LENS x 10 20 USING avg").unwrap(),
+            Output::Value(None)
+        );
+    }
+
+    #[test]
+    fn reduce_inverted_range_errors() {
+        let mut e = setup();
+        run(&mut e, "CREATE LENS x int").unwrap();
+        assert_eq!(
+            run(&mut e, "REDUCE LENS x 10 5 USING min"),
+            Err(ExecError::InvalidRange)
+        );
+    }
+
+    #[test]
+    fn reduce_unknown_lens_errors() {
+        let mut e = setup();
+        assert_eq!(
+            run(&mut e, "REDUCE LENS ghost 0 10 USING avg"),
+            Err(ExecError::UnknownLens("ghost".into()))
+        );
+    }
+
+    #[test]
+    fn derive_with_rolling_avg() {
+        // avg(x, -10, 0) at t=10 covers [0,10): values [0,5)=1 and [5,10)=2
+        // time-weighted avg = (5*1 + 5*2) / 10 = 1.5
+        let mut e = setup();
+        run(&mut e, "CREATE LENS x int").unwrap();
+        run(&mut e, "APPEND LENS x 0 5 1").unwrap();
+        run(&mut e, "APPEND LENS x 5 10 2").unwrap();
+        run(&mut e, "DERIVE LENS smooth AS avg(x, -10, 0)").unwrap();
+        let Output::Value(Some(Value::Float(v))) = run(&mut e, "AT LENS smooth 10").unwrap() else {
+            panic!("expected float");
+        };
+        assert!((v - 1.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn derive_with_rolling_min() {
+        let mut e = setup();
+        run(&mut e, "CREATE LENS x int").unwrap();
+        run(&mut e, "APPEND LENS x 0 5 10").unwrap();
+        run(&mut e, "APPEND LENS x 5 10 3").unwrap();
+        run(&mut e, "DERIVE LENS lo AS min(x, -10, 0)").unwrap();
+        // at t=10 window covers [0,10): min of 10 and 3 = 3
+        assert_eq!(
+            run(&mut e, "AT LENS lo 10").unwrap(),
+            Output::Value(Some(Value::Int(3)))
+        );
+    }
+
+    #[test]
+    fn derive_agg_in_comparison() {
+        // hot = x > avg(x, -10, 0): true when current value exceeds rolling avg
+        let mut e = setup();
+        run(&mut e, "CREATE LENS x int").unwrap();
+        run(&mut e, "APPEND LENS x 0 5 1").unwrap();
+        run(&mut e, "APPEND LENS x 5 10 2").unwrap();
+        run(&mut e, "DERIVE LENS hot AS x > avg(x, -10, 0)").unwrap();
+        // at t=7 x=2, avg([−3,7)) = avg([2,7): only [5,7)=2 → avg=2.0; 2>2 = false
+        // at t=8 x=2, avg([−2,8)) = avg([6,8): value=2 → avg=2.0; 2>2.0 = false
+        // Let's just check a known case: at t=5 window is [-5,5): only [0,5)=1 → avg=1.0; x(5)=2 > 1.0 = true
+        assert_eq!(
+            run(&mut e, "AT LENS hot 5").unwrap(),
+            Output::Value(Some(Value::Bool(true)))
+        );
+    }
+
+    #[test]
+    fn reduce_on_derived_lens() {
+        let mut e = setup();
+        run(&mut e, "CREATE LENS x int").unwrap();
+        run(&mut e, "APPEND LENS x 0 5 2").unwrap();
+        run(&mut e, "APPEND LENS x 5 10 4").unwrap();
+        run(&mut e, "DERIVE LENS doubled AS x * 2").unwrap();
+        assert_eq!(
+            run(&mut e, "REDUCE LENS doubled 0 10 USING sum").unwrap(),
+            Output::Value(Some(Value::Int(12))) // 2*2*5 + 4*2*5 = 20+40... wait
+        );
+        // doubled over [0,5) = 4, over [5,10) = 8; sum = 4+8 = 12 ✓
+    }
 
     #[test]
     fn lenses_are_isolated_per_database() {

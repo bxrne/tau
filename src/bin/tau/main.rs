@@ -65,6 +65,10 @@ pub struct Config {
     /// Log level (error, warn, info, debug, trace).
     #[arg(short, long, default_value = "info")]
     pub log_level: String,
+
+    /// Number of layers per lens before automatic compaction into one.
+    #[arg(long, default_value = "8")]
+    pub compact_threshold: usize,
 }
 
 fn main() -> io::Result<()> {
@@ -89,11 +93,19 @@ fn main() -> io::Result<()> {
                 "WAL enabled but no path provided (use -w/--wal-path)",
             )
         })?;
-        info!(wal_path = %wal_path.display(), "starting with in-memory store and WAL enabled");
-        Arc::new(RwLock::new(Executor::with_wal(wal_path)?))
+        info!(wal_path = %wal_path.display(), compact_threshold = config.compact_threshold, "starting with WAL");
+        Arc::new(RwLock::new(Executor::with_wal_threshold(
+            wal_path,
+            config.compact_threshold,
+        )?))
     } else {
-        info!("starting with in-memory store (no WAL)");
-        Arc::new(RwLock::new(Executor::new()))
+        info!(
+            compact_threshold = config.compact_threshold,
+            "starting in-memory (no WAL)"
+        );
+        Arc::new(RwLock::new(Executor::with_threshold(
+            config.compact_threshold,
+        )))
     };
 
     for incoming in listener.incoming() {

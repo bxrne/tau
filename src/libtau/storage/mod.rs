@@ -5,5 +5,5 @@ pub mod wal;
 
 pub use disk::Disk;
 pub use memory::InMemory;
-pub use store::Store;
+pub use store::{COMPACT_THRESHOLD, Store, compact_layers};
 pub use wal::{Codec, Wal, WalEntry};

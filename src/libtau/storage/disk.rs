@@ -11,7 +11,7 @@
 use crc32fast::Hasher;
 
 use crate::libtau::model::{Layer, LayerId, Tau};
-use crate::libtau::storage::store::Store;
+use crate::libtau::storage::store::{COMPACT_THRESHOLD, Store, compact_layers};
 use std::collections::BTreeMap;
 use std::io::{self, BufReader, Read, Write};
 use std::path::Path;
@@ -138,6 +138,7 @@ impl<V: Codec> DiskEntry<V> {
 pub struct Disk<V> {
     path: std::path::PathBuf,
     lenses: BTreeMap<String, Vec<Layer<V>>>,
+    compact_threshold: usize,
 }
 
 impl<V: Clone + Codec> Disk<V> {
@@ -203,13 +204,16 @@ impl<V: Clone + Codec> Disk<V> {
             }
         }
 
-        Ok(Self { path, lenses })
+        Ok(Self {
+            path,
+            lenses,
+            compact_threshold: COMPACT_THRESHOLD,
+        })
     }
 
     /// Create a new store at `path`.
     pub fn create(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = path.as_ref().to_path_buf();
-        // Ensure parent directory exists
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -226,6 +230,7 @@ impl<V: Clone + Codec> Disk<V> {
         Ok(Self {
             path,
             lenses: BTreeMap::new(),
+            compact_threshold: COMPACT_THRESHOLD,
         })
     }
 
@@ -262,9 +267,13 @@ impl<V: Clone + Codec> Disk<V> {
     }
 }
 
-impl<V: Clone + Send + Sync + 'static> Store<V> for Disk<V> {
+impl<V: Clone + PartialEq + Send + Sync + 'static> Store<V> for Disk<V> {
     fn append(&mut self, lens: &str, layer: Layer<V>) {
-        self.lenses.entry(lens.to_string()).or_default().push(layer);
+        let layers = self.lenses.entry(lens.to_string()).or_default();
+        layers.push(layer);
+        if layers.len() > self.compact_threshold {
+            compact_layers(layers);
+        }
     }
 
     fn layers(&self, lens: &str) -> Option<&Vec<Layer<V>>> {
