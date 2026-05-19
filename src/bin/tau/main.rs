@@ -1,46 +1,44 @@
 //! Tau TCP server.
 //!
-//! A line-oriented query service over plain TCP.  One statement per line in;
-//! one response line out.  Designed to be friendly to `nc`, scriptable from
-//! any language, and fast enough that the protocol is the bottleneck rather
-//! than the server.
+//! A line-oriented query service over TCP, optionally secured with TLS and
+//! username/password authentication.  One statement per line in; one response
+//! line out.
 //!
-//! # Optimisations
+//! # Security
 //!
-//! * `TCP_NODELAY` on every accepted socket — disables Nagle so small
-//!   single-statement requests aren't delayed.
-//! * Buffered I/O on both directions per connection.
-//! * Per-connection thread, sharing one [`Executor`] behind an [`RwLock`].
-//!   `AT` and `RANGE` take the **read** lock and run concurrently; mutations
-//!   take the **write** lock.
-//! * `SO_REUSEADDR` so restarts don't hit "address already in use".
+//! * `--tls` — enables TLS. Provide `--tls-cert` / `--tls-key` PEM files or
+//!   omit both to generate an ephemeral self-signed certificate (dev only).
+//! * `--auth` — enables authentication. Requires `--username` and `--password`.
+//!   The first message from every client must be `AUTH <user> <pass>\n`.
+//! * `TAU_ENCRYPTION_KEY` env var — 64 hex chars (32 bytes). When set, WAL
+//!   entries are AES-256-GCM encrypted before being written to disk.
 //!
 //! # Wire format
 //!
 //! ```text
+//! → AUTH admin s3cr3t            (if --auth is set)
+//! ← OK
 //! → CREATE DATABASE main
 //! ← OK
 //! → AT LENS x 5
 //! ← VAL i42
-//! → RANGE LENS x 0 10
-//! ← RANGE 2; 0:5:i1; 5:10:i2
-//! → BOGUS
-//! ← ERR parse: ...
+//! → QUIT
+//! ← OK BYE
 //! ```
-//!
-//! Values are encoded via the [`Codec`] trait: `i<int>`, `f<float>`,
-//! `s<percent-escaped>`, `b<0|1>`, `n`.  Missing-value responses use the
-//! sentinel `NIL`.
-//!
-//! `QUIT` / `EXIT` (case-insensitive) close the connection cleanly.
 
-use std::io::{self, BufRead, BufReader, BufWriter, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::thread;
 
 use clap::Parser;
+use rcgen::generate_simple_self_signed;
+use rustls::ServerConfig;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use rustls::server::ServerConnection;
+use tau::libtau::auth::Credentials;
+use tau::libtau::crypto;
 use tau::{Codec, ExecError, Executor, Output, parse};
 use tracing::{error, info, warn};
 
@@ -69,23 +67,50 @@ pub struct Config {
     /// Number of layers per lens before automatic compaction into one.
     #[arg(long, default_value = "8")]
     pub compact_threshold: usize,
+
+    /// Enable TLS (encryption in transit).
+    #[arg(long)]
+    pub tls: bool,
+
+    /// Path to PEM-encoded TLS certificate. Generates an ephemeral self-signed
+    /// cert when omitted (requires --tls).
+    #[arg(long, value_name = "PATH")]
+    pub tls_cert: Option<PathBuf>,
+
+    /// Path to PEM-encoded TLS private key (requires --tls).
+    #[arg(long, value_name = "PATH")]
+    pub tls_key: Option<PathBuf>,
+
+    /// Enable username/password authentication.
+    #[arg(long)]
+    pub auth: bool,
+
+    /// Username for authentication (requires --auth).
+    #[arg(long, value_name = "NAME")]
+    pub username: Option<String>,
+
+    /// Password for authentication (requires --auth). Hashed with argon2id at
+    /// startup; the plaintext is not retained.
+    #[arg(long, value_name = "PASS")]
+    pub password: Option<String>,
 }
 
 fn main() -> io::Result<()> {
     let config = Config::parse();
 
-    // Initialize tracing with configured level
     let level = config.log_level.parse().unwrap_or(tracing::Level::INFO);
     tracing_subscriber::fmt()
         .with_max_level(level)
         .with_target(false)
         .init();
 
-    let bind = config.bind.clone();
-    let listener = TcpListener::bind(&bind)?;
-    info!(%bind, "tau server listening");
+    // Encryption key for WAL / Disk (optional).
+    let enc_key = crypto::parse_key_from_env();
+    if enc_key.is_some() {
+        info!("WAL encryption enabled (TAU_ENCRYPTION_KEY)");
+    }
 
-    // Create executor based on configuration
+    // Build executor.
     let executor: Arc<RwLock<Executor>> = if config.wal {
         let wal_path = config.wal_path.ok_or_else(|| {
             io::Error::new(
@@ -97,6 +122,7 @@ fn main() -> io::Result<()> {
         Arc::new(RwLock::new(Executor::with_wal_threshold(
             wal_path,
             config.compact_threshold,
+            enc_key,
         )?))
     } else {
         info!(
@@ -108,16 +134,43 @@ fn main() -> io::Result<()> {
         )))
     };
 
+    // Build credentials (if auth enabled).
+    let credentials: Option<Arc<Credentials>> = if config.auth {
+        let username = config.username.ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "--auth requires --username")
+        })?;
+        let password = config.password.ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "--auth requires --password")
+        })?;
+        info!(%username, "authentication enabled");
+        Some(Arc::new(Credentials::new(&username, &password)))
+    } else {
+        None
+    };
+
+    // Build TLS config (if TLS enabled).
+    let tls_config: Option<Arc<ServerConfig>> = if config.tls {
+        let server_cfg = build_tls_config(config.tls_cert.as_deref(), config.tls_key.as_deref())?;
+        info!("TLS enabled");
+        Some(Arc::new(server_cfg))
+    } else {
+        None
+    };
+
+    let bind = config.bind.clone();
+    let listener = TcpListener::bind(&bind)?;
+    info!(%bind, "tau server listening");
+
     for incoming in listener.incoming() {
         match incoming {
             Ok(stream) => {
                 let exec = executor.clone();
-                // One thread per connection.  Connections are long-lived
-                // pipelines of statements, so creation cost is amortised.
+                let creds = credentials.clone();
+                let tls = tls_config.clone();
                 thread::Builder::new()
                     .name("tau-conn".into())
                     .spawn(move || {
-                        if let Err(e) = handle(stream, exec) {
+                        if let Err(e) = handle(stream, exec, tls, creds) {
                             warn!(error = %e, "connection ended with error");
                         }
                     })
@@ -130,42 +183,136 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
-/// Drive a single client connection: read line, execute, write response,
-/// repeat until the client disconnects or sends `QUIT`/`EXIT`.
-fn handle(stream: TcpStream, exec: Arc<RwLock<Executor>>) -> io::Result<()> {
-    let peer = stream.peer_addr()?;
-    stream.set_nodelay(true)?;
-    info!(%peer, "client connected");
+fn build_tls_config(
+    cert_path: Option<&std::path::Path>,
+    key_path: Option<&std::path::Path>,
+) -> io::Result<ServerConfig> {
+    let (certs, private_key) = match (cert_path, key_path) {
+        (Some(cp), Some(kp)) => {
+            let cert_file = std::fs::File::open(cp)?;
+            let certs: Vec<CertificateDer<'static>> =
+                rustls_pemfile::certs(&mut std::io::BufReader::new(cert_file))
+                    .collect::<Result<_, _>>()
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-    let writer_stream = stream.try_clone()?;
-    let reader = BufReader::new(stream);
-    let mut writer = BufWriter::new(writer_stream);
+            let key_file = std::fs::File::open(kp)?;
+            let key = rustls_pemfile::private_key(&mut std::io::BufReader::new(key_file))
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "no private key found in file")
+                })?;
+            (certs, key)
+        }
+        (None, None) => {
+            warn!(
+                "no TLS cert/key provided — generating ephemeral self-signed certificate (not for production)"
+            );
+            let certified = generate_simple_self_signed(vec!["localhost".to_string()])
+                .map_err(io::Error::other)?;
+            let cert_der = CertificateDer::from(certified.cert.der().to_vec());
+            let key_der =
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(certified.key_pair.serialize_der()));
+            (vec![cert_der], key_der)
+        }
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "--tls-cert and --tls-key must both be provided (or both omitted for ephemeral)",
+            ));
+        }
+    };
 
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(e) => {
-                warn!(%peer, error = %e, "read error");
-                break;
-            }
-        };
-        let trimmed = line.trim();
+    ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, private_key)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
+fn parse_auth_line(line: &str) -> Option<(String, String)> {
+    let rest = line.trim().strip_prefix("AUTH ")?;
+    let (user, pass) = rest.split_once(' ')?;
+    Some((user.to_string(), pass.to_string()))
+}
+
+/// Drive a single client connection over any `Read + Write` stream.
+///
+/// Enforces authentication (if credentials are provided) as the very first
+/// exchange before any query is processed.
+fn run_query_loop<S: Read + Write>(
+    reader: &mut BufReader<S>,
+    peer: std::net::SocketAddr,
+    exec: &Arc<RwLock<Executor>>,
+    credentials: Option<&Credentials>,
+) -> io::Result<()> {
+    let mut authenticated = credentials.is_none();
+    let mut line_buf = String::new();
+
+    loop {
+        line_buf.clear();
+        let n = reader.read_line(&mut line_buf)?;
+        if n == 0 {
+            break; // EOF
+        }
+
+        let trimmed = line_buf.trim();
         if trimmed.is_empty() {
             continue;
         }
+
+        if !authenticated {
+            match (parse_auth_line(trimmed), credentials) {
+                (Some((u, p)), Some(creds)) if creds.verify(&u, &p) => {
+                    reader.get_mut().write_all(b"OK\n")?;
+                    reader.get_mut().flush()?;
+                    authenticated = true;
+                }
+                _ => {
+                    warn!(%peer, "authentication failed");
+                    reader.get_mut().write_all(b"ERR authentication failed\n")?;
+                    reader.get_mut().flush()?;
+                    break;
+                }
+            }
+            continue;
+        }
+
         if trimmed.eq_ignore_ascii_case("QUIT") || trimmed.eq_ignore_ascii_case("EXIT") {
-            writeln!(writer, "OK BYE")?;
-            writer.flush()?;
+            reader.get_mut().write_all(b"OK BYE\n")?;
+            reader.get_mut().flush()?;
             break;
         }
 
-        let response = handle_query(trimmed, &exec);
-        writeln!(writer, "{response}")?;
-        writer.flush()?;
+        let response = handle_query(trimmed, exec);
+        let response_line = format!("{response}\n");
+        reader.get_mut().write_all(response_line.as_bytes())?;
+        reader.get_mut().flush()?;
     }
 
     info!(%peer, "client disconnected");
     Ok(())
+}
+
+fn handle(
+    stream: TcpStream,
+    exec: Arc<RwLock<Executor>>,
+    tls_config: Option<Arc<ServerConfig>>,
+    credentials: Option<Arc<Credentials>>,
+) -> io::Result<()> {
+    let peer = stream.peer_addr()?;
+    stream.set_nodelay(true)?;
+    info!(%peer, "client connected");
+
+    let creds = credentials.as_deref();
+
+    if let Some(cfg) = tls_config {
+        let conn = ServerConnection::new(cfg).map_err(io::Error::other)?;
+        let tls_stream = rustls::StreamOwned::new(conn, stream);
+        let mut reader = BufReader::new(tls_stream);
+        run_query_loop(&mut reader, peer, &exec, creds)
+    } else {
+        let mut reader = BufReader::new(stream);
+        run_query_loop(&mut reader, peer, &exec, creds)
+    }
 }
 
 /// Parse + dispatch one query line.  Returns the response line (without the
@@ -194,7 +341,6 @@ fn format_output(o: &Output) -> String {
         Output::Value(None) => "VAL NIL".into(),
         Output::Value(Some(v)) => format!("VAL {}", v.encode()),
         Output::Range(segments) => {
-            // "RANGE <n>" followed by "; <s>:<e>:<codec>" per segment.
             let mut out = String::with_capacity(16 + segments.len() * 24);
             out.push_str(&format!("RANGE {}", segments.len()));
             for (s, e, v) in segments {
@@ -216,7 +362,9 @@ fn format_error(e: &ExecError) -> String {
             lens,
             expected,
             got,
-        } => format!("type mismatch on {lens}: expected {expected:?}, got {got}"),
+        } => {
+            format!("type mismatch on {lens}: expected {expected:?}, got {got}")
+        }
         ExecError::InvalidExpr(m) => format!("invalid expression: {m}"),
         ExecError::InvalidRange => "invalid range (start >= end)".into(),
     }
@@ -299,7 +447,6 @@ mod tests {
 
     #[test]
     fn read_only_router_picks_shared_lock() {
-        // Smoke-check: a write then concurrent reads complete.
         let e = exec();
         handle_query("CREATE DATABASE main", &e);
         handle_query("CREATE LENS x int", &e);
@@ -346,5 +493,18 @@ mod tests {
         let stmt = Stmt::CreateDatabase { name: "a".into() };
         let res = guard.exec_read(&stmt);
         assert!(matches!(res, Err(ExecError::InvalidExpr(_))));
+    }
+
+    #[test]
+    fn parse_auth_line_splits_user_and_pass() {
+        let result = parse_auth_line("AUTH admin s3cr3t");
+        assert_eq!(result, Some(("admin".into(), "s3cr3t".into())));
+    }
+
+    #[test]
+    fn parse_auth_line_returns_none_for_non_auth() {
+        assert_eq!(parse_auth_line("CREATE DATABASE x"), None);
+        assert_eq!(parse_auth_line("AUTH"), None);
+        assert_eq!(parse_auth_line(""), None);
     }
 }

@@ -53,6 +53,59 @@ DERIVE LENS band_hi  AS avg(temp, -60, 60) + 2.0
 
 `avg` is time-weighted (area under the step function divided by window duration).
 
+## Security
+
+Tau supports three independent security layers, all opt-in:
+
+### Encryption in transit (TLS)
+
+```bash
+# Ephemeral self-signed cert — dev only
+cargo run --release -- --tls
+
+# Production: provide your own cert and key
+cargo run --release -- --tls --tls-cert server.crt --tls-key server.key
+```
+
+Clients connect with any TLS-capable tool (e.g. `openssl s_client`).
+
+### Authentication
+
+```bash
+cargo run --release -- --auth --username admin --password s3cr3t
+```
+
+With auth enabled, every client must send `AUTH <user> <pass>` as its **first** message before any query is accepted. The password is hashed with argon2id at startup and never retained in plaintext.
+
+Wire exchange with auth:
+```
+→ AUTH admin s3cr3t
+← OK
+→ CREATE DATABASE main
+← OK
+```
+
+### Encryption at rest
+
+Set `TAU_ENCRYPTION_KEY` to a 64-char hex string (32 bytes) before starting the server. WAL entries are AES-256-GCM encrypted (random 12-byte nonce per entry); the Disk backend encrypts the whole file on every flush.
+
+```bash
+TAU_ENCRYPTION_KEY=$(openssl rand -hex 32) \
+  cargo run --release -- --wal -w data.wal
+```
+
+Files written with a key cannot be read without it. Unencrypted WAL files remain readable when no key is set (backward compatible).
+
+### Combining all three
+
+```bash
+TAU_ENCRYPTION_KEY=$(openssl rand -hex 32) \
+  cargo run --release -- \
+    --tls --tls-cert server.crt --tls-key server.key \
+    --auth --username admin --password s3cr3t \
+    --wal -w /var/lib/tau/data.wal
+```
+
 ## Server
 
 ```
@@ -72,15 +125,32 @@ Options:
           Log level (error, warn, info, debug, trace) [default: info]
       --compact-threshold <COMPACT_THRESHOLD>
           Number of layers per lens before automatic compaction into one [default: 8]
+      --tls
+          Enable TLS (encryption in transit)
+      --tls-cert <PATH>
+          PEM-encoded TLS certificate (omit to generate ephemeral self-signed)
+      --tls-key <PATH>
+          PEM-encoded TLS private key
+      --auth
+          Enable username/password authentication
+      --username <NAME>
+          Username (requires --auth)
+      --password <PASS>
+          Password hashed with argon2id at startup (requires --auth)
   -h, --help
           Print help
   -V, --version
           Print version
+
+Environment:
+  TAU_ENCRYPTION_KEY   64 hex chars (32 bytes) — enables AES-256-GCM encryption at rest
 ```
 
 Wire protocol: line-oriented TCP — one statement per line in, one response line out.
 
 ```
+→ AUTH admin s3cr3t        (only if --auth is set)
+← OK
 → CREATE DATABASE main
 ← OK
 → APPEND LENS temp 0 100 18.5
@@ -100,8 +170,8 @@ Values encode as `i<int>`, `f<float>`, `s<percent-escaped>`, `b<0|1>`, `n` (null
 ## Storage Backends
 
 - **`InMemory`** — heap-backed `HashMap`, suitable for tests and ephemeral workloads.
-- **`Disk`** — binary file with a 16-byte header (magic + CRC32) and per-entry CRC32 checksums.
-- **`Wal`** — append-only flat file; each line is `<crc32> <layer_id> <lens> <start>:<end>:<value> …`. Replayed into a fresh store on startup.
+- **`Disk`** — binary file; plain (`TAU\x01` magic) or AES-256-GCM encrypted (`TAUE` magic). Per-entry CRC32 checksums when unencrypted; AEAD authentication tag when encrypted.
+- **`Wal`** — append-only flat file; each line is either `<crc32> <layer_id> <lens> <start>:<end>:<value> …` (plain) or `E:<base64(nonce||ciphertext)>` (encrypted). Replayed into a fresh store on startup.
 
 ## Library Usage
 
