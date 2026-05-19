@@ -1,3 +1,6 @@
+// TODO: support a registry of multiple users rather than a single credential
+// pair; required for multi-tenant deployments and for credential revocation.
+
 use argon2::{
     Argon2,
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},

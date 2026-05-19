@@ -117,6 +117,9 @@ where
                             .map(|t| (t.start, t.end, t.value.clone()))
                             .collect(),
                     };
+                    // TODO: propagate the WAL I/O error instead of panicking;
+                    // a failed fsync should leave the in-memory store unchanged
+                    // so the caller can decide whether to retry or abort.
                     wal.lock()
                         .unwrap()
                         .append(&entry)
