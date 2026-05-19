@@ -1,82 +1,83 @@
 # Tau
 
+[![Build](https://github.com/bxrne/tau/actions/workflows/sonar.yml/badge.svg)](https://github.com/bxrne/tau/actions/workflows/sonar.yml)
 [![CI](https://github.com/bxrne/tau/actions/workflows/ci.yml/badge.svg)](https://github.com/bxrne/tau/actions/workflows/ci.yml)
 [![Release](https://github.com/bxrne/tau/actions/workflows/release.yml/badge.svg)](https://github.com/bxrne/tau/actions/workflows/release.yml)
 
-A time-series database built on immutable, layered traces.
+[![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=bxrne_tau&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=bxrne_tau)
+[![CodeQL](https://github.com/bxrne/tau/actions/workflows/github-code-scanning/codeql/badge.svg)](https://github.com/bxrne/tau/actions/workflows/github-code-scanning/codeql)
+[![Dependabot Updates](https://github.com/bxrne/tau/actions/workflows/dependabot/dependabot-updates/badge.svg)](https://github.com/bxrne/tau/actions/workflows/dependabot/dependabot-updates)
 
-## Core Concepts
+**A bitemporal time series database. Corrections, restatements and out of order arrivals are first class. Old values are never overwritten and every query returns the right answer at any point in time.**
 
-- **Tau<V>**: Value over `[start, end)` interval. Corrections create new layers, never mutations.
-- **Layer<V>**: Sorted, non-overlapping taus. O(log n) lookup, O(1) clone.
-- **Lens<V>**: Base (layer stack, newest wins) or Derived (lazy expression view).
+1. **Corrections are first class.** Every append is an immutable layer. The newest layer wins where layers overlap. Old values stay on disk.
+2. **Compaction is a provable normalisation.** A sweep line algorithm collapses N layers into one canonical layer. Query equivalent before and after. Checked by property based tests on every build.
+3. **TauQL.** A tiny query language. One statement in, one response line out. Derived lenses compose as lazy closures. Rolling window aggregations are first class expressions.
+4. **Library or server.** Embed `libtau` in a Rust process or run the standalone TCP server. Same engine.
 
-## Query Language
+Time series data is not static. Sensors drift. Prices get restated. Audit records get amended. Tau models this directly. Values live in intervals `[start, end)` that tile without gaps or overlap. Corrections append as new layers. The newest layer wins at query time. Compaction collapses any stack of layers into a single canonical form with every query result preserved exactly. The invariants that make this correct are not asserted by hand. They are verified by randomised property tests and a deterministic simulation tester driven against a reference oracle.
 
-```sql
-CREATE DATABASE <name>           -- registry; first one is active
-DROP DATABASE <name>
-USE DATABASE <name>
+**Documentation:** [tau.bxrne.com](https://tau.bxrne.com)
 
-CREATE LENS <name> <type>        -- int | float | str | bool | bytes
-APPEND LENS <name> <start> <end> <value>
-DERIVE LENS <name> AS <expr>
-AT LENS <name> <timestamp>
-RANGE LENS <name> <start> <end> [WHERE <expr>]
-DROP LENS <name>
-```
 
-Expressions: `+ - * / %`, `== != < <= > >=`, `&& ||`, unary `- !`, parentheses.
-
-## Storage Backends
-
-- **InMemory**: Heap-backed layer stack for ephemeral workloads.
-- **Disk**: Binary file with header CRC32 + per-entry checksums.
-- **WAL**: Write-ahead log for durability; replays on startup.
-
-## Server
+## Quick start
 
 ```bash
-tau                           # 127.0.0.1:7070 (in-memory, no WAL)
-tau --wal -w /path/to.wal     # Enable WAL for durability
-tau 0.0.0.0:9000              # Custom bind address
-tau --help                    # Show all options
+# From source — no config file needed, starts in-memory on 127.0.0.1:7070
+git clone https://github.com/bxrne/tau && cd tau
+cargo run --release --bin tau
+
+# With a config file
+cp config.toml my.toml && $EDITOR my.toml
+cargo run --release --bin tau -- --config my.toml
+
+# Docker
+docker pull ghcr.io/bxrne/tau:latest
+docker run --rm -p 7070:7070 -v $PWD/config.toml:/data/config.toml:ro \
+  ghcr.io/bxrne/tau:latest --config /data/config.toml
 ```
 
-Wire protocol: line-oriented TCP. Values encode as `i<int>`, `f<float>`, `s<str>`, `b<0|1>`, `n<NIL>`.
+Connect with the interactive client (`ctl`) and try a correction:
 
-## Example
+```bash
+cargo run --release --bin ctl
+τ connect demo 127.0.0.1:7070
+τ CREATE DATABASE sensors
+τ CREATE LENS temperature float
+τ APPEND LENS temperature 0 3600 18.5, 3600 7200 21.0
+τ AT LENS temperature 1800
+VAL f18.5
 
-```rust
-use tau::{Executor, Output, parse};
-
-let mut e = Executor::new();
-for q in [
-    "CREATE DATABASE main",
-    "CREATE LENS celsius float",
-    "APPEND LENS celsius 0 100 18.0",
-    "DERIVE LENS f AS celsius * 9.0 / 5.0 + 32.0",
-] {
-    e.exec(&parse(q).unwrap().1).unwrap();
-}
-
-let (_, stmt) = parse("AT LENS f 50").unwrap();
-assert_eq!(e.exec(&stmt).unwrap(), Output::Value(Some(Value::Float(64.4))));
+τ APPEND LENS temperature 0 3600 20.0   # correction: new layer over same range
+τ AT LENS temperature 1800
+VAL f20                                  # newest layer wins; prior layer still on disk until compaction
+τ REDUCE LENS temperature 0 7200 USING avg
+VAL f20.5                                # aggregate reflects the correction
 ```
 
-## Parser
 
-Uses **nom** parser combinators with PEG-style grammar. The query parser handles:
+## Documentation
 
-- SQL keywords and identifiers
-- Numeric literals (int, float) and strings
-- Binary/unary operators with precedence
-- WHERE clause expressions for filtering
+- [Overview](https://tau.bxrne.com/docs/overview/). The data model.
+- [TauQL Reference](https://tau.bxrne.com/docs/tauql/). Every statement and operator.
+- [How it works](https://tau.bxrne.com/docs/how-it-works/). Storage, WAL, compaction, concurrency.
+- [Configuration](https://tau.bxrne.com/docs/configuration/). TOML config file reference.
+- [Testing](https://tau.bxrne.com/docs/testing/). Property based tests and unit anchors.
+- [Containers](https://tau.bxrne.com/docs/containers/). Docker stack with Prometheus and Grafana.
+- [Examples](https://tau.bxrne.com/docs/examples/). Worked queries against real datasets.
+
 
 ## Development
 
 ```bash
-cargo test         # Run tests
-cargo run --release  # Run server
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo nextest run --release               # preferred runner (used in CI)
 ```
 
+See [CONTRIBUTING.md](CONTRIBUTING.md) for full setup and workflow details.
+
+
+## License
+
+[Apache License 2.0](LICENSE)

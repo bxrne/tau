@@ -1,0 +1,120 @@
+use std::env;
+use std::io;
+
+use aes_gcm::{
+    Aes256Gcm, Nonce,
+    aead::{Aead, KeyInit},
+};
+use rand::RngCore;
+
+fn decode_hex(s: &str) -> Option<Vec<u8>> {
+    if !s.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+        .collect()
+}
+
+pub fn parse_key_from_env() -> Result<Option<[u8; 32]>, String> {
+    let hex = match env::var("TAU_ENCRYPTION_KEY") {
+        Ok(s) => s,
+        Err(_) => return Ok(None),
+    };
+    let bytes = decode_hex(&hex)
+        .ok_or_else(|| "TAU_ENCRYPTION_KEY must be 64 hex chars (32 bytes)".to_string())?;
+    if bytes.len() != 32 {
+        return Err("TAU_ENCRYPTION_KEY must be exactly 32 bytes (64 hex chars)".to_string());
+    }
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&bytes);
+    Ok(Some(key))
+}
+
+pub fn encrypt(key: &[u8; 32], plaintext: &[u8]) -> Vec<u8> {
+    let cipher = Aes256Gcm::new_from_slice(key).expect("key is 32 bytes");
+    let mut nonce_bytes = [0u8; 12];
+    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    let nonce = Nonce::from_slice(&nonce_bytes);
+    let ciphertext = cipher.encrypt(nonce, plaintext).expect("encryption failed");
+    let mut out = Vec::with_capacity(12 + ciphertext.len());
+    out.extend_from_slice(&nonce_bytes);
+    out.extend_from_slice(&ciphertext);
+    out
+}
+
+pub fn decrypt(key: &[u8; 32], blob: &[u8]) -> io::Result<Vec<u8>> {
+    if blob.len() < 12 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "encrypted blob too short",
+        ));
+    }
+    let (nonce_bytes, ciphertext) = blob.split_at(12);
+    let cipher = Aes256Gcm::new_from_slice(key).expect("key is 32 bytes");
+    let nonce = Nonce::from_slice(nonce_bytes);
+    cipher.decrypt(nonce, ciphertext).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "decryption failed: wrong key or corrupted data",
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hegel::TestCase;
+    use hegel::generators as gs;
+    use pretty_assertions::assert_eq;
+
+    #[hegel::test]
+    fn encrypt_decrypt_roundtrips(tc: TestCase) {
+        let key_bytes = tc.draw(gs::vecs(gs::integers::<u8>()).min_size(32).max_size(32));
+        let plaintext = tc.draw(gs::vecs(gs::integers::<u8>()).max_size(2048));
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&key_bytes);
+        let cipher = encrypt(&key, &plaintext);
+        let recovered = decrypt(&key, &cipher).expect("decrypt must succeed on its own ciphertext");
+        assert_eq!(plaintext, recovered);
+    }
+
+    #[hegel::test]
+    fn decrypt_rejects_too_short_blobs(tc: TestCase) {
+        let blob = tc.draw(gs::vecs(gs::integers::<u8>()).max_size(11));
+        let key_bytes = tc.draw(gs::vecs(gs::integers::<u8>()).min_size(32).max_size(32));
+        let key: [u8; 32] = key_bytes.try_into().expect("exactly 32 bytes");
+        assert!(decrypt(&key, &blob).is_err());
+    }
+
+    #[hegel::test]
+    fn decrypt_rejects_wrong_key(tc: TestCase) {
+        let plaintext = tc.draw(gs::vecs(gs::integers::<u8>()).min_size(1).max_size(512));
+        let key_bytes = tc.draw(gs::vecs(gs::integers::<u8>()).min_size(32).max_size(32));
+        let key_a: [u8; 32] = key_bytes.try_into().expect("exactly 32 bytes");
+        let mut key_b = key_a;
+        key_b[0] ^= 1;
+        let cipher = encrypt(&key_a, &plaintext);
+        assert!(decrypt(&key_b, &cipher).is_err());
+    }
+
+    #[test]
+    fn decode_hex_valid() {
+        assert_eq!(decode_hex("deadbeef"), Some(vec![0xde, 0xad, 0xbe, 0xef]));
+        assert_eq!(decode_hex("00ff"), Some(vec![0x00, 0xff]));
+        assert_eq!(decode_hex(""), Some(vec![]));
+    }
+
+    #[test]
+    fn decode_hex_odd_length_returns_none() {
+        assert_eq!(decode_hex("abc"), None);
+        assert_eq!(decode_hex("f"), None);
+    }
+
+    #[test]
+    fn decode_hex_invalid_chars_returns_none() {
+        assert_eq!(decode_hex("zz"), None);
+        assert_eq!(decode_hex("gg"), None);
+    }
+}

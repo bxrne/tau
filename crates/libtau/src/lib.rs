@@ -1,0 +1,21 @@
+pub mod crypto;
+pub mod database;
+pub mod executor;
+pub mod metrics;
+pub mod model;
+pub mod ql;
+pub(crate) mod query;
+pub mod storage;
+pub mod users;
+pub mod value;
+pub mod wire;
+
+pub use database::Database;
+pub use executor::{ExecError, Executor, LayerInfo, Output, StorageBackend};
+pub use metrics::Metrics;
+pub use model::{Layer, LayerId, Lens, LensKind, Tau, Timestamp};
+pub use ql::{AggFunc, Stmt, needs_registry_lock, parse};
+pub use storage::{COMPACT_THRESHOLD, Codec, DEFAULT_ZSTD_LEVEL, Disk, InMemory, Wal, WalEntry};
+pub use users::{Perm, User, UserStore};
+pub use value::Value;
+pub use wire::{Response, WireError};

@@ -3,64 +3,198 @@ name: Release
 on:
   push:
     branches: [master]
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
-      include_optional_tools:
-        description: "Include additional artifacts"
+      tag:
+        description: "Existing release tag to (re)build artifacts for, e.g. v0.4.0"
         required: true
-        default: true
-        type: boolean
+        type: string
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: write
   pull-requests: write
+  packages: write
 
 jobs:
+  # Opens/updates the release PR on every push. Skipped for workflow_dispatch.
   release-please:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
       - uses: actions/checkout@v4
       - uses: googleapis/release-please-action@v4
+        id: release
         with:
-          release-type: simple
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
           draft: false
 
+  # Determines whether this run should produce release artifacts.
+  # Runs after release-please (or alone for workflow_dispatch).
+  gate:
+    needs: [release-please]
+    if: always()
+    runs-on: ubuntu-latest
+    outputs:
+      should_release: ${{ steps.decide.outputs.should_release }}
+      tag_name: ${{ steps.decide.outputs.tag_name }}
+    steps:
+      - name: Decide
+        id: decide
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "should_release=true"  >> "$GITHUB_OUTPUT"
+            echo "tag_name=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ needs.release-please.outputs.release_created }}" = "true" ]; then
+            echo "should_release=true"  >> "$GITHUB_OUTPUT"
+            echo "tag_name=${{ needs.release-please.outputs.tag_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            echo "tag_name="            >> "$GITHUB_OUTPUT"
+          fi
+
+  # Cross-compile binaries for each target. Both targets run independently
+  # so a failure in one does not cancel the other.
   build:
-    if: github.event_name == 'release'
+    needs: gate
+    if: needs.gate.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          ref: ${{ needs.gate.outputs.tag_name }}
+
+      # Install the toolchain that rust-toolchain.toml pins, then explicitly
+      # add the cross-compilation target to that same toolchain. Using
+      # `targets:` in the action alone adds the target to the *stable*
+      # toolchain instead of the pinned version, which causes the linker to
+      # fail with "can't find crate for `core`".
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Add cross-compilation target
+        run: rustup target add ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Cache Zig
+        id: cache-zig
+        uses: actions/cache@v4
+        with:
+          path: ~/zig
+          key: zig-linux-x86_64-0.13.0
+
+      - name: Install Zig
+        if: steps.cache-zig.outputs.cache-hit != 'true'
+        run: |
+          curl -sSfL \
+            "https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz" \
+            | tar -xJ -C ~/
+          mv ~/zig-linux-x86_64-0.13.0 ~/zig
+
+      - name: Add Zig to PATH
+        run: echo "$HOME/zig" >> "$GITHUB_PATH"
+
+      - name: Install cargo-zigbuild
+        run: which cargo-zigbuild || cargo install --locked cargo-zigbuild
+
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo zigbuild --release --target ${{ matrix.target }}
+
       - name: Package
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/tau dist/tau-${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/tau   dist/tau-${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/ctl   dist/ctl-${{ matrix.target }}
           tar -czf tau-${{ matrix.target }}.tar.gz -C dist .
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+
+      - uses: actions/upload-artifact@v4
         with:
           name: tau-${{ matrix.target }}
           path: tau-${{ matrix.target }}.tar.gz
 
+  docker:
+    needs: gate
+    if: needs.gate.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.tag_name }}
+
+      - name: Resolve image name
+        id: image
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          echo "name=ghcr.io/${owner}/tau" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Build and push Docker image
+        run: |
+          docker build -f container/Dockerfile \
+            -t ${{ steps.image.outputs.name }}:latest \
+            -t ${{ steps.image.outputs.name }}:${{ needs.gate.outputs.tag_name }} \
+            .
+          docker push ${{ steps.image.outputs.name }}:latest
+          docker push ${{ steps.image.outputs.name }}:${{ needs.gate.outputs.tag_name }}
+
+  helm:
+    needs: [gate, docker]
+    if: needs.gate.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.tag_name }}
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Package and push chart
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          TAG="${{ needs.gate.outputs.tag_name }}"
+          VER="${TAG#v}"
+          helm package container/helm/tau --version "${VER}" --app-version "${TAG}"
+          helm push "tau-${VER}.tgz" "oci://ghcr.io/${owner}/charts"
+
+  # Uploads binaries to the GitHub Release only after build, docker, and helm
+  # succeed, so the release is never published with partial artifacts.
   upload-release:
-    needs: build
+    needs: [gate, build, docker, helm]
+    if: needs.gate.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
-      - name: Upload release assets
-        uses: softprops/action-gh-release@v2
+
+      - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.gate.outputs.tag_name }}
           files: |
             tau-x86_64-unknown-linux-gnu/*.tar.gz
             tau-aarch64-unknown-linux-gnu/*.tar.gz

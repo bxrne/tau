@@ -1,0 +1,49 @@
+{% macro menu() %}
+    <nav class="menu">
+        <ul class="menu__inner menu__inner--desktop">
+            {% if config.extra.show_menu_items is defined -%}
+                {% for menu_item in config.extra.main_menu | slice(end=config.extra.show_menu_items) -%}
+                    <li>
+                        <a href="{{ menu::get_link(item=menu_item) }}">{{ menu_item.name }}</a>
+                    </li>
+                {% endfor -%}
+
+                {%- set main_len = config.extra.main_menu | length -%}
+                {%- set show_len = config.extra.show_menu_items -%}
+
+                {%- if main_len > show_len -%}
+                    <ul class="menu__sub-inner">
+                        <li class="menu__sub-inner-more-trigger">{{ config.extra.menu_more }} ▾</li>
+                        <ul class="menu__sub-inner-more hidden">
+                            {{ menu::items(menu=config.extra.main_menu | slice(start=config.extra.show_menu_items)) }}
+                        </ul>
+                    </ul>
+                {%- endif -%}
+            {% else -%}
+                {{ menu::items(menu=config.extra.main_menu) }}
+            {%- endif -%}
+        </ul>
+
+        <a href="https://github.com/bxrne/tau" class="menu__github" target="_blank" rel="noopener noreferrer">GitHub</a>
+
+        <ul class="menu__inner menu__inner--mobile">
+            {{ menu::items(menu=config.extra.main_menu) }}
+        </ul>
+    </nav>
+{% endmacro menu %}
+
+{% macro items(menu) %}
+    {%- for menu_item in menu -%}
+        <li>
+            <a href="{{ menu::get_link(item=menu_item) }}">{{ menu_item.name }}</a>
+        </li>
+    {%- endfor-%}
+{% endmacro items %}
+
+{% macro get_link(item) %}
+    {% if item.external is defined and item.external == true %}
+        {{ item.url }}
+    {% else %}
+        {{ get_url(path=item.url) }}
+    {% endif %}
+{% endmacro get_link %}

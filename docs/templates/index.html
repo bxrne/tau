@@ -1,0 +1,131 @@
+{% import "macros/head.html" as head -%}
+{% import "macros/logo.html" as logo -%}
+{% import "macros/header.html" as header -%}
+{% import "macros/extended_header.html" as extended_header -%}
+{% import "macros/lists.html" as lists -%}
+{% import "macros/posts.html" as posts -%}
+{% import "macros/social.html" as social -%}
+{% import "macros/utils.html" as utils -%}
+{% import "macros/menu.html" as menu -%}
+{% import "macros/pagination.html" as pagination -%}
+{% import "macros/footer.html" as footer -%}
+{% import "macros/extended_footer.html" as extended_footer -%}
+{% import "macros/comments.html" as comments -%}
+
+<!DOCTYPE html>
+<html lang="{{ lang }}">
+    <head>
+        {%- block title -%}
+            <title>{{ config.title }}</title>
+        {%- endblock title -%}
+
+        {%- block general_meta -%}
+            {{ head::general_meta() }}
+        {%- endblock general_meta -%}
+
+        {%- block og_preview -%}
+            {{ social::og_preview() }}
+        {%- endblock og_preview -%}
+
+        {%- block fonts -%}
+            {{ head::fonts() }}
+        {%- endblock fonts -%}
+
+        {%- block css -%}
+            {{ head::styling() }}
+        {%- endblock css -%}
+
+        {%- block favicon -%}
+            {{ head::favicon() }}
+        {%- endblock favicon -%}
+
+        {%- block rss -%}
+            {{ head::rss() }}
+        {%- endblock rss -%}
+
+        {%- block math -%}
+        {%- endblock math -%}
+    </head>
+    <body>
+        {#
+        "container full" when width == True, regardless of center
+        "container center" when only center == True
+        "container" when both false.
+        #}
+        {%- if config.extra.full_width -%}
+            {%- set container = "container full" -%}
+        {%- elif config.extra.center -%}
+            {%- set container = "container center" -%}
+        {%- else -%}
+            {%- set container = "container" -%}
+        {%- endif -%}
+
+        <div class="{{ container }}">
+            {%- block header -%}
+                {{ header::header() }}
+            {%- endblock header -%}
+            <div class="content">
+                {%-  block main -%}
+                    {%- if section.content -%}
+                        <div class="homepage-content">
+                            {{ section.content | safe }}
+                        </div>
+                    {%- endif -%}
+                {%- endblock main -%}
+            </div>
+            {#-
+            I keep pagination out of list, unlike Terminal, because I don't
+            like how the pagination buttons move with the width of the content
+            div.
+            -#}
+            {%- block pagination -%}
+                {{ pagination::paginate() }}
+            {%- endblock pagination -%}
+
+            {%- block footer -%}
+                <footer class="footer">
+                    <div class="footer__inner">
+                        {%- block copyright -%}
+                            {{ footer::copyright() }}
+                        {%- endblock copyright -%}
+
+                        {%- block script -%}
+                            {{ footer::script() }}
+                            <script defer src="https://cdn.jsdelivr.net/npm/elasticlunr@0.9.5/elasticlunr.min.js"></script>
+                            <script defer src="{{ get_url(path='search_index.en.js') }}"></script>
+                            <script defer>
+                                document.addEventListener('DOMContentLoaded', function () {
+                                    if (typeof elasticlunr === 'undefined' || typeof window.searchIndex === 'undefined') return;
+                                    var idx = elasticlunr.Index.load(window.searchIndex);
+                                    var input = document.getElementById('search-input');
+                                    var results = document.getElementById('search-results');
+                                    if (!input || !results) return;
+                                    function clear() { results.innerHTML = ''; results.hidden = true; }
+                                    input.addEventListener('input', function () {
+                                        var q = input.value.trim();
+                                        clear();
+                                        if (q.length < 2) return;
+                                        var hits = idx.search(q, { bool: 'AND', expand: true }).slice(0, 8);
+                                        if (hits.length === 0) return;
+                                        results.hidden = false;
+                                        hits.forEach(function (hit) {
+                                            var doc = idx.documentStore.getDoc(hit.ref);
+                                            var li = document.createElement('li');
+                                            var a = document.createElement('a');
+                                            a.href = hit.ref;
+                                            a.textContent = (doc && doc.title) ? doc.title : hit.ref;
+                                            li.appendChild(a);
+                                            results.appendChild(li);
+                                        });
+                                    });
+                                    input.addEventListener('blur', function () { setTimeout(clear, 150); });
+                                });
+                            </script>
+                        {%- endblock script -%}
+                    </div>
+                    {{ extended_footer::extended_footer() }}
+                </footer>
+            {%- endblock footer -%}
+        </div>
+    </body>
+</html>

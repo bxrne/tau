@@ -1,4 +1,12 @@
 /target
 *.wal
-/store.dat
-/thermostat.disk
+/.hegel
+/docs/public/
+/docs/changelogs/
+/crates/libtau/.hegel
+/crates/**/.hegel
+# coverage artifacts (cargo-llvm-cov)
+/cobertura.xml
+/lcov.info
+/coverage.xml
+/bench-samples/

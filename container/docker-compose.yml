@@ -1,0 +1,186 @@
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "20m"
+    max-file: "5"
+    compress: "true"
+
+services:
+
+  tau:
+    image: ghcr.io/bxrne/tau:${TAU_IMAGE_TAG:-latest}
+    build:
+      context: ..
+      dockerfile: container/Dockerfile
+      args:
+        RUST_VERSION: "1.94.1"
+        BUILD_PROFILE: "release"
+    container_name: tau
+    restart: unless-stopped
+    logging: *default-logging
+    ports:
+      - "${TAU_BIND_ADDR:-127.0.0.1}:7070:7070"
+      - "${TAU_METRICS_BIND_ADDR:-127.0.0.1}:9100:9100"
+
+    volumes:
+      - tau_data:/data
+      - ./tau-config.toml:/data/config.toml:ro
+      # Mount real TLS material in production by uncommenting and editing
+      # tau-config.toml ([tls] section) and the lines below:
+      # - /etc/tau/tls/server.crt:/data/tls/server.crt:ro
+      # - /etc/tau/tls/server.key:/data/tls/server.key:ro
+
+    environment:
+      TAU_ENCRYPTION_KEY: "${TAU_ENCRYPTION_KEY:-}"
+
+    networks:
+      - tau_net
+
+    command:
+      - "--config"
+      - "/data/config.toml"
+
+    read_only: true
+
+    security_opt:
+      - no-new-privileges:true
+
+    cap_drop:
+      - ALL
+
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+      nproc:
+        soft: 1024
+        hard: 1024
+
+    deploy:
+      resources:
+        limits:
+          cpus: "${TAU_CPU_LIMIT:-2.0}"
+          memory: "${TAU_MEM_LIMIT:-512M}"
+        reservations:
+          cpus: "0.25"
+          memory: "64M"
+
+    healthcheck:
+      # scratch base image has no shell or curl; Prometheus `up{job="tau"}`
+      # is the authoritative liveness signal (see container/prometheus/alerts.yml).
+      disable: true
+
+  prometheus:
+    image: prom/prometheus:v3.4.0
+    container_name: prometheus
+    restart: unless-stopped
+    logging: *default-logging
+
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=${PROM_RETENTION:-30d}"
+      - "--storage.tsdb.retention.size=${PROM_RETENTION_SIZE:-8GB}"
+      - "--web.enable-lifecycle"
+      - "--web.enable-admin-api"
+      - "--log.level=warn"
+
+    ports:
+      - "${PROM_BIND_ADDR:-127.0.0.1}:9090:9090"
+
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+
+    networks:
+      - tau_net
+
+    read_only: true
+    tmpfs:
+      - /tmp
+
+    security_opt:
+      - no-new-privileges:true
+
+    cap_drop:
+      - ALL
+
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: "512M"
+        reservations:
+          memory: "128M"
+
+    depends_on:
+      - tau
+
+  grafana:
+    image: grafana/grafana:12.0.1
+    container_name: grafana
+    restart: unless-stopped
+    logging: *default-logging
+
+    environment:
+      GF_SECURITY_ADMIN_USER: "${GRAFANA_USER:-admin}"
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_PASSWORD:?GRAFANA_PASSWORD is required}"
+      GF_SECURITY_DISABLE_GRAVATAR: "true"
+      GF_SECURITY_COOKIE_SECURE: "true"
+      GF_SECURITY_STRICT_TRANSPORT_SECURITY: "true"
+      GF_SECURITY_X_CONTENT_TYPE_OPTIONS: "true"
+      GF_SECURITY_X_XSS_PROTECTION: "true"
+      GF_SECURITY_CONTENT_SECURITY_POLICY: "true"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_USERS_ALLOW_ORG_CREATE: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_LOG_LEVEL: "warn"
+      GF_PATHS_PROVISIONING: "/etc/grafana/provisioning"
+      GF_SERVER_ROOT_URL: "${GF_SERVER_ROOT_URL:-http://localhost:3000}"
+
+    ports:
+      - "${GRAFANA_BIND_ADDR:-127.0.0.1}:3000:3000"
+
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+
+    networks:
+      - tau_net
+
+    security_opt:
+      - no-new-privileges:true
+
+    cap_drop:
+      - ALL
+
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: "256M"
+        reservations:
+          memory: "64M"
+
+    depends_on:
+      - prometheus
+
+networks:
+  tau_net:
+    driver: bridge
+    internal: false
+    ipam:
+      config:
+        - subnet: "172.28.0.0/24"
+
+volumes:
+  tau_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local

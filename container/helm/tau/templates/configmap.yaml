@@ -1,0 +1,39 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "tau.fullname" . }}-config
+  labels:
+    {{- include "tau.labels" . | nindent 4 }}
+data:
+  config.toml: |
+    bind = "0.0.0.0:{{ .Values.service.port }}"
+    log_level = {{ .Values.config.logLevel | quote }}
+    compact_threshold = {{ .Values.config.compactThreshold }}
+
+    [wal]
+    enabled = {{ .Values.config.wal.enabled }}
+    path = {{ .Values.config.wal.path | quote }}
+
+    [tls]
+    enabled = {{ .Values.config.tls.enabled }}
+    {{- if .Values.config.tls.cert }}
+    cert = {{ .Values.config.tls.cert | quote }}
+    {{- end }}
+    {{- if .Values.config.tls.key }}
+    key = {{ .Values.config.tls.key | quote }}
+    {{- end }}
+
+    [auth]
+    enabled = {{ .Values.config.auth.enabled }}
+    {{- if .Values.config.auth.enabled }}
+    username = {{ .Values.config.auth.username | quote }}
+    password = {{ .Values.config.auth.password | quote }}
+    users_file = {{ .Values.config.auth.usersFile | quote }}
+    {{- end }}
+
+    [metrics]
+    port = {{ .Values.service.metricsPort }}
+
+    [limits]
+    max_connections = {{ .Values.config.limits.maxConnections }}
+    idle_timeout_secs = {{ .Values.config.limits.idleTimeoutSecs }}

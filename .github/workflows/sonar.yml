@@ -1,0 +1,88 @@
+name: Coverage + Sonar
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  sonarqube:
+    name: Coverage + SonarQube
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@1.94.1
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: coverage
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest,cargo-llvm-cov
+
+      # Generate LCOV coverage. Hegel property-test closures run in-process
+      # so they are counted normally. Python must be on PATH (it is on ubuntu-latest).
+      - name: Generate coverage (LCOV)
+        run: >-
+          cargo llvm-cov nextest
+          --workspace
+          --lcov
+          --output-path lcov.info
+
+      # SonarCloud expects Generic Test Coverage XML, not Cobertura.
+      # Convert LCOV -> Generic XML inline so no extra tool is needed.
+      - name: Convert LCOV to SonarQube Generic XML
+        run: |
+          python3 - <<'EOF'
+          import xml.etree.ElementTree as ET
+
+          root = ET.Element("coverage", version="1")
+          current_file = None
+          current_lines: dict[int, int] = {}
+
+          def flush(path, lines):
+              if not path or not lines:
+                  return
+              fe = ET.SubElement(root, "file", path=path)
+              for ln, hits in sorted(lines.items()):
+                  ET.SubElement(fe, "lineToCover",
+                                lineNumber=str(ln),
+                                covered="true" if hits > 0 else "false")
+
+          with open("lcov.info") as f:
+              for raw in f:
+                  line = raw.strip()
+                  if line.startswith("SF:"):
+                      flush(current_file, current_lines)
+                      current_file = line[3:]
+                      current_lines = {}
+                  elif line.startswith("DA:"):
+                      parts = line[3:].split(",")
+                      ln, hits = int(parts[0]), int(parts[1])
+                      current_lines[ln] = current_lines.get(ln, 0) + hits
+                  elif line == "end_of_record":
+                      flush(current_file, current_lines)
+                      current_file = None
+                      current_lines = {}
+
+          flush(current_file, current_lines)
+
+          tree = ET.ElementTree(root)
+          ET.indent(tree, space="  ")
+          with open("coverage.xml", "wb") as out:
+              tree.write(out, xml_declaration=True, encoding="UTF-8")
+          print("coverage.xml written")
+          EOF
+
+      - name: SonarQube Scan
+        uses: SonarSource/sonarqube-scan-action@7006c4492b2e0ee0f816d36501671557c97f5995 # v8.1.0
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
