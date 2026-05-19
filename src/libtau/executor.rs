@@ -99,6 +99,9 @@ impl DbState {
         key: Option<[u8; 32]>,
     ) -> io::Result<Self> {
         let store = InMemory::<Value>::with_threshold(compact_threshold);
+        // TODO: replay must also reconstruct base_types and derived maps from
+        // persisted CREATE LENS / DERIVE LENS events so lens declarations
+        // survive a restart. Currently only data is replayed.
         let db = Database::open(store, path, key).map_err(io::Error::other)?;
         Ok(Self {
             db,
@@ -298,6 +301,8 @@ impl Executor {
         if state.base_types.contains_key(name) || state.derived.contains_key(name) {
             return Err(ExecError::DuplicateLens(name.into()));
         }
+        // TODO: detect cycles before inserting — a derived lens that references
+        // itself (directly or via a chain) will stack-overflow at query time.
         state.derived.insert(name.into(), expr);
         Ok(Output::Empty)
     }

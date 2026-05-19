@@ -161,6 +161,9 @@ fn main() -> io::Result<()> {
     let listener = TcpListener::bind(&bind)?;
     info!(%bind, "tau server listening");
 
+    // TODO: gate connection acceptance with a semaphore bounded to a max
+    // connection count; unbounded thread::spawn will exhaust OS resources
+    // under a connection flood.
     for incoming in listener.incoming() {
         match incoming {
             Ok(stream) => {
