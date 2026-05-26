@@ -148,6 +148,14 @@ pub struct Wal {
     writer: BufWriter<File>,
     path: std::path::PathBuf,
     key: Option<[u8; 32]>,
+    /// When `false`, `append` skips the per-record `flush + sync_data` and
+    /// callers must call [`Wal::sync`] explicitly (or rely on drop / process
+    /// exit) to flush.  Defaults to `true` so existing call sites are
+    /// unchanged.
+    fsync_each: bool,
+    /// Reusable buffer for serialising a record before checksum + write.
+    /// Kept on the struct so the hot path makes no per-record allocations.
+    scratch: String,
 }
 
 impl Wal {
@@ -159,11 +167,31 @@ impl Wal {
         let path = path.as_ref().to_path_buf();
         debug!("opening WAL file");
         let file = OpenOptions::new().create(true).append(true).open(&path)?;
+        // Larger BufWriter capacity reduces flush frequency on the fsync=false
+        // path; 256 KiB amortises well at typical record sizes.
         Ok(Self {
-            writer: BufWriter::new(file),
+            writer: BufWriter::with_capacity(256 * 1024, file),
             path,
             key,
+            fsync_each: true,
+            scratch: String::with_capacity(256),
         })
+    }
+
+    /// Toggle per-record `fsync`.  When set to `false`, [`Wal::append`] and
+    /// [`Wal::append_schema`] skip the synchronous flush + `sync_data` and the
+    /// caller assumes responsibility for durability (call [`Wal::sync`] before
+    /// considering data committed).  Defaults to `true`.
+    pub fn set_fsync_each(&mut self, on: bool) {
+        self.fsync_each = on;
+    }
+
+    /// Explicitly flush the buffered writer and `sync_data` the underlying
+    /// file.  Use this after a batch of [`Wal::append`] calls when
+    /// [`Wal::set_fsync_each`] is disabled.
+    pub fn sync(&mut self) -> io::Result<()> {
+        self.writer.flush()?;
+        self.writer.get_ref().sync_data()
     }
 
     /// Write one entry to disk, flush before returning.
@@ -184,8 +212,57 @@ impl Wal {
         } else {
             writeln!(self.writer, "{}", entry.serialise())?;
         }
-        self.writer.flush()?;
-        self.writer.get_ref().sync_data()
+        if self.fsync_each {
+            self.writer.flush()?;
+            self.writer.get_ref().sync_data()?;
+        }
+        Ok(())
+    }
+
+    /// Fast path: serialise a [`Layer`] directly into the WAL without
+    /// constructing an intermediate `WalEntry` or its temporary `Vec`s.
+    /// Uses a reusable scratch buffer for the payload so the hot path makes
+    /// **zero** allocations beyond integer formatting.
+    pub fn append_layer<V: Codec + Clone>(
+        &mut self,
+        lens: &str,
+        layer: &crate::libtau::model::Layer<V>,
+    ) -> io::Result<()> {
+        use std::fmt::Write as _;
+
+        // Encrypted path keeps the original serialise() route — encryption
+        // dominates cost and the buffer allocation noise is negligible.
+        if self.key.is_some() {
+            let entry: WalEntry<V> = WalEntry {
+                layer_id: layer.id,
+                lens: lens.to_string(),
+                taus: layer
+                    .taus
+                    .iter()
+                    .map(|t| (t.start, t.end, t.value.clone()))
+                    .collect(),
+            };
+            return self.append(&entry);
+        }
+
+        self.scratch.clear();
+        let _ = write!(&mut self.scratch, "{} {}", layer.id, lens);
+        for tau in layer.taus.iter() {
+            let _ = write!(
+                &mut self.scratch,
+                " {}:{}:{}",
+                tau.start,
+                tau.end,
+                tau.value.encode()
+            );
+        }
+        let checksum = crc32(&self.scratch);
+        writeln!(self.writer, "{} {}", checksum, self.scratch)?;
+        if self.fsync_each {
+            self.writer.flush()?;
+            self.writer.get_ref().sync_data()?;
+        }
+        Ok(())
     }
 
     /// Replay every persisted entry into `store` in write order.
@@ -293,8 +370,11 @@ impl Wal {
         } else {
             writeln!(self.writer, "S:{}", inner)?;
         }
-        self.writer.flush()?;
-        self.writer.get_ref().sync_data()
+        if self.fsync_each {
+            self.writer.flush()?;
+            self.writer.get_ref().sync_data()?;
+        }
+        Ok(())
     }
 
     /// Return the raw `S:` / `SE:` lines as they appear in the WAL file.

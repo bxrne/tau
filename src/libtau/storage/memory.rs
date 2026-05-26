@@ -33,13 +33,21 @@ impl<V> Store<V> for InMemory<V>
 where
     V: Clone + PartialEq + Send + Sync + 'static,
 {
-    fn append(&mut self, lens: &str, layer: Layer<V>) -> io::Result<()> {
-        let layers = self.lenses.entry(lens.to_string()).or_default();
+    fn append(&mut self, lens: &str, layer: Layer<V>) -> io::Result<bool> {
+        // Hot path: lens already known — borrow without allocating a String.
+        let layers = if let Some(l) = self.lenses.get_mut(lens) {
+            l
+        } else {
+            self.lenses.entry(lens.to_string()).or_default()
+        };
+        let before = layers.len();
         layers.push(layer);
+        let mut did_compact = false;
         if layers.len() > self.compact_threshold {
             compact_layers(layers);
+            did_compact = layers.len() < before + 1;
         }
-        Ok(())
+        Ok(did_compact)
     }
 
     fn layers(&self, lens: &str) -> Option<&Vec<Layer<V>>> {
