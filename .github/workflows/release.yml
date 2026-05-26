@@ -46,6 +46,8 @@ jobs:
           set -euo pipefail
           mkdir -p dist
           cp target/${{ matrix.target }}/release/tau dist/tau-${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/ctl dist/ctl-${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/bench dist/bench-${{ matrix.target }}
           tar -czf tau-${{ matrix.target }}.tar.gz -C dist .
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -64,3 +66,53 @@ jobs:
           files: |
             tau-x86_64-unknown-linux-gnu/*.tar.gz
             tau-aarch64-unknown-linux-gnu/*.tar.gz
+
+  bench-release-notes:
+    if: github.event_name == 'release'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      RUSTFLAGS: "-C target-cpu=native -C codegen-units=1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build bench (release-bench profile)
+        run: cargo build --profile release-bench --bin bench
+      - name: Run bench (full grid, every workload + span, best-of-5)
+        # Full grid covers second / minute / hour / day / year / decade /
+        # century / millennium / aeon and every workload.  best-of-5 picks
+        # the fastest of 5 runs per cell so noise from the shared runner
+        # doesn't dominate.
+        run: |
+          ./target/release-bench/bench \
+            --workloads all \
+            --spans all \
+            --repeat 5 \
+            --scratch "$GITHUB_WORKSPACE/.bench-scratch" \
+            --label "${{ github.event.release.tag_name }}" \
+            --out bench-results.csv \
+            | tee bench-results.txt
+      - name: Append bench results to release notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.release.tag_name }}"
+          current=$(gh release view "$tag" --json body --jq .body)
+          {
+            printf '%s\n\n' "$current"
+            printf '## Benchmark results\n\n'
+            printf 'Full deterministic grid on the GitHub Actions runner, best-of-5.  Covers every workload (`append-single`, `append-bulk`, `copy-csv`, `at-lookup`, `range-scan`, `reduce-agg`) across time spans from `second` to `aeon`.  Methodology in `BENCHMARKS.md`; raw CSV attached as a release asset.\n\n'
+            printf '```\n'
+            cat bench-results.txt
+            printf '\n```\n'
+          } > release-body.md
+          gh release edit "$tag" --notes-file release-body.md
+      - name: Upload bench CSV to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" \
+            bench-results.csv bench-results.txt --clobber

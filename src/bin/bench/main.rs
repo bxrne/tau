@@ -315,7 +315,12 @@ fn main() {
         })
         .collect::<Vec<_>>();
 
-    println!("label={} cells={} (deterministic seed)", label, cells.len());
+    println!(
+        "tau bench {} - label={} cells={} (deterministic seed)",
+        env!("CARGO_PKG_VERSION"),
+        label,
+        cells.len()
+    );
     println!(
         "{:<8} {:<5} {:<6} {:<10} {:<10} {:<14} {:<14} {:<16} {:<16}",
         "backend",
