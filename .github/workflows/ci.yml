@@ -31,3 +31,54 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Run tests
         run: cargo test --all-features
+
+  bench:
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      # Runner-native CPU + max optimization.  The release-bench cargo profile
+      # adds fat LTO + single codegen unit + panic=abort on top.
+      RUSTFLAGS: "-C target-cpu=native -C codegen-units=1"
+      # Pin tokio/parking_lot/etc. allocators to the system one so cold-cache
+      # reads aren't dominated by allocator setup.
+      MALLOC_CONF: "narenas:1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-bench-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-bench-
+      - name: Pre-generate CSV samples (so timed runs don't include fs writes)
+        run: mkdir -p bench-samples
+      - name: Build bench with release-bench profile
+        run: |
+          cargo build --profile release-bench --bin bench
+          ls -la target/release-bench/bench
+      - name: Run bench (quick grid, best-of-5)
+        # --quick keeps the grid small but exercises every workload at every
+        # span.  --repeat 5 takes the fastest of 5 runs to dampen CI noise.
+        # /tmp is tmpfs on the runner; for the real-disk story use the release
+        # workflow which writes under $GITHUB_WORKSPACE.
+        run: |
+          ./target/release-bench/bench \
+            --quick \
+            --workloads all \
+            --spans second,year,decade,century,millennium,aeon \
+            --repeat 5 \
+            --label "ci-${{ github.sha }}" \
+            --out bench-results.csv \
+            | tee bench-results.txt
+      - name: Upload bench artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-results-${{ github.sha }}
+          path: |
+            bench-results.csv
+            bench-results.txt
+          if-no-files-found: error

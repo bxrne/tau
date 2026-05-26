@@ -1,6 +1,6 @@
 [package]
 name = "tau"
-version = "0.1.0"
+version = "0.0.0" # x-release-please-version
 edition = "2024"
 
 [[bin]]
@@ -31,3 +31,16 @@ rcgen = "0.13"
 
 [dev-dependencies]
 tempfile = "3.27.0"
+
+# Single-codegen-unit + fat-LTO + abort-on-panic profile for the bench binary.
+# About 3x slower to compile but produces the tightest hot loops; CI uses this
+# whenever it runs the bench.
+[profile.release-bench]
+inherits = "release"
+opt-level = 3
+codegen-units = 1
+lto = "fat"
+panic = "abort"
+debug = false
+strip = true
+overflow-checks = false
