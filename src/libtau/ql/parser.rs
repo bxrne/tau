@@ -14,7 +14,7 @@
 use nom::{
     IResult, Parser,
     branch::alt,
-    bytes::complete::{is_not, tag, tag_no_case},
+    bytes::complete::{is_not, tag, tag_no_case, take_while1},
     character::complete::{alpha1, alphanumeric1, char, digit1, multispace0, multispace1},
     combinator::{map, map_res, opt, recognize, value},
     multi::many0,
@@ -22,6 +22,7 @@ use nom::{
 };
 
 use super::ast::*;
+use crate::libtau::users::Perm;
 
 /// Parse a single statement.  Trailing whitespace is consumed but trailing
 /// crap is reported as an error.
@@ -38,16 +39,29 @@ pub fn parse(input: &str) -> IResult<&str, Stmt> {
         stmt_drop,
         stmt_use,
         stmt_show,
+        stmt_grant,
+        stmt_revoke,
     ))
     .parse(input)?;
     let (input, _) = multispace0(input)?;
     Ok((input, s))
 }
 
-// `CREATE LENS <name> <type>` or `CREATE DATABASE <name>`.
+// `CREATE LENS <name> <type>`, `CREATE DATABASE <name>`, or
+// `CREATE USER <name> PASSWORD "<pass>"`.
 fn stmt_create(i: &str) -> IResult<&str, Stmt> {
     let (i, _) = kw("CREATE").parse(i)?;
-    alt((stmt_create_lens, stmt_create_database)).parse(i)
+    alt((stmt_create_lens, stmt_create_database, stmt_create_user)).parse(i)
+}
+
+fn stmt_create_user(i: &str) -> IResult<&str, Stmt> {
+    let (i, _) = kw("USER").parse(i)?;
+    let (i, name) = ident(i)?;
+    let (i, _) = multispace1(i)?;
+    let (i, _) = tag_no_case("PASSWORD")(i)?;
+    let (i, _) = multispace1(i)?;
+    let (i, password) = string_lit(i)?;
+    Ok((i, Stmt::CreateUser { name, password }))
 }
 
 fn stmt_create_lens(i: &str) -> IResult<&str, Stmt> {
@@ -91,7 +105,7 @@ fn stmt_append(i: &str) -> IResult<&str, Stmt> {
     Ok((i, Stmt::Append { name, taus }))
 }
 
-/// `COPY LENS <name> FROM "<path>"` — bulk-ingest from a CSV file.
+/// `COPY LENS <name> FROM "<path>"` - bulk-ingest from a CSV file.
 fn stmt_copy(i: &str) -> IResult<&str, Stmt> {
     let (i, _) = kw("COPY").parse(i)?;
     let (i, _) = kw("LENS").parse(i)?;
@@ -103,14 +117,22 @@ fn stmt_copy(i: &str) -> IResult<&str, Stmt> {
     Ok((i, Stmt::Copy { name, path }))
 }
 
-/// `SHOW DATABASES` or `SHOW LENSES` — introspection queries.
+/// `SHOW DATABASES`, `SHOW LENSES`, `SHOW USERS`, or `SHOW GRANTS [<name>]`.
 fn stmt_show(i: &str) -> IResult<&str, Stmt> {
     let (i, _) = kw("SHOW").parse(i)?;
     alt((
         value(Stmt::ShowDatabases, tag_no_case("DATABASES")),
         value(Stmt::ShowLenses, tag_no_case("LENSES")),
+        value(Stmt::ShowUsers, tag_no_case("USERS")),
+        stmt_show_grants,
     ))
     .parse(i)
+}
+
+fn stmt_show_grants(i: &str) -> IResult<&str, Stmt> {
+    let (i, _) = tag_no_case("GRANTS")(i)?;
+    let (i, user) = opt(preceded(multispace1, ident)).parse(i)?;
+    Ok((i, Stmt::ShowGrants { user }))
 }
 
 fn stmt_derive(i: &str) -> IResult<&str, Stmt> {
@@ -157,10 +179,10 @@ fn stmt_range(i: &str) -> IResult<&str, Stmt> {
     ))
 }
 
-/// `DROP LENS <name>` or `DROP DATABASE <name>`.
+/// `DROP LENS <name>`, `DROP DATABASE <name>`, or `DROP USER <name>`.
 fn stmt_drop(i: &str) -> IResult<&str, Stmt> {
     let (i, _) = kw("DROP").parse(i)?;
-    alt((stmt_drop_lens, stmt_drop_database)).parse(i)
+    alt((stmt_drop_lens, stmt_drop_database, stmt_drop_user)).parse(i)
 }
 
 fn stmt_drop_lens(i: &str) -> IResult<&str, Stmt> {
@@ -175,7 +197,75 @@ fn stmt_drop_database(i: &str) -> IResult<&str, Stmt> {
     Ok((i, Stmt::DropDatabase { name }))
 }
 
-/// `REDUCE LENS <name> <start> <end> USING <func>` — aggregate over a range.
+fn stmt_drop_user(i: &str) -> IResult<&str, Stmt> {
+    let (i, _) = kw("USER").parse(i)?;
+    let (i, name) = ident(i)?;
+    Ok((i, Stmt::DropUser { name }))
+}
+
+/// `GRANT <perms> ON <db|*> TO <user>`.
+fn stmt_grant(i: &str) -> IResult<&str, Stmt> {
+    let (i, _) = kw("GRANT").parse(i)?;
+    let (i, perms) = perm_letters(i)?;
+    let (i, _) = multispace1(i)?;
+    let (i, _) = tag_no_case("ON")(i)?;
+    let (i, _) = multispace1(i)?;
+    let (i, database) = db_target(i)?;
+    let (i, _) = multispace1(i)?;
+    let (i, _) = tag_no_case("TO")(i)?;
+    let (i, _) = multispace1(i)?;
+    let (i, user) = ident(i)?;
+    Ok((
+        i,
+        Stmt::Grant {
+            perms,
+            database,
+            user,
+        },
+    ))
+}
+
+/// `REVOKE <perms> ON <db|*> FROM <user>`.
+fn stmt_revoke(i: &str) -> IResult<&str, Stmt> {
+    let (i, _) = kw("REVOKE").parse(i)?;
+    let (i, perms) = perm_letters(i)?;
+    let (i, _) = multispace1(i)?;
+    let (i, _) = tag_no_case("ON")(i)?;
+    let (i, _) = multispace1(i)?;
+    let (i, database) = db_target(i)?;
+    let (i, _) = multispace1(i)?;
+    let (i, _) = tag_no_case("FROM")(i)?;
+    let (i, _) = multispace1(i)?;
+    let (i, user) = ident(i)?;
+    Ok((
+        i,
+        Stmt::Revoke {
+            perms,
+            database,
+            user,
+        },
+    ))
+}
+
+/// A run of CRUDA letters, or the literal `*` (all), or `-` (none).
+fn perm_letters(i: &str) -> IResult<&str, Perm> {
+    let (i, s) = alt((
+        recognize(char('*')),
+        recognize(char('-')),
+        take_while1(|c: char| c.is_ascii_alphabetic()),
+    ))
+    .parse(i)?;
+    let p = Perm::parse(s)
+        .map_err(|_| nom::Err::Error(nom::error::Error::new(i, nom::error::ErrorKind::Tag)))?;
+    Ok((i, p))
+}
+
+/// Database target: identifier or `*`.
+fn db_target(i: &str) -> IResult<&str, String> {
+    alt((map(tag("*"), |s: &str| s.to_string()), ident)).parse(i)
+}
+
+/// `REDUCE LENS <name> <start> <end> USING <func>` - aggregate over a range.
 fn stmt_reduce(i: &str) -> IResult<&str, Stmt> {
     let (i, _) = kw("REDUCE").parse(i)?;
     let (i, _) = kw("LENS").parse(i)?;
@@ -199,7 +289,7 @@ fn stmt_reduce(i: &str) -> IResult<&str, Stmt> {
     ))
 }
 
-/// `USE DATABASE <name>` — switches the active database.
+/// `USE DATABASE <name>` - switches the active database.
 fn stmt_use(i: &str) -> IResult<&str, Stmt> {
     let (i, _) = kw("USE").parse(i)?;
     let (i, _) = kw("DATABASE").parse(i)?;
@@ -218,7 +308,7 @@ fn agg_func(i: &str) -> IResult<&str, AggFunc> {
     .parse(i)
 }
 
-/// `func(lens, rel_start, rel_end)` — aggregate call usable in expressions.
+/// `func(lens, rel_start, rel_end)` - aggregate call usable in expressions.
 fn agg_call(i: &str) -> IResult<&str, Expr> {
     let (i, func) = agg_func(i)?;
     let (i, _) = multispace0(i)?;

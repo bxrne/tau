@@ -23,7 +23,7 @@ where
     wal: Option<Arc<Mutex<Wal>>>,
     /// When `true` (default), `append` calls `checkpoint()` immediately after a
     /// store-side compaction so the WAL never holds superseded entries.  Set to
-    /// `false` to defer that work to an explicit caller — useful in bulk-load
+    /// `false` to defer that work to an explicit caller - useful in bulk-load
     /// paths where many compactions fire and a single trailing checkpoint
     /// suffices.
     auto_checkpoint: std::sync::atomic::AtomicBool,
@@ -101,7 +101,7 @@ where
     }
 
     /// Return a handle (base `Lens`) for a named series.
-    /// The lens is cheap — it holds only the name and a marker.
+    /// The lens is cheap - it holds only the name and a marker.
     pub fn lens(&self, name: impl Into<Arc<str>>) -> Lens<V> {
         Lens {
             name: name.into(),
@@ -119,7 +119,7 @@ where
     /// WAL checkpoint is triggered that rewrites the WAL to contain only the
     /// live (post-compaction) layers, bounding WAL growth.
     ///
-    /// Panics if `lens` is derived — derived lenses are views, not stores.
+    /// Panics if `lens` is derived - derived lenses are views, not stores.
     pub fn append(&self, lens: &Lens<V>, layer: Layer<V>) -> io::Result<()>
     where
         V: Codec,
@@ -132,7 +132,7 @@ where
                     tau_count = layer.taus.len(),
                     "appending layer"
                 );
-                // WAL first — do not update in-memory state if this fails.
+                // WAL first - do not update in-memory state if this fails.
                 if let Some(wal) = &self.wal {
                     wal.lock()
                         .map_err(|_| io::Error::other("WAL mutex poisoned"))?
@@ -140,7 +140,7 @@ where
                     debug!(lens = %lens.name, layer_id = layer.id, "WAL entry written");
                 }
 
-                // Then store — append returns whether compaction fired.
+                // Then store - append returns whether compaction fired.
                 let did_compact = {
                     let mut store = self
                         .store

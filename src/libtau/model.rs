@@ -73,7 +73,7 @@ impl<V> Clone for LensKind<V> {
 /// A temporal function of time.
 ///
 /// Base lenses read from the store; derived lenses compute lazily.
-/// Cloning is cheap — a single Arc bump in either case.
+/// Cloning is cheap - a single Arc bump in either case.
 #[derive(Clone)]
 pub struct Lens<V> {
     pub name: Arc<str>,
@@ -81,7 +81,7 @@ pub struct Lens<V> {
 }
 
 impl<V> Lens<V> {
-    /// Evaluate a derived lens directly — no store needed.
+    /// Evaluate a derived lens directly - no store needed.
     /// Base lenses always return `None` here; use `Database::at` for those.
     pub fn eval(&self, t: Timestamp) -> Option<V> {
         match &self.kind {
@@ -198,7 +198,7 @@ mod tests {
     fn layer_clone_shares_arc() {
         let layer = Layer::new(1, vec![Tau::new(0, 10, 42i32)]);
         let clone = layer.clone();
-        // Both point to the same allocation — same pointer.
+        // Both point to the same allocation - same pointer.
         assert!(Arc::ptr_eq(&layer.taus, &clone.taus));
     }
 

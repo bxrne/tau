@@ -144,13 +144,13 @@ pub struct Disk<V> {
     compact_threshold: usize,
     key: Option<[u8; 32]>,
     /// Open file handle for O(entry) appends.  `None` when encryption is
-    /// enabled — encrypted files are written atomically via `flush()`.
+    /// enabled - encrypted files are written atomically via `flush()`.
     append_writer: Option<BufWriter<std::fs::File>>,
     /// When `false`, [`Disk::append`] skips the per-record `flush + sync_data`
     /// and the caller must call [`Disk::sync`] (or rely on drop) to commit.
     /// Defaults to `true`.
     fsync_each: bool,
-    /// When `false`, post-compaction rewrites are skipped — the on-disk file
+    /// When `false`, post-compaction rewrites are skipped - the on-disk file
     /// keeps growing past the live set, but each `append` avoids the
     /// `close fd + flush + reopen` round-trip.  Defaults to `true`.
     rewrite_on_compact: bool,
@@ -531,7 +531,7 @@ mod tests {
         let raw = std::fs::read(tmp.path()).unwrap();
         assert_eq!(&raw[..4], b"TAUE", "encrypted file must start with TAUE");
 
-        // Re-open with key — data must be intact
+        // Re-open with key - data must be intact
         let store = Disk::open(tmp.path(), Some(key)).unwrap();
         assert_eq!(store.at("x", 5), Some(42));
     }

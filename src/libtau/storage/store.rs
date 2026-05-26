@@ -38,7 +38,7 @@ where
     }
     events.sort_unstable_by_key(|e| (e.0, e.1));
 
-    // `active` is a max-heap keyed by layer_idx — newer layer wins.  We tag
+    // `active` is a max-heap keyed by layer_idx - newer layer wins.  We tag
     // each entry with `tau_idx` so we can drop the right one on close events
     // when a layer has multiple taus stacked at the same boundary.  Stale
     // entries (already closed) are skipped lazily.

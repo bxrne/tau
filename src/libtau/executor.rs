@@ -8,7 +8,7 @@
 //! * The executor owns a `HashMap` of *named databases*.  `CREATE DATABASE`
 //!   adds one, `DROP DATABASE` removes one, `USE DATABASE` selects the
 //!   active database for subsequent lens statements.
-//! * Each database has a single value type — all of its *base* lenses must
+//! * Each database has a single value type - all of its *base* lenses must
 //!   share the type declared at `CREATE LENS`.  An `APPEND` whose literal
 //!   does not match the declared type is rejected with [`ExecError::TypeMismatch`].
 //! * *Derived* lenses are pure expressions over other lenses.  Their result
@@ -16,15 +16,15 @@
 //!   underlying base type (e.g. a `bool` derived from an `int` lens).  A
 //!   cycle in the derivation graph is rejected at `DERIVE` time with
 //!   [`ExecError::CycleDetected`].
-//! * Every lookup walks the AST live — derived lenses never cache.
+//! * Every lookup walks the AST live - derived lenses never cache.
 //!
 //! # Statement semantics
 //!
 //! DDL (`CREATE`/`DROP`/`USE`/`APPEND`/`COPY`/`DERIVE`) returns [`Output::Empty`].
 //! `AT` returns [`Output::Value`] (`None` when no tau covers `t`).
-//! `RANGE` returns [`Output::Range`] — a vec of `(start, end, value)` segments.
-//! `REDUCE` returns [`Output::Value`] — a single scalar aggregate.
-//! `SHOW DATABASES` / `SHOW LENSES` return [`Output::Names`] — a sorted name list.
+//! `RANGE` returns [`Output::Range`] - a vec of `(start, end, value)` segments.
+//! `REDUCE` returns [`Output::Value`] - a single scalar aggregate.
+//! `SHOW DATABASES` / `SHOW LENSES` return [`Output::Names`] - a sorted name list.
 
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -34,6 +34,7 @@ use crate::libtau::database::Database;
 use crate::libtau::model::{Layer, Tau, Timestamp};
 use crate::libtau::ql::ast::{AggFunc, BinOp, Expr, Stmt, Type, UnOp};
 use crate::libtau::storage::InMemory;
+use crate::libtau::users::{Perm, User, UserStore};
 use crate::libtau::value::Value;
 
 /// Output of a single executed statement.
@@ -45,8 +46,10 @@ pub enum Output {
     Value(Option<Value>),
     /// Sequence of `(start, end, value)` segments covering the queried range.
     Range(Vec<(Timestamp, Timestamp, Value)>),
-    /// List of names returned by `SHOW DATABASES` / `SHOW LENSES`.
+    /// List of names returned by `SHOW DATABASES` / `SHOW LENSES` / `SHOW USERS`.
     Names(Vec<String>),
+    /// `SHOW GRANTS` result: lines of `<user> <db>:<perms> <db>:<perms> …`.
+    Grants(Vec<(String, Vec<(String, Perm)>)>),
 }
 
 /// All errors the executor can produce.
@@ -76,6 +79,12 @@ pub enum ExecError {
     Io(String),
     /// `DERIVE LENS` would introduce a reference cycle.
     CycleDetected(String),
+    /// The user attempted an operation they're not authorised to perform.
+    PermissionDenied(String),
+    /// `CREATE USER` for a name already present.
+    DuplicateUser(String),
+    /// `DROP USER` / `GRANT` / `REVOKE` targeted a non-existent user.
+    UnknownUser(String),
 }
 
 /// Per-database executor state.
@@ -88,7 +97,7 @@ struct DbState {
     /// supply one.
     next_layer_id: u64,
     /// Derived lens definitions, stored by name.  Lookups recursively
-    /// re-evaluate these — no caching.
+    /// re-evaluate these - no caching.
     derived: HashMap<String, Expr>,
 }
 
@@ -137,6 +146,11 @@ pub struct Executor {
     /// Set during schema replay on startup to avoid re-writing entries that
     /// were just read from the WAL.
     in_replay: bool,
+    /// Multi-user authentication registry.  Empty by default; only loaded
+    /// when the server has been configured with `--users-file`.  Exposed as
+    /// a public field so admin tooling can read or mutate users directly
+    /// without going through wrapper methods.
+    pub users: UserStore,
 }
 
 impl Default for Executor {
@@ -157,6 +171,7 @@ impl Executor {
             active: None,
             compact_threshold,
             in_replay: false,
+            users: UserStore::new(),
         }
     }
 
@@ -234,6 +249,8 @@ impl Executor {
             } => self.reduce_lens(name, *start, *end, *func),
             Stmt::ShowDatabases => self.show_databases(),
             Stmt::ShowLenses => self.show_lenses(),
+            Stmt::ShowUsers => self.show_users(),
+            Stmt::ShowGrants { user } => self.show_grants(user.as_deref()),
             _ => Err(ExecError::InvalidExpr(
                 "exec_read called on a mutating statement".into(),
             )),
@@ -272,7 +289,189 @@ impl Executor {
                 end,
                 func,
             } => self.reduce_lens(name, *start, *end, *func),
+            Stmt::CreateUser { name, password } => self.create_user(name, password),
+            Stmt::DropUser { name } => self.drop_user(name),
+            Stmt::Grant {
+                perms,
+                database,
+                user,
+            } => self.grant(*perms, database, user),
+            Stmt::Revoke {
+                perms,
+                database,
+                user,
+            } => self.revoke(*perms, database, user),
+            Stmt::ShowUsers => self.show_users(),
+            Stmt::ShowGrants { user } => self.show_grants(user.as_deref()),
         }
+    }
+
+    /// Execute a statement on behalf of `caller`, applying permission checks
+    /// before delegating to [`Executor::exec`].
+    ///
+    /// `SHOW DATABASES` is filtered to databases the caller has any grant on.
+    /// Read-only statements still route through the standard path; the locking
+    /// router in the TCP server picks the right lock variant.
+    pub fn exec_as(&mut self, stmt: &Stmt, caller: &str) -> Result<Output, ExecError> {
+        let user = self
+            .users
+            .get(caller)
+            .cloned()
+            .ok_or_else(|| ExecError::UnknownUser(caller.into()))?;
+        self.check_permission(stmt, &user)?;
+        let out = self.exec(stmt)?;
+        Ok(filter_show_databases(out, stmt, &user))
+    }
+
+    /// Read-only counterpart of [`Executor::exec_as`].  Same permission rules.
+    pub fn exec_read_as(&self, stmt: &Stmt, caller: &str) -> Result<Output, ExecError> {
+        let user = self
+            .users
+            .get(caller)
+            .ok_or_else(|| ExecError::UnknownUser(caller.into()))?;
+        self.check_permission(stmt, user)?;
+        let out = self.exec_read(stmt)?;
+        Ok(filter_show_databases(out, stmt, user))
+    }
+
+    /// Per-statement permission check.  Returns `Err(PermissionDenied)` when
+    /// the caller does not have the right grants.
+    fn check_permission(&self, stmt: &Stmt, user: &User) -> Result<(), ExecError> {
+        let active = self.active.as_deref();
+        let require = |db: &str, bit: Perm| {
+            if user.effective(db).contains(bit) {
+                Ok(())
+            } else {
+                Err(ExecError::PermissionDenied(format!(
+                    "user '{}' lacks {} on {}",
+                    user.name, bit, db
+                )))
+            }
+        };
+        let require_global_admin = || {
+            if user.is_global_admin() {
+                Ok(())
+            } else {
+                Err(ExecError::PermissionDenied(format!(
+                    "user '{}' is not a global admin",
+                    user.name
+                )))
+            }
+        };
+        let require_active = || active.ok_or(ExecError::NoActiveDatabase);
+
+        match stmt {
+            Stmt::CreateDatabase { .. } => require_global_admin(),
+            Stmt::DropDatabase { name } => {
+                if user.is_global_admin() || user.effective(name).contains(Perm::A) {
+                    Ok(())
+                } else {
+                    Err(ExecError::PermissionDenied(format!(
+                        "user '{}' lacks A on {}",
+                        user.name, name
+                    )))
+                }
+            }
+            Stmt::UseDatabase { name } => {
+                if user.effective(name).is_empty() {
+                    Err(ExecError::PermissionDenied(format!(
+                        "user '{}' has no grants on {}",
+                        user.name, name
+                    )))
+                } else {
+                    Ok(())
+                }
+            }
+            Stmt::Create { .. } => require(require_active()?, Perm::C),
+            Stmt::Append { .. } | Stmt::Copy { .. } => require(require_active()?, Perm::U),
+            Stmt::Derive { .. } => require(require_active()?, Perm::C),
+            Stmt::At { .. } | Stmt::Range { .. } | Stmt::Reduce { .. } => {
+                require(require_active()?, Perm::R)
+            }
+            Stmt::Drop { .. } => require(require_active()?, Perm::D),
+            Stmt::ShowDatabases => Ok(()),
+            Stmt::ShowLenses => require(require_active()?, Perm::R),
+            Stmt::CreateUser { .. } | Stmt::DropUser { .. } | Stmt::ShowUsers => {
+                require_global_admin()
+            }
+            Stmt::Grant { database, .. } | Stmt::Revoke { database, .. } => {
+                if user.is_global_admin() || user.effective(database).contains(Perm::A) {
+                    Ok(())
+                } else {
+                    Err(ExecError::PermissionDenied(format!(
+                        "user '{}' lacks A on {}",
+                        user.name, database
+                    )))
+                }
+            }
+            Stmt::ShowGrants { user: target } => match target {
+                None => require_global_admin(),
+                Some(t) if t == &user.name => Ok(()),
+                Some(_) => require_global_admin(),
+            },
+        }
+    }
+
+    fn create_user(&mut self, name: &str, password: &str) -> Result<Output, ExecError> {
+        if self.users.get(name).is_some() {
+            return Err(ExecError::DuplicateUser(name.into()));
+        }
+        self.users
+            .add(User::new(name, password, HashMap::new()))
+            .map_err(ExecError::Io)?;
+        Ok(Output::Empty)
+    }
+
+    fn drop_user(&mut self, name: &str) -> Result<Output, ExecError> {
+        self.users
+            .remove(name)
+            .map_err(|_| ExecError::UnknownUser(name.into()))?;
+        Ok(Output::Empty)
+    }
+
+    fn grant(&mut self, perms: Perm, database: &str, user: &str) -> Result<Output, ExecError> {
+        if self.users.get(user).is_none() {
+            return Err(ExecError::UnknownUser(user.into()));
+        }
+        self.users
+            .grant(user, database, perms)
+            .map_err(ExecError::Io)?;
+        Ok(Output::Empty)
+    }
+
+    fn revoke(&mut self, perms: Perm, database: &str, user: &str) -> Result<Output, ExecError> {
+        if self.users.get(user).is_none() {
+            return Err(ExecError::UnknownUser(user.into()));
+        }
+        self.users
+            .revoke(user, database, perms)
+            .map_err(ExecError::Io)?;
+        Ok(Output::Empty)
+    }
+
+    fn show_users(&self) -> Result<Output, ExecError> {
+        Ok(Output::Names(self.users.names()))
+    }
+
+    fn show_grants(&self, target: Option<&str>) -> Result<Output, ExecError> {
+        let mut out = Vec::new();
+        match target {
+            Some(name) => {
+                let grants = self
+                    .users
+                    .grants_for(name)
+                    .ok_or_else(|| ExecError::UnknownUser(name.into()))?;
+                out.push((name.to_string(), grants));
+            }
+            None => {
+                for name in self.users.names() {
+                    if let Some(g) = self.users.grants_for(&name) {
+                        out.push((name, g));
+                    }
+                }
+            }
+        }
+        Ok(Output::Grants(out))
     }
 
     fn create_database(&mut self, name: &str) -> Result<Output, ExecError> {
@@ -566,6 +765,23 @@ impl Executor {
             .get_mut(&name)
             .ok_or(ExecError::UnknownDatabase(name))
     }
+}
+
+/// For `SHOW DATABASES` returned to a non-global-admin caller, drop entries
+/// they have no grants on.  Pass-through for every other statement / caller.
+fn filter_show_databases(out: Output, stmt: &Stmt, user: &User) -> Output {
+    if matches!(stmt, Stmt::ShowDatabases)
+        && !user.is_global_admin()
+        && let Output::Names(names) = out
+    {
+        return Output::Names(
+            names
+                .into_iter()
+                .filter(|n| !user.effective(n).is_empty())
+                .collect(),
+        );
+    }
+    out
 }
 
 /// Returns `true` if adding `DERIVE LENS target AS expr` would create a cycle.
@@ -1508,20 +1724,20 @@ mod tests {
             run(&mut e, "DERIVE LENS cold AS (temp * 2)").unwrap();
         }
 
-        // Second session: reopen WAL — schema must be recovered automatically.
+        // Second session: reopen WAL - schema must be recovered automatically.
         let mut e2 = Executor::with_wal(&wal_path, None).unwrap();
         // Data is recovered.
         assert_eq!(
             run(&mut e2, "AT LENS temp 5").unwrap(),
             Output::Value(Some(Value::Int(42)))
         );
-        // CREATE LENS schema is recovered — APPEND should not error with UnknownLens.
+        // CREATE LENS schema is recovered - APPEND should not error with UnknownLens.
         run(&mut e2, "APPEND LENS temp 10 20 99").unwrap();
         assert_eq!(
             run(&mut e2, "AT LENS temp 15").unwrap(),
             Output::Value(Some(Value::Int(99)))
         );
-        // DERIVE LENS schema is recovered — derived lens is usable.
+        // DERIVE LENS schema is recovered - derived lens is usable.
         assert_eq!(
             run(&mut e2, "AT LENS cold 5").unwrap(),
             Output::Value(Some(Value::Int(84)))
@@ -1561,7 +1777,7 @@ mod tests {
             run(&mut e, "APPEND LENS x 0 5 1, 5 10 1.5"),
             Err(ExecError::TypeMismatch { .. })
         ));
-        // No partial write — lens should still have no data.
+        // No partial write - lens should still have no data.
         assert_eq!(run(&mut e, "AT LENS x 3").unwrap(), Output::Value(None));
     }
 
@@ -1643,6 +1859,159 @@ mod tests {
             run(&mut e, "AT LENS sensor 15").unwrap(),
             Output::Value(Some(Value::Int(99)))
         );
+    }
+
+    fn install_admin(e: &mut Executor) {
+        let mut grants = HashMap::new();
+        grants.insert("*".into(), Perm::ALL);
+        e.users.add(User::new("admin", "p", grants)).unwrap();
+    }
+
+    fn install_reader(e: &mut Executor, db: &str) {
+        let mut grants = HashMap::new();
+        grants.insert(db.to_string(), Perm::R);
+        e.users.add(User::new("reader", "p", grants)).unwrap();
+    }
+
+    #[test]
+    fn exec_as_admin_can_do_anything() {
+        let mut e = Executor::new();
+        install_admin(&mut e);
+        let (_, stmt) = parse("CREATE DATABASE main").unwrap();
+        assert_eq!(e.exec_as(&stmt, "admin").unwrap(), Output::Empty);
+        let (_, stmt) = parse("CREATE LENS x int").unwrap();
+        assert_eq!(e.exec_as(&stmt, "admin").unwrap(), Output::Empty);
+        let (_, stmt) = parse("APPEND LENS x 0 10 42").unwrap();
+        assert_eq!(e.exec_as(&stmt, "admin").unwrap(), Output::Empty);
+        let (_, stmt) = parse("AT LENS x 5").unwrap();
+        assert_eq!(
+            e.exec_as(&stmt, "admin").unwrap(),
+            Output::Value(Some(Value::Int(42)))
+        );
+    }
+
+    #[test]
+    fn exec_as_reader_can_read_not_write() {
+        let mut e = Executor::new();
+        install_admin(&mut e);
+        let (_, stmt) = parse("CREATE DATABASE main").unwrap();
+        e.exec_as(&stmt, "admin").unwrap();
+        let (_, stmt) = parse("CREATE LENS x int").unwrap();
+        e.exec_as(&stmt, "admin").unwrap();
+        let (_, stmt) = parse("APPEND LENS x 0 10 42").unwrap();
+        e.exec_as(&stmt, "admin").unwrap();
+        install_reader(&mut e, "main");
+
+        // Reader can read.
+        let (_, stmt) = parse("AT LENS x 5").unwrap();
+        assert!(matches!(
+            e.exec_read_as(&stmt, "reader").unwrap(),
+            Output::Value(Some(Value::Int(42)))
+        ));
+        // Reader cannot append.
+        let (_, stmt) = parse("APPEND LENS x 10 20 99").unwrap();
+        assert!(matches!(
+            e.exec_as(&stmt, "reader"),
+            Err(ExecError::PermissionDenied(_))
+        ));
+        // Reader cannot drop.
+        let (_, stmt) = parse("DROP LENS x").unwrap();
+        assert!(matches!(
+            e.exec_as(&stmt, "reader"),
+            Err(ExecError::PermissionDenied(_))
+        ));
+        // Reader cannot create a database.
+        let (_, stmt) = parse("CREATE DATABASE other").unwrap();
+        assert!(matches!(
+            e.exec_as(&stmt, "reader"),
+            Err(ExecError::PermissionDenied(_))
+        ));
+        // Reader cannot manage users.
+        let (_, stmt) = parse("CREATE USER newbie PASSWORD \"x\"").unwrap();
+        assert!(matches!(
+            e.exec_as(&stmt, "reader"),
+            Err(ExecError::PermissionDenied(_))
+        ));
+    }
+
+    #[test]
+    fn exec_as_unknown_user_errors() {
+        let mut e = Executor::new();
+        let (_, stmt) = parse("SHOW DATABASES").unwrap();
+        assert!(matches!(
+            e.exec_as(&stmt, "ghost"),
+            Err(ExecError::UnknownUser(_))
+        ));
+    }
+
+    #[test]
+    fn admin_can_create_drop_user_and_grant() {
+        let mut e = Executor::new();
+        install_admin(&mut e);
+        let (_, stmt) = parse("CREATE USER bob PASSWORD \"hunter2\"").unwrap();
+        e.exec_as(&stmt, "admin").unwrap();
+        assert!(e.users.get("bob").is_some());
+
+        let (_, stmt) = parse("GRANT R ON main TO bob").unwrap();
+        e.exec_as(&stmt, "admin").unwrap();
+        assert_eq!(e.users.get("bob").unwrap().effective("main"), Perm::R);
+
+        let (_, stmt) = parse("REVOKE R ON main FROM bob").unwrap();
+        e.exec_as(&stmt, "admin").unwrap();
+        assert_eq!(e.users.get("bob").unwrap().effective("main"), Perm::NONE);
+
+        let (_, stmt) = parse("DROP USER bob").unwrap();
+        e.exec_as(&stmt, "admin").unwrap();
+        assert!(e.users.get("bob").is_none());
+    }
+
+    #[test]
+    fn promote_to_admin_via_a_bit() {
+        let mut e = Executor::new();
+        install_admin(&mut e);
+        let (_, stmt) = parse("CREATE USER bob PASSWORD \"p\"").unwrap();
+        e.exec_as(&stmt, "admin").unwrap();
+        // Before promotion bob cannot create users.
+        let (_, stmt) = parse("CREATE USER carol PASSWORD \"p\"").unwrap();
+        assert!(matches!(
+            e.exec_as(&stmt, "bob"),
+            Err(ExecError::PermissionDenied(_))
+        ));
+        // Promote bob with A on the wildcard database.
+        let (_, stmt) = parse("GRANT A ON * TO bob").unwrap();
+        e.exec_as(&stmt, "admin").unwrap();
+        // Now bob can create users.
+        let (_, stmt) = parse("CREATE USER carol PASSWORD \"p\"").unwrap();
+        assert!(e.exec_as(&stmt, "bob").is_ok());
+    }
+
+    #[test]
+    fn show_databases_filters_for_non_admin() {
+        let mut e = Executor::new();
+        install_admin(&mut e);
+        let (_, stmt) = parse("CREATE DATABASE alpha").unwrap();
+        e.exec_as(&stmt, "admin").unwrap();
+        let (_, stmt) = parse("CREATE DATABASE beta").unwrap();
+        e.exec_as(&stmt, "admin").unwrap();
+
+        let mut grants = HashMap::new();
+        grants.insert("alpha".to_string(), Perm::R);
+        e.users.add(User::new("alice", "p", grants)).unwrap();
+
+        let (_, stmt) = parse("SHOW DATABASES").unwrap();
+        let out = e.exec_as(&stmt, "alice").unwrap();
+        match out {
+            Output::Names(names) => assert_eq!(names, vec!["alpha"]),
+            _ => panic!("expected Names"),
+        }
+        let out = e.exec_as(&stmt, "admin").unwrap();
+        match out {
+            Output::Names(mut names) => {
+                names.sort();
+                assert_eq!(names, vec!["alpha", "beta"]);
+            }
+            _ => panic!("expected Names"),
+        }
     }
 
     #[test]

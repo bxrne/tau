@@ -41,9 +41,9 @@ Connect with any TCP client:
 
 Three primitive types form the whole model:
 
-- **`Tau<V>`** — a value `V` that holds over the half-open interval `[start, end)`. Immutable once created.
-- **`Layer<V>`** — a sorted, non-overlapping batch of taus with O(log n) point lookup. Cheaply clonable via `Arc`.
-- **`Lens<V>`** — either `Base` (storage-backed, newest layer wins) or `Derived` (a lazy expression over other lenses).
+- **`Tau<V>`** - a value `V` that holds over the half-open interval `[start, end)`. Immutable once created.
+- **`Layer<V>`** - a sorted, non-overlapping batch of taus with O(log n) point lookup. Cheaply clonable via `Arc`.
+- **`Lens<V>`** - either `Base` (storage-backed, newest layer wins) or `Derived` (a lazy expression over other lenses).
 
 Layers auto-compact: once a lens accumulates more than `--compact-threshold` layers (default 8), they are merged into a single equivalent layer. Point-lookup cost stays at O(log n) regardless of write history.
 
@@ -54,6 +54,7 @@ See [`src/libtau/`](src/libtau/README.md) for design decisions and module layout
 ## Query language
 
 ```
+-- databases & lenses
 CREATE DATABASE <name>                              -- first created becomes active
 DROP DATABASE <name>
 USE DATABASE <name>
@@ -68,6 +69,14 @@ AT     LENS <name> <timestamp>
 RANGE  LENS <name> <start> <end> [WHERE <expr>]
 REDUCE LENS <name> <start> <end> USING <func>       -- min | max | avg | sum | count
 DROP   LENS <name>
+
+-- multi-user auth (requires --auth, admin only)
+CREATE USER <name> PASSWORD "<pass>"
+DROP   USER <name>
+GRANT  <perms> ON <db|*> TO   <user>                -- perms = any of CRUDA, or `*` (all), `-` (none)
+REVOKE <perms> ON <db|*> FROM <user>
+SHOW   USERS
+SHOW   GRANTS [<user>]
 ```
 
 Expressions support `+ - * / %`, `== != < <= > >=`, `&& ||`, unary `- !`, parentheses, and aggregation calls. Keywords are case-insensitive.
@@ -107,20 +116,44 @@ cargo run --release -- --tls                                        # ephemeral 
 cargo run --release -- --tls --tls-cert server.crt --tls-key server.key
 ```
 
-### Authentication
+### Authentication & multi-user authorisation
 
 ```bash
+# bootstrap a single-admin in-memory store
 cargo run --release -- --auth --username admin --password s3cr3t
+
+# persistent multi-user store (first run with --username/--password seeds the admin)
+cargo run --release -- --auth \
+  --users-file /var/lib/tau/users \
+  --username admin --password s3cr3t
 ```
 
-With auth enabled, every client must send `AUTH <user> <pass>` as its first message. The password is hashed with argon2id at startup; the plaintext is not retained.
+With `--auth`, every client's first message must be `AUTH <user> <pass>`. Passwords are hashed with argon2id; plaintext is never retained.
+
+After authentication every subsequent statement is gated by the matched user's per-database **CRUDA** bitmap:
+
+| bit | grants |
+|---|---|
+| `C` | `CREATE LENS`, `DERIVE LENS` |
+| `R` | `AT`, `RANGE`, `REDUCE`, `SHOW LENSES` |
+| `U` | `APPEND LENS`, `COPY LENS` |
+| `D` | `DROP LENS` (and `DROP DATABASE` when `A` is also held) |
+| `A` | admin - manage users, grant/revoke, create databases |
+
+Grants are per database, plus a wildcard `*` that applies to every database (current and future). Effective permissions are the union of the per-db grant and the wildcard. A user with `A` on `*` is a **global admin** - they can create databases, create/drop users, and grant/revoke on any database. Promoting an existing user to admin is just `GRANT A ON * TO <user>`.
 
 ```
 → AUTH admin s3cr3t
 ← OK
-→ CREATE DATABASE main
+→ CREATE USER alice PASSWORD "p4ss"
 ← OK
+→ GRANT R ON main TO alice
+← OK
+→ SHOW GRANTS alice
+← GRANTS 1; alice main:R
 ```
+
+When `--users-file` is set, every `CREATE USER` / `DROP USER` / `GRANT` / `REVOKE` is atomically rewritten to the file (each line: `<name> <argon2-hash> <db>:<perms> …`).
 
 ### Encryption at rest
 
@@ -160,13 +193,15 @@ Options:
       --tls-cert <PATH>                PEM certificate (omit for ephemeral self-signed)
       --tls-key <PATH>                 PEM private key
       --auth                           Enable authentication
-      --username <NAME>                Username (requires --auth)
-      --password <PASS>                Password, hashed with argon2id at startup (requires --auth)
+      --username <NAME>                Bootstrap admin username (requires --auth)
+      --password <PASS>                Bootstrap admin password, hashed with argon2id at startup
+      --users-file <PATH>              Persistent multi-user store. Seeded by --username/--password
+                                       when the file is empty; thereafter the file is source of truth.
   -h, --help                           Print help
   -V, --version                        Print version
 
 Environment:
-  TAU_ENCRYPTION_KEY   64 hex chars — enables AES-256-GCM encryption at rest
+  TAU_ENCRYPTION_KEY   64 hex chars - enables AES-256-GCM encryption at rest
 ```
 
 Wire format: one statement per line in, one response per line out.
@@ -176,12 +211,13 @@ Wire format: one statement per line in, one response per line out.
 | `OK` | DDL or write succeeded |
 | `VAL <v>` | Point lookup value; `VAL NIL` when no tau covers the timestamp |
 | `RANGE <n>; <s>:<e>:<v> …` | Range scan, `n` segments |
-| `NAMES <n>; name …` | Name list from `SHOW DATABASES` / `SHOW LENSES` |
-| `ERR <message>` | Parse or executor error |
+| `NAMES <n>; name …` | Name list from `SHOW DATABASES` / `SHOW LENSES` / `SHOW USERS` |
+| `GRANTS <n>; <user> <db>:<perms> … ; …` | Result of `SHOW GRANTS` |
+| `ERR <message>` | Parse, executor, or permission error |
 
 Values encode as `i<int>`, `f<float>`, `s<percent-escaped>`, `b<0|1>`, `n` (null).
 
-See [`src/bin/tau/`](src/bin/tau/README.md) for concurrency model, connection handling, and known limitations.
+See [`src/bin/tau/`](src/bin/tau/README.md) for concurrency model, connection handling, and known limitations. The interactive REPL - [`tauctl`](src/bin/tauctl/README.md) - speaks the same wire protocol, supports TLS, and includes commands for managing multiple connections at once.
 
 ---
 
@@ -209,7 +245,7 @@ let mut e = Executor::new();
 for q in [
     "CREATE DATABASE main",
     "CREATE LENS celsius float",
-    "APPEND LENS celsius 0 50 18.0, 50 100 22.0",   // bulk append — one layer
+    "APPEND LENS celsius 0 50 18.0, 50 100 22.0",   // bulk append - one layer
     "DERIVE LENS f AS celsius * 9.0 / 5.0 + 32.0",
     "DERIVE LENS smooth AS avg(celsius, -20, 0)",
 ] {
@@ -239,6 +275,17 @@ cargo fmt
 Toolchain is pinned to Rust **1.94.1** (edition 2024) via `rust-toolchain.toml`. CI runs fmt → build → clippy → tests.
 
 ---
+
+## Benchmarks
+
+A deterministic grid runner (`src/bin/bench/main.rs`) sweeps `(backend × wal × fsync × compact_threshold × scale)` and emits one CSV row per cell. See [`BENCHMARKS.md`](BENCHMARKS.md) for the methodology and per-attempt notes.
+
+```bash
+cargo run --release --bin bench -- --quick                             # fast iteration, tmpfs
+cargo run --release --bin bench -- --scratch /var/tmp/tau --out r.csv  # full grid, real disk
+```
+
+Fast mode means `Wal::set_fsync_each(false)`, `Disk::set_rewrite_on_compact(false)`, and `Database::set_auto_checkpoint(false)` - opt-in via setters; defaults preserve per-record fsync durability.
 
 ## Roadmap
 

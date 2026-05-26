@@ -5,4 +5,5 @@ pub mod executor;
 pub mod model;
 pub mod ql;
 pub mod storage;
+pub mod users;
 pub mod value;

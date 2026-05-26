@@ -4,6 +4,7 @@
 //!
 //! ```text
 //! stmt   := create | append | copy | derive | show | at | range | reduce | drop | use
+//!         | create_user | drop_user | grant | revoke
 //!
 //! create := CREATE DATABASE <ident>
 //!         | CREATE LENS <ident> <type>
@@ -12,17 +13,26 @@
 //! derive := DERIVE LENS <ident> AS <expr>
 //! show   := SHOW DATABASES
 //!         | SHOW LENSES
+//!         | SHOW USERS
+//!         | SHOW GRANTS [<ident>]
 //! at     := AT     LENS <ident> <int>
 //! range  := RANGE  LENS <ident> <int> <int> [WHERE <expr>]
 //! reduce := REDUCE LENS <ident> <int> <int> USING <func>
 //! drop   := DROP   LENS <ident>
 //!         | DROP   DATABASE <ident>
+//!         | DROP   USER <ident>
 //! use    := USE    DATABASE <ident>
 //!
-//! type    := int | float | str | bool | bytes
-//! func    := min | max | avg | sum | count
-//! literal := int | float | string | bool | null
-//! expr    := disjunction      (full operator-precedence grammar; see parser)
+//! create_user := CREATE USER <ident> PASSWORD "<pass>"
+//! grant       := GRANT  <perm-letters> ON <db-or-star> TO   <ident>
+//! revoke      := REVOKE <perm-letters> ON <db-or-star> FROM <ident>
+//!
+//! type      := int | float | str | bool | bytes
+//! func      := min | max | avg | sum | count
+//! literal   := int | float | string | bool | null
+//! expr      := disjunction      (full operator-precedence grammar; see parser)
+//! perm-letters := any combo of CRUDA, or `*` for all, or `-` for none
+//! db-or-star   := <ident> | `*`
 //! ```
 //!
 //! Keywords are case-insensitive; identifiers and literals are not.
@@ -97,7 +107,7 @@ pub enum Expr {
         lhs: Box<Expr>,
         rhs: Box<Expr>,
     },
-    /// `func(lens, rel_start, rel_end)` — aggregate `lens` over the window
+    /// `func(lens, rel_start, rel_end)` - aggregate `lens` over the window
     /// `[t + rel_start, t + rel_end)` relative to the evaluation timestamp.
     Agg {
         func: AggFunc,
@@ -109,17 +119,17 @@ pub enum Expr {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
-    /// `CREATE DATABASE <name>` — registers a fresh, empty database.
+    /// `CREATE DATABASE <name>` - registers a fresh, empty database.
     /// The first database created also becomes the active one.
     CreateDatabase {
         name: String,
     },
-    /// `DROP DATABASE <name>` — removes a database and all its lenses.
+    /// `DROP DATABASE <name>` - removes a database and all its lenses.
     /// Clears the active database if it pointed at this one.
     DropDatabase {
         name: String,
     },
-    /// `USE DATABASE <name>` — sets the active database for subsequent
+    /// `USE DATABASE <name>` - sets the active database for subsequent
     /// lens statements.
     UseDatabase {
         name: String,
@@ -128,13 +138,13 @@ pub enum Stmt {
         name: String,
         ty: Type,
     },
-    /// `APPEND LENS <name> <s0> <e0> <v0> [, <s1> <e1> <v1> …]` — write one
+    /// `APPEND LENS <name> <s0> <e0> <v0> [, <s1> <e1> <v1> …]` - write one
     /// or more taus into a single layer.  Bulk form reduces per-write overhead.
     Append {
         name: String,
         taus: Vec<(i64, i64, Literal)>,
     },
-    /// `COPY LENS <name> FROM "<path>"` — ingest taus from a CSV file where
+    /// `COPY LENS <name> FROM "<path>"` - ingest taus from a CSV file where
     /// each line is `start,end,value`.
     Copy {
         name: String,
@@ -157,17 +167,48 @@ pub enum Stmt {
     Drop {
         name: String,
     },
-    /// `SHOW DATABASES` — list all registered database names.
+    /// `SHOW DATABASES` - list all registered database names.
     ShowDatabases,
-    /// `SHOW LENSES` — list all lens names in the active database.
+    /// `SHOW LENSES` - list all lens names in the active database.
     ShowLenses,
-    /// `REDUCE LENS <name> <start> <end> USING <func>` — collapse a lens over
+    /// `REDUCE LENS <name> <start> <end> USING <func>` - collapse a lens over
     /// an absolute range to a single scalar via an aggregation function.
     Reduce {
         name: String,
         start: i64,
         end: i64,
         func: AggFunc,
+    },
+    /// `CREATE USER <name> PASSWORD "<pass>"` - add a new user with no
+    /// permissions yet.  Requires global admin.
+    CreateUser {
+        name: String,
+        password: String,
+    },
+    /// `DROP USER <name>` - delete a user.  Requires global admin.
+    DropUser {
+        name: String,
+    },
+    /// `GRANT <perms> ON <db|*> TO <user>` - grant per-database permissions.
+    /// Requires admin on the target database (or global).
+    Grant {
+        perms: crate::libtau::users::Perm,
+        database: String,
+        user: String,
+    },
+    /// `REVOKE <perms> ON <db|*> FROM <user>` - strip per-database permissions.
+    /// Requires admin on the target database (or global).
+    Revoke {
+        perms: crate::libtau::users::Perm,
+        database: String,
+        user: String,
+    },
+    /// `SHOW USERS` - list user names.  Requires global admin.
+    ShowUsers,
+    /// `SHOW GRANTS [<user>]` - list per-database permissions for a user
+    /// (or for every user when no name given).
+    ShowGrants {
+        user: Option<String>,
     },
 }
 
@@ -185,11 +226,13 @@ impl Stmt {
                 | Stmt::Reduce { .. }
                 | Stmt::ShowDatabases
                 | Stmt::ShowLenses
+                | Stmt::ShowUsers
+                | Stmt::ShowGrants { .. }
         )
     }
 }
 
-// Display impls — used to serialise schema DDL statements to the WAL so they
+// Display impls - used to serialise schema DDL statements to the WAL so they
 // survive a restart and can be replayed as text.
 
 impl std::fmt::Display for Type {
