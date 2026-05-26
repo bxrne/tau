@@ -8,7 +8,7 @@
 //! dev/internal networks - do not point at an untrusted server).
 
 use std::collections::HashMap;
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
 
@@ -165,10 +165,6 @@ impl ServerCertVerifier for NoVerify {
         ]
     }
 }
-
-// Suppress unused import warning when only one Backend variant is constructed.
-#[allow(dead_code)]
-fn _backend_read_witness<R: Read>(_: R) {}
 
 pub struct TcpManager {
     conns: HashMap<String, Connection>,

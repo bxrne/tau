@@ -16,16 +16,6 @@ VAL f18
 bye.
 ```
 
-## File layout
-
-| file | purpose |
-|---|---|
-| `main.rs`     | entrypoint; builds the `Registry`, registers commands, starts the REPL |
-| `repl.rs`     | `Repl` struct, prompt + read + dispatch loop, status printer |
-| `commands.rs` | `Command`, `Registry`, and built-in command builders |
-| `tcpmgr.rs`   | `Connection` + `TcpManager` - named pool of live tau-server connections (plain or TLS) |
-| `style.rs`    | ANSI styling helpers using the basic 8-color palette |
-
 ## Built-in commands
 
 | name | what it does |
@@ -37,9 +27,39 @@ bye.
 | `use <name>`                                        | Switch the active connection. |
 | `connections`                                       | List registered connections (active marked with `*`, scheme shown as `tcp`/`tls`). |
 | `auth <user> <pass>`                                | Send `AUTH <user> <pass>` on the active connection. |
+| `load <lens> <local-path> [chunk]`                  | Read a CSV from the **client's** filesystem and ship it to the active connection as batched `APPEND` statements. Use this when the file lives on your laptop and the server is remote / containerised. |
 | `exit` / `quit` / Ctrl-D                            | Close the REPL. |
 
 Anything else is treated as a tauql statement and sent to the active connection.
+
+## Line editing
+
+The REPL uses `rustyline` for input, so the standard readline shortcuts work out of the box:
+
+- ←/→ to move within the line, Ctrl-A / Ctrl-E for home/end, Ctrl-W to delete the previous word
+- ↑/↓ to recall earlier statements
+- Bracketed paste: multi-line clipboard content is treated as a single line
+- History is persisted across sessions to `$HOME/.tau_history` (override with `TAU_HISTORY_FILE`)
+- Ctrl-C cancels the current line; Ctrl-D exits
+
+## Client-side bulk load vs server-side `COPY`
+
+There are two paths for ingesting a CSV, picked by where the file lives:
+
+- **Server-side, file already on the server's filesystem (embedded mode or a Docker volume):**
+  ```
+  τ: COPY LENS temp FROM "/data/temperature.csv"
+  ```
+  Runs `COPY` as a tauql statement; the server reads the path directly with `std::fs`.
+
+- **Client-side, file lives on your machine and the server is remote / containerised:**
+  ```
+  τ: load temp examples/data/temperature.csv
+  loaded 48 rows into temp (1 chunk)
+  ```
+  The REPL reads the file from your filesystem, parses each row, and sends batched `APPEND LENS temp s0 e0 v0, s1 e1 v1, …` statements over the existing connection. No server-side path access required, no extra protocol state, works through TLS and auth like any other statement.
+
+`load` chunks at 256 rows per `APPEND` by default; pass an explicit chunk size as the third argument when you want to tune it (`load temp big.csv 1024`).
 
 ## TLS
 
@@ -152,16 +172,16 @@ Non-admin callers receive `ERR permission denied: …` for any statement they la
 
 Identifiers reference other lenses by name. Supported operators (precedence high → low):
 
-| group | operators |
-|---|---|
-| unary       | `-` `not` |
+| group       | operators |
+|-------------|-----------|
+| unary       | `-` `!`   |
 | `* / %`     | multiplicative |
-| `+ -`       | additive |
+| `+ -`       | additive  |
 | comparison  | `<` `<=` `>` `>=` |
 | equality    | `==` `!=` |
-| `and`       | logical and |
-| `or`        | logical or |
-| parens      | `(expr)` |
+| logical and | `&&`      |
+| logical or  | `\|\|`    |
+| parens      | `(expr)`  |
 | literals    | int, float, string `"…"`, bool, `null` |
 
 Aggregations are first-class expression nodes, available in `DERIVE` and `WHERE`:

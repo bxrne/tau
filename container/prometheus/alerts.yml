@@ -1,0 +1,182 @@
+# Tau DB Prometheus alert rules.
+#
+# Severity levels:
+#   critical - page immediately; data at risk or service down
+#   warning  - notify during business hours; degraded but not down
+#   info     - FYI; no action required
+
+groups:
+
+  - name: tau.availability
+    interval: 15s
+    rules:
+      - alert: TauDown
+        expr: up{job="tau"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Tau DB is unreachable"
+          description: >
+            Prometheus cannot scrape tau on {{ $labels.instance }}.
+            The server may have crashed or the metrics port is blocked.
+            Check `docker compose logs tau`.
+
+      - alert: TauMetricsStale
+        expr: |
+          up{job="tau"} == 1
+          and
+          rate(tau_statements_total[5m]) == 0
+          and
+          rate(tau_connections_total[5m]) == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Tau DB is up but receiving no traffic"
+          description: >
+            {{ $labels.instance }} has been idle for 5 minutes. Could be expected
+            during off-peak windows or could indicate an upstream networking
+            issue.
+
+  - name: tau.errors
+    rules:
+      - alert: TauHighErrorRate
+        expr: |
+          (
+            rate(tau_errors_total[5m])
+            /
+            (rate(tau_statements_total[5m]) + 0.001)
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Tau DB error rate > 5 %"
+          description: >
+            Error rate on {{ $labels.instance }} is
+            {{ $value | humanizePercentage }} over the last 5 minutes.
+
+      - alert: TauCriticalErrorRate
+        expr: |
+          (
+            rate(tau_errors_total[5m])
+            /
+            (rate(tau_statements_total[5m]) + 0.001)
+          ) > 0.25
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Tau DB error rate > 25 % - service degraded"
+
+      - alert: TauErrorBurst
+        expr: rate(tau_errors_total[1m]) > 50
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Tau DB error burst - {{ $value | humanize }} err/s"
+
+  - name: tau.security
+    rules:
+      - alert: TauAuthFailureSpike
+        expr: |
+          (
+            rate(tau_auth_failures_total[5m])
+            /
+            (rate(tau_auth_attempts_total[5m]) + 0.001)
+          ) > 0.20
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Tau DB auth failure rate > 20 %"
+
+      - alert: TauAuthBruteForce
+        expr: rate(tau_auth_failures_total[1m]) > 20
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Tau DB possible brute-force - {{ $value | humanize }} failed auth/s"
+
+      - alert: TauConnectionRejections
+        expr: rate(tau_rejected_connections_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Tau DB rejecting connections (max-connections cap reached)"
+          description: >
+            The server has refused new connections in the last minute. Increase
+            --max-connections, scale out, or investigate runaway clients.
+
+  - name: tau.performance
+    rules:
+      - alert: TauHighAppendLatency
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le, type) (
+              rate(tau_statement_duration_microseconds_bucket{type="append"}[5m])
+            )
+          ) > 5000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Tau DB p95 APPEND latency > 5 ms"
+          description: >
+            p95 APPEND on {{ $labels.instance }} is {{ $value | humanize }} us.
+            Check disk I/O, WAL fsync settings, and compaction frequency.
+
+      - alert: TauHighReadLatency
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le, type) (
+              rate(tau_statement_duration_microseconds_bucket{type=~"at|range|reduce"}[5m])
+            )
+          ) > 2000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Tau DB p95 read latency > 2 ms"
+
+      - alert: TauThroughputDrop
+        expr: |
+          (
+            sum(rate(tau_statements_total[5m]))
+            /
+            sum(rate(tau_statements_total[1h]) + 0.001)
+          ) < 0.50
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Tau DB throughput dropped > 50 % vs 1h average"
+
+  - name: tau.resources
+    rules:
+      - alert: TauHighMemory
+        expr: tau_process_resident_bytes > 768 * 1024 * 1024
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Tau RSS > 768 MiB ({{ $value | humanize1024 }})"
+          description: >
+            Consider raising TAU_MEM_LIMIT or investigating a memory leak.
+
+      - alert: TauFdPressure
+        expr: tau_process_open_fds > 4096
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Tau open FDs > 4096"
+          description: >
+            File-descriptor pressure can lead to dropped connections. Raise
+            ulimits, lower --max-connections, or close client-side leaks.

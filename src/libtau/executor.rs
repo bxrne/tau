@@ -27,10 +27,14 @@
 //! `SHOW DATABASES` / `SHOW LENSES` return [`Output::Names`] - a sorted name list.
 
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::io;
 use std::path::Path;
+use std::sync::Arc;
+use std::time::Instant;
 
 use crate::libtau::database::Database;
+use crate::libtau::metrics::Metrics;
 use crate::libtau::model::{Layer, Tau, Timestamp};
 use crate::libtau::ql::ast::{AggFunc, BinOp, Expr, Stmt, Type, UnOp};
 use crate::libtau::storage::InMemory;
@@ -151,6 +155,10 @@ pub struct Executor {
     /// a public field so admin tooling can read or mutate users directly
     /// without going through wrapper methods.
     pub users: UserStore,
+    /// Execution counters shared with the metrics HTTP endpoint (if enabled).
+    /// Always present; the server clones the Arc to give the metrics thread
+    /// read access without locking the executor.
+    pub metrics: Arc<Metrics>,
 }
 
 impl Default for Executor {
@@ -172,6 +180,7 @@ impl Executor {
             compact_threshold,
             in_replay: false,
             users: UserStore::new(),
+            metrics: Metrics::arc(),
         }
     }
 
@@ -233,7 +242,8 @@ impl Executor {
     /// The TCP server uses this entry point under a shared read lock so
     /// concurrent lookups don't serialise on each other.
     pub fn exec_read(&self, stmt: &Stmt) -> Result<Output, ExecError> {
-        match stmt {
+        let t0 = Instant::now();
+        let result = match stmt {
             Stmt::At { name, t } => self.at_lens(name, *t),
             Stmt::Range {
                 name,
@@ -254,21 +264,28 @@ impl Executor {
             _ => Err(ExecError::InvalidExpr(
                 "exec_read called on a mutating statement".into(),
             )),
+        };
+        let ns = t0.elapsed().as_nanos() as u64;
+        match stmt {
+            Stmt::At { .. } => self.metrics.record_at(ns),
+            Stmt::Range { .. } => self.metrics.record_range(ns),
+            Stmt::Reduce { .. } => self.metrics.record_reduce(ns),
+            _ => {}
         }
+        result
     }
 
     /// Execute a single parsed statement.
     pub fn exec(&mut self, stmt: &Stmt) -> Result<Output, ExecError> {
-        match stmt {
+        let t0 = Instant::now();
+        let result = match stmt {
             Stmt::CreateDatabase { name } => self.create_database(name),
             Stmt::DropDatabase { name } => self.drop_database(name),
             Stmt::UseDatabase { name } => self.use_database(name),
             Stmt::Create { name, ty } => self.create_lens(name, ty.clone()),
             Stmt::Append { name, taus } => {
-                let taus: Vec<(Timestamp, Timestamp, Value)> = taus
-                    .iter()
-                    .map(|(s, e, v)| (*s, *e, v.clone().into()))
-                    .collect();
+                let taus: Vec<(Timestamp, Timestamp, Value)> =
+                    taus.iter().map(|(s, e, v)| (*s, *e, v.into())).collect();
                 self.append_lens(name, taus)
             }
             Stmt::Copy { name, path } => self.copy_lens(name, path),
@@ -303,7 +320,16 @@ impl Executor {
             } => self.revoke(*perms, database, user),
             Stmt::ShowUsers => self.show_users(),
             Stmt::ShowGrants { user } => self.show_grants(user.as_deref()),
+        };
+        let ns = t0.elapsed().as_nanos() as u64;
+        match stmt {
+            Stmt::Append { .. } | Stmt::Copy { .. } => self.metrics.record_append(ns),
+            Stmt::At { .. } => self.metrics.record_at(ns),
+            Stmt::Range { .. } => self.metrics.record_range(ns),
+            Stmt::Reduce { .. } => self.metrics.record_reduce(ns),
+            _ => self.metrics.record_ddl(ns),
         }
+        result
     }
 
     /// Execute a statement on behalf of `caller`, applying permission checks
@@ -569,7 +595,7 @@ impl Executor {
 
     fn copy_lens(&mut self, name: &str, path: &str) -> Result<Output, ExecError> {
         use crate::libtau::ql::parser::parse as ql_parse;
-        let content = std::fs::read_to_string(path).map_err(|e| ExecError::Io(e.to_string()))?;
+        let content = fs::read_to_string(path).map_err(|e| ExecError::Io(e.to_string()))?;
         // Validate the lens exists and get its type before parsing all rows.
         {
             let state = self.active_state()?;
@@ -617,7 +643,7 @@ impl Executor {
                     },
                 )) if !parsed_taus.is_empty() => {
                     let (_, _, lit) = &parsed_taus[0];
-                    lit.clone().into()
+                    lit.into()
                 }
                 _ => {
                     return Err(ExecError::Io(format!(
@@ -674,20 +700,46 @@ impl Executor {
         if !state.base_types.contains_key(name) && !state.derived.contains_key(name) {
             return Err(ExecError::UnknownLens(name.into()));
         }
-        let mut bounds = vec![start, end];
-        collect_lens_bounds(state, name, start, end, &mut bounds)?;
+
+        let mut bounds = Vec::with_capacity(64);
+        bounds.push(start);
+        bounds.push(end);
+
+        // For base lenses snapshot layers once; the same snapshot drives both
+        // boundary collection and per-window lookups, saving N_windows store
+        // read-lock acquisitions.  For derived lenses fall back to the generic
+        // path (can't snapshot arbitrary expressions).
+        let layers_snap: Option<Vec<Layer<Value>>> = if state.base_types.contains_key(name) {
+            let snap = state.db.layers(name);
+            if let Some(ref ls) = snap {
+                collect_bounds_from_layers(ls, start, end, &mut bounds);
+            }
+            snap
+        } else {
+            collect_lens_bounds(state, name, start, end, &mut bounds)?;
+            None
+        };
+
         if let Some(f) = filter {
             collect_expr_bounds(state, f, start, end, &mut bounds)?;
         }
-        bounds.sort();
+        bounds.sort_unstable();
         bounds.dedup();
 
-        let mut out: Vec<(Timestamp, Timestamp, Value)> = Vec::new();
+        let mut out: Vec<(Timestamp, Timestamp, Value)> =
+            Vec::with_capacity(bounds.len().saturating_sub(1));
         for w in bounds.windows(2) {
             let (s, e) = (w[0], w[1]);
-            let v = match eval_lens(state, name, s)? {
-                Some(v) => v,
-                None => continue,
+            let v = if let Some(ref ls) = layers_snap {
+                match at_layers(ls, s) {
+                    Some(v) => v,
+                    None => continue,
+                }
+            } else {
+                match eval_lens(state, name, s)? {
+                    Some(v) => v,
+                    None => continue,
+                }
             };
             if let Some(f) = filter {
                 match eval_expr(state, f, s)? {
@@ -756,14 +808,12 @@ impl Executor {
     }
 
     fn active_mut(&mut self) -> Result<&mut DbState, ExecError> {
-        let name = self
-            .active
-            .as_deref()
-            .ok_or(ExecError::NoActiveDatabase)?
-            .to_string();
+        // Use as_deref so HashMap::get_mut receives &str directly (String: Borrow<str>),
+        // avoiding a String allocation on every write-path call.
+        let name = self.active.as_deref().ok_or(ExecError::NoActiveDatabase)?;
         self.databases
-            .get_mut(&name)
-            .ok_or(ExecError::UnknownDatabase(name))
+            .get_mut(name)
+            .ok_or_else(|| ExecError::UnknownDatabase(name.into()))
     }
 }
 
@@ -824,7 +874,9 @@ fn would_cycle(
 
 fn eval_lens(state: &DbState, name: &str, t: Timestamp) -> Result<Option<Value>, ExecError> {
     if state.base_types.contains_key(name) {
-        Ok(state.db.at(&state.db.lens(name), t))
+        // Use at_name to avoid the Arc<str> allocation that lens() would incur
+        // on every window in a range/reduce scan.
+        Ok(state.db.at_name(name, t))
     } else if let Some(expr) = state.derived.get(name) {
         eval_expr(state, expr, t)
     } else {
@@ -834,7 +886,7 @@ fn eval_lens(state: &DbState, name: &str, t: Timestamp) -> Result<Option<Value>,
 
 fn eval_expr(state: &DbState, expr: &Expr, t: Timestamp) -> Result<Option<Value>, ExecError> {
     match expr {
-        Expr::Lit(l) => Ok(Some(l.clone().into())),
+        Expr::Lit(l) => Ok(Some(l.into())),
         Expr::Ident(name) => eval_lens(state, name, t),
         Expr::Unary { op, expr } => match eval_expr(state, expr, t)? {
             None => Ok(None),
@@ -986,6 +1038,56 @@ fn values_equal(a: &Value, b: &Value) -> Result<bool, ExecError> {
     }
 }
 
+/// Collect change-point timestamps from a layer snapshot using binary search.
+///
+/// Taus in each layer are sorted by `start` and non-overlapping, which means
+/// `tau.end` is also monotonically non-decreasing. Both boundaries can therefore
+/// be located with `partition_point` rather than a full linear scan.
+/// Point lookup on a pre-snapshotted layer stack (newest layer wins).
+///
+/// Equivalent to `Store::at` but avoids any lock acquisition - callers must
+/// already hold a safe snapshot of the layer vec via `Database::layers`.
+/// Uses each layer's `min_start`/`max_end` range to skip layers without
+/// dereferencing their Arc-backed tau slice.
+#[inline]
+fn at_layers(layers: &[Layer<Value>], t: Timestamp) -> Option<Value> {
+    layers
+        .iter()
+        .rev()
+        .find_map(|layer| {
+            // Skip layers whose entire time range does not contain t without
+            // chasing the Arc pointer into the tau slice.
+            if t < layer.min_start || t >= layer.max_end {
+                return None;
+            }
+            layer.at(t)
+        })
+        .cloned()
+}
+
+fn collect_bounds_from_layers(
+    layers: &[Layer<Value>],
+    start: Timestamp,
+    end: Timestamp,
+    out: &mut Vec<Timestamp>,
+) {
+    for layer in layers {
+        let taus = &layer.taus;
+        // tau.start in (start, end)
+        let s_lo = taus.partition_point(|t| t.start <= start);
+        let s_hi = taus.partition_point(|t| t.start < end);
+        for tau in &taus[s_lo..s_hi] {
+            out.push(tau.start);
+        }
+        // tau.end in (start, end) - monotone because non-overlapping + sorted by start
+        let e_lo = taus.partition_point(|t| t.end <= start);
+        let e_hi = taus.partition_point(|t| t.end < end);
+        for tau in &taus[e_lo..e_hi] {
+            out.push(tau.end);
+        }
+    }
+}
+
 fn collect_lens_bounds(
     state: &DbState,
     name: &str,
@@ -995,22 +1097,11 @@ fn collect_lens_bounds(
 ) -> Result<(), ExecError> {
     if state.base_types.contains_key(name) {
         if let Some(layers) = state.db.layers(name) {
-            for layer in layers {
-                for tau in layer.taus.iter() {
-                    if tau.start > start && tau.start < end {
-                        out.push(tau.start);
-                    }
-                    if tau.end > start && tau.end < end {
-                        out.push(tau.end);
-                    }
-                }
-            }
+            collect_bounds_from_layers(&layers, start, end, out);
         }
         Ok(())
     } else if let Some(expr) = state.derived.get(name) {
-        // Clone to release the borrow before recursing into other lenses.
-        let expr = expr.clone();
-        collect_expr_bounds(state, &expr, start, end, out)
+        collect_expr_bounds(state, expr, start, end, out)
     } else {
         Err(ExecError::UnknownLens(name.into()))
     }
@@ -1068,15 +1159,34 @@ fn eval_agg(
     start: Timestamp,
     end: Timestamp,
 ) -> Result<Option<Value>, ExecError> {
-    let mut bounds = vec![start, end];
-    collect_lens_bounds(state, lens, start, end, &mut bounds)?;
-    bounds.sort();
+    let mut bounds = Vec::with_capacity(64);
+    bounds.push(start);
+    bounds.push(end);
+
+    // Same snapshot strategy as range_lens: for base lenses take one store
+    // read lock and reuse it for both boundary collection and per-window lookup.
+    let layers_snap: Option<Vec<Layer<Value>>> = if state.base_types.contains_key(lens) {
+        let snap = state.db.layers(lens);
+        if let Some(ref ls) = snap {
+            collect_bounds_from_layers(ls, start, end, &mut bounds);
+        }
+        snap
+    } else {
+        collect_lens_bounds(state, lens, start, end, &mut bounds)?;
+        None
+    };
+
+    bounds.sort_unstable();
     bounds.dedup();
 
-    let mut segments: Vec<(i64, Value)> = Vec::new();
+    let mut segments: Vec<(i64, Value)> = Vec::with_capacity(bounds.len().saturating_sub(1));
     for w in bounds.windows(2) {
         let (s, e) = (w[0], w[1]);
-        if let Some(v) = eval_lens(state, lens, s)? {
+        if let Some(v) = if let Some(ref ls) = layers_snap {
+            at_layers(ls, s)
+        } else {
+            eval_lens(state, lens, s)?
+        } {
             segments.push((e - s, v));
         }
     }

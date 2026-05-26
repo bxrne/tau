@@ -27,6 +27,13 @@ impl<V> Tau<V> {
 #[derive(Debug, Clone)]
 pub struct Layer<V> {
     pub id: LayerId,
+    /// Minimum `start` across all taus in this layer.  Used by `at_layers` to
+    /// skip a layer with a single comparison instead of a full binary search.
+    pub min_start: Timestamp,
+    /// Maximum `end` across all taus in this layer.  Paired with `min_start`
+    /// for the fast-skip: if `t < min_start || t >= max_end` the layer cannot
+    /// contain a tau covering `t`.
+    pub max_end: Timestamp,
     pub taus: Arc<[Tau<V>]>,
 }
 
@@ -37,8 +44,14 @@ impl<V> Layer<V> {
             taus.windows(2).all(|w| w[0].end <= w[1].start),
             "Layer: taus must not overlap"
         );
+        // Because taus are sorted by start (and non-overlapping, so end is also
+        // monotone), first.start is the minimum and last.end is the maximum.
+        let min_start = taus.first().map_or(Timestamp::MAX, |t| t.start);
+        let max_end = taus.last().map_or(Timestamp::MIN, |t| t.end);
         Self {
             id,
+            min_start,
+            max_end,
             taus: taus.into(),
         }
     }

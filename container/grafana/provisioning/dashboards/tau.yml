@@ -1,0 +1,12 @@
+apiVersion: 1
+
+providers:
+  - name: "Tau DB"
+    orgId: 1
+    type: file
+    disableDeletion: true
+    updateIntervalSeconds: 30
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

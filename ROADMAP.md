@@ -2,8 +2,6 @@
 
 This document tracks what has been built and what remains before Tau can be considered production-ready. Granularity is intentionally at the feature/correctness level rather than individual commits - the aim is a map that communicates intent, not a sprint board.
 
----
-
 ## Foundation
 
 - [x] Core data model - `Tau<V>` (half-open interval), `Layer<V>` (sorted, non-overlapping batch), `Lens<V>` (base or derived)
@@ -12,8 +10,6 @@ This document tracks what has been built and what remains before Tau can be cons
 - [x] Auto-compaction - threshold-based merge of multiple layers into one canonical layer
 - [x] Derived lenses - lazy expression evaluation at query time, no caching
 - [x] `Arc`-backed cheap layer clones - reads share allocations with no copying
-
----
 
 ## Storage
 
@@ -27,8 +23,6 @@ This document tracks what has been built and what remains before Tau can be cons
 - [x] **Schema persistence in WAL** - `CREATE LENS` and `DERIVE LENS` are written as `S:` lines in the WAL; replay restores both data and schema so lens declarations survive a restart
 - [x] **Disk backend append mode** - unencrypted `Disk` now holds an open append-mode file handle; `Store::append` writes each entry in O(entry) time; a full rewrite only occurs when compaction fires
 - [x] **WAL write failure handling** - `Database::append` returns `io::Result<()>`; a WAL fsync failure leaves the in-memory store unchanged; `ExecError::Io` surfaces the error to the client over TCP
-
----
 
 ## Query Language
 
@@ -46,8 +40,6 @@ This document tracks what has been built and what remains before Tau can be cons
 - [x] Arithmetic, comparison, and logical operators in expressions
 - [ ] **Named timestamp aliases** - allow symbolic names (e.g. Unix epoch offsets, ISO-8601 parsing) rather than raw integers only
 
----
-
 ## Executor
 
 - [x] Per-database lens registry with type enforcement
@@ -58,8 +50,6 @@ This document tracks what has been built and what remains before Tau can be cons
 - [x] **Cycle detection in derived lenses** - `DERIVE LENS` performs a DFS through the existing derived graph before inserting; returns `CycleDetected` error for direct or transitive cycles
 - [x] **`RANGE` on aggregation-backed derived lenses** - boundary collection for `Agg` expressions corrected; enter/exit projection ranges computed from `min`/`max` of relative offsets, covering all sign combinations
 
----
-
 ## Server
 
 - [x] Line-oriented TCP protocol - one statement per line in, one response per line out
@@ -68,24 +58,20 @@ This document tracks what has been built and what remains before Tau can be cons
 - [x] Argon2id password authentication - `--auth --username --password`; hash computed at startup, plaintext not retained
 - [x] **Multi-user authentication with per-database CRUDA grants** - `--users-file PATH` enables a file-backed `UserStore`; `Executor::exec_as` enforces a 5-bit Create/Read/Update/Delete/Admin bitmap per database (with `"*"` as a wildcard); `CREATE USER`, `DROP USER`, `GRANT`, `REVOKE`, `SHOW USERS`, `SHOW GRANTS` are first-class statements gated on global admin (`A` on `*`); promotion is just `GRANT A ON * TO <user>`. Bootstrap admin via `--username/--password` on the first run; thereafter the file is source of truth (atomic rewrite on every mutation)
 - [x] Structured logging via `tracing` - auth success/fail, per-query elapsed-µs + ok/err status (debug), accepted/disconnected peers (debug/info), TLS/no-TLS startup
+- [x] **Connection limits** - `--max-connections N` (default 1024) caps concurrent client threads. Excess connections are rejected at accept with `ERR server at connection limit` and counted in `tau_rejected_connections_total`
+- [x] **Per-connection idle timeout** - `--idle-timeout-secs SECS` (default 300, 0 disables). Both the read and write halves get the timeout via `set_read_timeout` / `set_write_timeout`
+- [x] **Health / readiness endpoint** - `GET /healthz` on the metrics port returns 200 with a short body; suitable for Kubernetes/Nomad-style probes
+- [x] **Metrics** - Prometheus-style counters, histograms (per-type latency in microseconds, with the standard OpenMetrics buckets) and gauges (RSS, VSZ, open FDs, threads, uptime). Reachable on `--metrics-port`; trace-logged per request
 - [ ] **Graceful shutdown** - `SIGTERM` / `SIGINT` handling; in-flight connections should drain before exit
-- [ ] **Connection limits** - unbounded `thread::spawn` per incoming connection; a slow-loris or connection flood will exhaust the thread pool or file descriptors
-- [ ] **Client timeout** - connections with no activity should be reaped
-- [ ] **Health / readiness endpoint** - a simple TCP ping or HTTP endpoint that infra can probe without speaking the full query protocol
-- [ ] **Metrics** - Prometheus-style counters and gauges (queries/sec, write latency, compaction events, layer counts) reachable via a separate port or endpoint
-
----
 
 ## Operational
 
 - [ ] **Config file support** - CLI flags only; a TOML/YAML config file would allow persistent server configuration without shell wrappers
 - [ ] **Backup and restore tooling** - snapshot the WAL + Disk files safely while the server is live
-- [x] **`tauctl` CLI tool** - interactive REPL (`src/bin/tauctl/`) speaking the wire protocol with terminal colors, named connection pool, plain-TCP **and TLS** transport (no-verify verifier for self-signed dev certs), inline `AUTH` at `connect` time or via a standalone `auth` command, status footer with elapsed time + ok/err, fall-through dispatcher so any non-built-in input is forwarded as a tauql statement
-- [ ] **Docker image and `docker-compose` example** - minimal production-ready container with a named volume for the WAL
+- [x] **`tauctl` CLI tool** - interactive REPL (`src/bin/tauctl/`) speaking the wire protocol with terminal colors, named connection pool, plain-TCP **and TLS** transport (no-verify verifier for self-signed dev certs), inline `AUTH` at `connect` time or via a standalone `auth` command, status footer with elapsed time + ok/err, fall-through dispatcher so any non-built-in input is forwarded as a tauql statement, `rustyline`-backed input (arrow keys, history persisted to `$HOME/.tau_history`, bracketed paste, Ctrl-A/E/W/etc.), and a client-side `load <lens> <local-path>` command that ships local CSVs to the active connection as batched `APPEND` statements
+- [x] **Docker image and `docker-compose` stack** - scratch-based musl static image (`ghcr.io/bxrne/tau`); compose file under `container/` brings up tau + Prometheus + Grafana with provisioned dashboards and alert rules; full GHCR pull / TLS / auth flows documented in `container/README.md`
 - [ ] **`systemd` unit file** - for bare-metal deployments
-- [x] **Benchmark harness** - `src/bin/bench/main.rs` is a deterministic grid runner across `(backend × wal × fsync × compact_threshold × scale)`; emits one CSV row per cell and supports `--scratch DIR` for tmpfs-vs-real-disk runs. Drove the optimizations documented in `BENCHMARKS.md` - sweep-line compaction, opt-in non-fsync mode (`Wal::set_fsync_each`, `Disk::set_fsync_each`, `Disk::set_rewrite_on_compact`, `Database::set_auto_checkpoint`), batched record writes, `HashMap` instead of `BTreeMap` for the Disk lens table; >20,000× speedup on fsync-bound cells
-
----
+- [x] **Benchmark harness** - `src/bin/bench/main.rs` spawns a real `tau` server per cell and measures throughput via the Prometheus `/metrics` endpoint; covers plain/TLS transport, no-auth/password auth, and WAL on/off; emits one CSV row per cell and supports `--scratch DIR` for tmpfs-vs-real-disk runs. Drove the optimizations: sweep-line compaction, opt-in non-fsync mode (`Wal::set_fsync_each`, `Disk::set_fsync_each`, `Disk::set_rewrite_on_compact`, `Database::set_auto_checkpoint`), batched record writes, `HashMap` instead of `BTreeMap` for the Disk lens table
 
 ## Correctness and Safety
 
@@ -93,15 +79,11 @@ This document tracks what has been built and what remains before Tau can be cons
 - [ ] **End-to-end integration tests** - TCP-level tests that spin up a real server process and drive it with raw socket writes, verifying auth, TLS, and WAL replay end-to-end
 - [ ] **Property-based tests for compaction** - verify that `compact_layers` produces identical query results to the uncompacted stack for any sequence of layers
 
----
-
 ## Documentation
 
 - [ ] **Protocol specification** - a standalone document covering the full wire format, all response codes, error messages, and authentication handshake; necessary before external clients can be written
 - [ ] **Operational guide** - how to size the WAL, tune the compaction threshold, rotate encryption keys
 - [ ] **`man` page** for the server binary
-
----
 
 ## Client Ecosystem
 
@@ -109,8 +91,6 @@ Tau speaks plain TCP so any language with a socket library can drive it directly
 
 - [ ] **Reference client in Rust** - a typed async client crate that handles connection management, auth, and response parsing; also serves as a protocol correctness reference
 - [ ] **Thin clients for Python and Go** - enough to make integration tests from those ecosystems natural; thin wrappers around socket I/O, not full-featured ORMs
-
----
 
 ## Release Gate (1.0)
 

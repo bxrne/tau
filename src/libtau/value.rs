@@ -21,15 +21,22 @@
 //! The escape set keeps the WAL's whitespace/colon-separated wire format
 //! unambiguous.
 
+use std::sync::Arc;
+
 use crate::libtau::ql::ast::{Literal, Type};
 use crate::libtau::storage::Codec;
 
 /// Dynamic value carried by every executor lens.
+///
+/// `Str` uses `Arc<str>` so that cloning a value (e.g. materialising range
+/// segments) is an atomic reference-count bump rather than a heap allocation.
+/// Creation cost is unchanged - one allocation bundles the Arc header and
+/// string bytes together.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Int(i64),
     Float(f64),
-    Str(String),
+    Str(Arc<str>),
     Bool(bool),
     Null,
 }
@@ -64,8 +71,24 @@ impl From<Literal> for Value {
         match l {
             Literal::Int(i) => Value::Int(i),
             Literal::Float(f) => Value::Float(f),
+            // Both use Arc<str>; moving the Arc is a pointer copy, not a heap alloc.
             Literal::Str(s) => Value::Str(s),
             Literal::Bool(b) => Value::Bool(b),
+            Literal::Null => Value::Null,
+        }
+    }
+}
+
+/// Reference conversion: allows converting a `&Literal` to a `Value` without
+/// cloning the entire literal.  `Arc<str>` inside `Str` is bumped rather than
+/// heap-allocated, so this is O(1) for all variants.
+impl From<&Literal> for Value {
+    fn from(l: &Literal) -> Self {
+        match l {
+            Literal::Int(i) => Value::Int(*i),
+            Literal::Float(f) => Value::Float(*f),
+            Literal::Str(s) => Value::Str(s.clone()), // Arc bump
+            Literal::Bool(b) => Value::Bool(*b),
             Literal::Null => Value::Null,
         }
     }
@@ -120,7 +143,7 @@ impl Codec for Value {
         match tag {
             'i' => rest.parse().ok().map(Value::Int),
             'f' => rest.parse().ok().map(Value::Float),
-            's' => unescape(&rest).map(Value::Str),
+            's' => unescape(&rest).map(|s| Value::Str(Arc::from(s.as_str()))),
             'b' => match rest.as_str() {
                 "1" => Some(Value::Bool(true)),
                 "0" => Some(Value::Bool(false)),
@@ -203,7 +226,7 @@ mod tests {
 
     #[test]
     fn codec_str_empty_round_trip() {
-        let v = Value::Str(String::new());
+        let v = Value::Str(Arc::from(""));
         assert_eq!(Value::decode(&v.encode()), Some(v));
     }
 

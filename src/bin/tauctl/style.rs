@@ -5,14 +5,14 @@
 //! RGB value. Honours `NO_COLOR` and falls back to plain text when stdout is
 //! not a TTY.
 
-use std::io::IsTerminal;
+use std::env;
+use std::io::{self, IsTerminal};
 use std::sync::OnceLock;
 
 static ENABLED: OnceLock<bool> = OnceLock::new();
 
 fn enabled() -> bool {
-    *ENABLED
-        .get_or_init(|| std::env::var_os("NO_COLOR").is_none() && std::io::stdout().is_terminal())
+    *ENABLED.get_or_init(|| env::var_os("NO_COLOR").is_none() && io::stdout().is_terminal())
 }
 
 /// Pure formatter: wrap `s` in `\x1b[<seq>m … \x1b[0m` when `on`, otherwise
