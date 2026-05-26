@@ -42,25 +42,24 @@ where
     // each entry with `tau_idx` so we can drop the right one on close events
     // when a layer has multiple taus stacked at the same boundary.  Stale
     // entries (already closed) are skipped lazily.
-    use std::collections::BinaryHeap;
+    use std::collections::{BinaryHeap, HashSet};
     let mut active: BinaryHeap<(usize, usize)> = BinaryHeap::new();
-    let mut closed: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+    let mut closed: HashSet<(usize, usize)> = HashSet::new();
 
     let mut merged: Vec<Tau<V>> = Vec::new();
     let mut cursor: Option<Timestamp> = None;
 
     // Helper: pop stale entries off the top of the heap.
-    let drain_stale =
-        |active: &mut BinaryHeap<(usize, usize)>,
-         closed: &mut std::collections::HashSet<(usize, usize)>| {
-            while let Some(&top) = active.peek() {
-                if closed.remove(&top) {
-                    active.pop();
-                } else {
-                    break;
-                }
+    let drain_stale = |active: &mut BinaryHeap<(usize, usize)>,
+                       closed: &mut HashSet<(usize, usize)>| {
+        while let Some(&top) = active.peek() {
+            if closed.remove(&top) {
+                active.pop();
+            } else {
+                break;
             }
-        };
+        }
+    };
 
     let mut i = 0;
     while i < events.len() {

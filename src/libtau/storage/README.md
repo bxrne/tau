@@ -36,9 +36,9 @@ After auto-compaction fires, `Database::checkpoint` rewrites the WAL atomically 
 
 `compact_layers` is a free function shared by both `InMemory` and `Disk`. It takes the full layer stack and produces a single equivalent layer by:
 
-1. Collecting all tau boundaries across all layers into a sorted, deduplicated list of timestamps
-2. For each sub-interval between consecutive boundaries, querying the stack in newest-first order to find the effective value
-3. Merging adjacent sub-intervals that have the same value
+- Collecting all tau boundaries across all layers into a sorted, deduplicated list of timestamps.
+- For each sub-interval between consecutive boundaries, querying the stack in newest-first order to find the effective value.
+- Merging adjacent sub-intervals that share a value.
 
 The result is semantically identical to the original stack under any point lookup - it is a lossless compression. Adjacent merging is important: without it, compaction would explode the tau count for workloads that append many overlapping layers with the same value.
 
@@ -48,9 +48,9 @@ The result is semantically identical to the original stack under any point looku
 
 `Store<V>` is a trait object (`Box<dyn Store<V>>`). An enum dispatch would be faster (no vtable) but would require the `Database` type to be parameterised over the backend variant, which bleeds into public API. The trait object approach keeps `Database<V>` simple. The hot path is compacted down to two layers at most, so the vtable indirection is rarely on the critical path.
 
-### Why `BTreeMap` in `Disk` but `HashMap` in `InMemory`
+### `HashMap` in both backends
 
-`Disk` uses `BTreeMap` so that `flush` writes lenses in a deterministic order, making the binary file reproducible and diffable. `InMemory` uses `HashMap` for O(1) amortised access - order doesn't matter there.
+Both `Disk` and `InMemory` use `HashMap<String, Vec<Layer<V>>>` for O(1) amortised lens lookup. `Disk::flush` rewrites the whole file from the in-memory state, so write order is whatever the HashMap iterator produces; the file format is self-describing (length-prefixed lens names + per-entry checksums) and does not need a stable on-disk ordering.
 
 ### CRC32 vs. cryptographic checksums
 

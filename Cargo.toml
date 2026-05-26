@@ -28,6 +28,7 @@ argon2 = "0.5"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pemfile = "2.2"
 rcgen = "0.13"
+rustyline = { version = "18.0", default-features = false, features = ["with-file-history"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"

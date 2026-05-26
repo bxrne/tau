@@ -2,4 +2,3 @@
 *.wal
 /store.dat
 /thermostat.disk
-bench-samples/

@@ -28,6 +28,32 @@ jobs:
           release-type: simple
           draft: false
 
+  docker:
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve image name
+        id: image
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          echo "name=ghcr.io/${owner}/tau" >> "$GITHUB_OUTPUT"
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+      - name: Build and tag Docker image
+        run: |
+          docker build -f container/Dockerfile \
+            -t ${{ steps.image.outputs.name }}:latest \
+            -t ${{ steps.image.outputs.name }}:${{ github.event.release.tag_name }} \
+            .
+      - name: Push Docker image
+        run: |
+          docker push ${{ steps.image.outputs.name }}:latest
+          docker push ${{ steps.image.outputs.name }}:${{ github.event.release.tag_name }}
+
   build:
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
@@ -80,16 +106,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Build bench (release-bench profile)
         run: cargo build --profile release-bench --bin bench
-      - name: Run bench (full grid, every workload + span, best-of-5)
-        # Full grid covers second / minute / hour / day / year / decade /
-        # century / millennium / aeon and every workload.  best-of-5 picks
-        # the fastest of 5 runs per cell so noise from the shared runner
-        # doesn't dominate.
+      - name: Run bench (full grid, best-of-5)
+        # Full grid covers transport (plain/TLS), auth (none/password), WAL
+        # (off/on) and every workload (append, at-lookup, range, reduce).
+        # best-of-5 picks the fastest of 5 runs per cell so runner noise does
+        # not dominate.
         run: |
           ./target/release-bench/bench \
-            --workloads all \
-            --spans all \
             --repeat 5 \
+            --ops 2000 \
             --scratch "$GITHUB_WORKSPACE/.bench-scratch" \
             --label "${{ github.event.release.tag_name }}" \
             --out bench-results.csv \
@@ -104,7 +129,7 @@ jobs:
           {
             printf '%s\n\n' "$current"
             printf '## Benchmark results\n\n'
-            printf 'Full deterministic grid on the GitHub Actions runner, best-of-5.  Covers every workload (`append-single`, `append-bulk`, `copy-csv`, `at-lookup`, `range-scan`, `reduce-agg`) across time spans from `second` to `aeon`.  Methodology in `BENCHMARKS.md`; raw CSV attached as a release asset.\n\n'
+            printf 'Deterministic grid on the GitHub Actions runner, best-of-5. Covers every workload (`append`, `at-lookup`, `range`, `reduce`) across transport (plain/TLS), auth (none/password) and WAL (off/on). Raw CSV attached as a release asset.\n\n'
             printf '```\n'
             cat bench-results.txt
             printf '\n```\n'

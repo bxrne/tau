@@ -38,6 +38,7 @@ fn main() {
     registry.register(commands::use_command());
     registry.register(commands::connections_command());
     registry.register(commands::auth_command());
+    registry.register(commands::load_command());
 
     println!(
         "tau ctl {} - type `help` for commands, `exit` to quit",

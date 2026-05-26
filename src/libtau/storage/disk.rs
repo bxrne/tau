@@ -14,9 +14,9 @@ use crate::libtau::crypto;
 use crate::libtau::model::{Layer, LayerId, Tau};
 use crate::libtau::storage::store::{COMPACT_THRESHOLD, Store, compact_layers};
 use std::collections::HashMap;
-use std::fs::OpenOptions;
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, BufWriter, Cursor, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const MAGIC: &[u8] = b"TAU";
 const MAGIC_ENC: &[u8] = b"TAUE";
@@ -139,13 +139,13 @@ impl<V: Codec> DiskEntry<V> {
 
 /// Disk-backed implementation of the Store trait.
 pub struct Disk<V> {
-    path: std::path::PathBuf,
+    path: PathBuf,
     lenses: HashMap<String, Vec<Layer<V>>>,
     compact_threshold: usize,
     key: Option<[u8; 32]>,
     /// Open file handle for O(entry) appends.  `None` when encryption is
     /// enabled - encrypted files are written atomically via `flush()`.
-    append_writer: Option<BufWriter<std::fs::File>>,
+    append_writer: Option<BufWriter<File>>,
     /// When `false`, [`Disk::append`] skips the per-record `flush + sync_data`
     /// and the caller must call [`Disk::sync`] (or rely on drop) to commit.
     /// Defaults to `true`.
@@ -171,7 +171,7 @@ impl<V: Clone + Codec> Disk<V> {
         let mut lenses: HashMap<String, Vec<Layer<V>>> = HashMap::new();
 
         if path.exists() {
-            let file = std::fs::File::open(&path)?;
+            let file = File::open(&path)?;
             let mut file_reader = BufReader::new(file);
 
             // Peek at the first 4 bytes to detect encryption.
@@ -193,10 +193,7 @@ impl<V: Clone + Codec> Disk<V> {
             } else {
                 // Unencrypted format: the 4 bytes we already read are TAU + version.
                 // Push them back via a chain reader.
-                Box::new(std::io::Read::chain(
-                    Cursor::new(magic4.to_vec()),
-                    file_reader,
-                ))
+                Box::new(Read::chain(Cursor::new(magic4.to_vec()), file_reader))
             };
 
             // Read and verify the standard 8-byte header (TAU + version + CRC32).
@@ -274,7 +271,7 @@ impl<V: Clone + Codec> Disk<V> {
     pub fn create(path: impl AsRef<Path>, key: Option<[u8; 32]>) -> io::Result<Self> {
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            fs::create_dir_all(parent)?;
         }
 
         let mut plain_header = Vec::new();
@@ -283,7 +280,7 @@ impl<V: Clone + Codec> Disk<V> {
         let hck = checksum(&plain_header);
         plain_header.extend_from_slice(&hck.to_le_bytes());
 
-        let mut file = std::fs::File::create(&path)?;
+        let mut file = File::create(&path)?;
         if let Some(ref enc_key) = key {
             let blob = crypto::encrypt(enc_key, &plain_header);
             file.write_all(MAGIC_ENC)?;
@@ -364,7 +361,7 @@ impl<V: Clone + Codec> Disk<V> {
             }
         }
 
-        let mut file = std::fs::File::create(&self.path)?;
+        let mut file = File::create(&self.path)?;
         if let Some(ref enc_key) = self.key {
             let blob = crypto::encrypt(enc_key, &payload);
             file.write_all(MAGIC_ENC)?;
@@ -512,7 +509,7 @@ mod tests {
     fn invalid_magic_returns_error() {
         let tmp = NamedTempFile::new().unwrap();
         // Write garbage header
-        std::fs::write(tmp.path(), b"GARB").unwrap();
+        fs::write(tmp.path(), b"GARB").unwrap();
         let result = Disk::<i32>::open(tmp.path(), None);
         assert!(result.is_err());
     }
@@ -528,7 +525,7 @@ mod tests {
         }
 
         // Raw file must start with TAUE magic
-        let raw = std::fs::read(tmp.path()).unwrap();
+        let raw = fs::read(tmp.path()).unwrap();
         assert_eq!(&raw[..4], b"TAUE", "encrypted file must start with TAUE");
 
         // Re-open with key - data must be intact

@@ -1,7 +1,7 @@
-pub mod auth;
 pub mod crypto;
 pub mod database;
 pub mod executor;
+pub mod metrics;
 pub mod model;
 pub mod ql;
 pub mod storage;

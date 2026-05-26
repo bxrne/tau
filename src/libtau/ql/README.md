@@ -9,24 +9,36 @@ A small, purpose-built query language for temporal interval data. It is delibera
 ## Grammar overview
 
 ```
-stmt   := create | append | copy | derive | show | at | range | reduce | drop | use
+stmt   := create | append | copy | derive | show | at | range | reduce
+        | drop | use | user_admin
 
 create := CREATE DATABASE <name>
         | CREATE LENS <name> <type>
+        | CREATE USER <name> PASSWORD "<pass>"
 append := APPEND LENS <name> <s> <e> <v> [, <s> <e> <v> …]
 copy   := COPY LENS <name> FROM "<path>"
 derive := DERIVE LENS <name> AS <expr>
 show   := SHOW DATABASES
         | SHOW LENSES
+        | SHOW USERS
+        | SHOW GRANTS [<user>]
 at     := AT LENS <name> <timestamp>
 range  := RANGE LENS <name> <start> <end> [WHERE <expr>]
 reduce := REDUCE LENS <name> <start> <end> USING <func>
 drop   := DROP LENS <name>
         | DROP DATABASE <name>
+        | DROP USER <name>
 use    := USE DATABASE <name>
+
+user_admin
+       := GRANT <perms> ON <db | *> TO <user>
+        | REVOKE <perms> ON <db | *> FROM <user>
 
 type   := int | float | str | bool | bytes
 func   := min | max | avg | sum | count
+perms  := one or more of C R U D A, in any order, case-insensitive
+        | * (alias for CRUDA)
+        | - (alias for the empty set)
 ```
 
 Keywords are case-insensitive. Identifiers and string literals are not.
@@ -39,7 +51,11 @@ Expressions have standard C-style operator precedence: `||` < `&&` < comparisons
 
 ### `COPY` CSV ingestion
 
-`COPY LENS name FROM "/path/to/file.csv"` reads a CSV file where every non-blank, non-comment (`#`) line is `start,end,value`. The entire file is parsed and appended as a single layer, so the ingest is atomic from the perspective of concurrent readers.
+`COPY LENS name FROM "/path/to/file.csv"` reads a CSV file where every non-blank, non-comment (`#`) line is `start,end,value`. The entire file is parsed and appended as a single layer, so the ingest is atomic from the perspective of concurrent readers. The path is resolved on the **server's** filesystem - use `tauctl`'s `load` command instead when the file lives on the client.
+
+### User and permission management
+
+`CREATE USER`, `DROP USER`, `GRANT`, `REVOKE`, `SHOW USERS`, and `SHOW GRANTS` are first-class statements gated on the global-admin bit (`A` on `*`). `GRANT R ON main TO alice` unions the `R` bit into alice's existing `main` grants; `REVOKE` clears them and prunes the entry when it becomes empty. The wildcard database `*` applies to every existing and future database. Promotion to global admin is just `GRANT A ON * TO <user>`.
 
 ## AST (`ast.rs`)
 

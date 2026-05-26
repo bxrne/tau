@@ -1,19 +1,28 @@
-//! Read–eval–print loop.
+//! Read–eval–print loop, backed by `rustyline` for arrow keys, history,
+//! bracketed paste, and the standard emacs-style line-edit shortcuts.
 //!
-//! Each iteration: write the prompt, read one line, dispatch it (first as a
-//! built-in command via the `Registry`, otherwise as a tauql statement to the
-//! active TCP connection), then print a one-line status footer with elapsed
-//! time and exit code.  Ctrl-D / EOF and `exit` / `quit` terminate cleanly.
+//! Each iteration: read one line through the rustyline editor, dispatch it
+//! (first as a built-in command via the `Registry`, otherwise as a tauql
+//! statement to the active TCP connection), then print a one-line status
+//! footer with elapsed time and exit code.  `Ctrl-D` / EOF and `exit` /
+//! `quit` terminate cleanly; `Ctrl-C` cancels the current line and continues.
 
-use std::io::{self, BufRead, Write};
+use std::env;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+
+use rustyline::error::ReadlineError;
+use rustyline::history::FileHistory;
+use rustyline::{ColorMode, Config, EditMode, Editor};
 
 use crate::commands::{CommandResult, Registry};
 use crate::style;
 use crate::tcpmgr::TcpManager;
 
+/// Filename used when persisting REPL history beneath the user's home dir.
+const HISTORY_FILENAME: &str = ".tau_history";
+
 pub struct Repl {
-    pub history: Vec<String>,
     pub manager: TcpManager,
     prompt: String,
 }
@@ -21,59 +30,114 @@ pub struct Repl {
 impl Repl {
     pub fn new(prompt: String) -> Self {
         Self {
-            history: Vec::new(),
             manager: TcpManager::new(),
             prompt,
         }
     }
 
     pub fn run(&mut self, registry: &Registry) {
-        let stdin = io::stdin();
-        let mut stdout = io::stdout();
-        let mut input = String::new();
+        let config = Config::builder()
+            .auto_add_history(true)
+            .color_mode(ColorMode::Enabled)
+            .edit_mode(EditMode::Emacs)
+            .completion_type(rustyline::CompletionType::List)
+            .bracketed_paste(true)
+            .build();
+
+        let mut editor: Editor<(), FileHistory> = match Editor::with_config(config) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!(
+                    "{}",
+                    style::red(&format!("could not initialise readline: {}", e))
+                );
+                return;
+            }
+        };
+
+        let history_path = resolve_history_path();
+        if let Some(path) = history_path.as_deref()
+            && path.exists()
+            && let Err(e) = editor.load_history(path)
+        {
+            eprintln!(
+                "{}",
+                style::dim(&format!(
+                    "warning: could not load history from {}: {}",
+                    path.display(),
+                    e
+                ))
+            );
+        }
+
+        // Prompt is rendered with ANSI styling; rustyline wraps the escape
+        // sequences in invisible markers when ColorMode::Enabled is set.
+        let prompt = style::bold(&style::cyan(&self.prompt));
 
         loop {
-            print!("{}", style::bold(&style::cyan(&self.prompt)));
-            if stdout.flush().is_err() {
-                break;
-            }
-
-            input.clear();
-            match stdin.lock().read_line(&mut input) {
-                Ok(0) => {
-                    println!();
+            match editor.readline(&prompt) {
+                Ok(line) => {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    if trimmed == "exit" || trimmed == "quit" {
+                        println!("{}", style::dim("bye."));
+                        break;
+                    }
+                    let started = Instant::now();
+                    let result = dispatch(registry, self, trimmed);
+                    print_status(&result, started.elapsed());
+                }
+                Err(ReadlineError::Interrupted) => {
+                    // Ctrl-C: cancel current line, do not exit.
+                    continue;
+                }
+                Err(ReadlineError::Eof) => {
+                    println!("{}", style::dim("bye."));
                     break;
                 }
-                Ok(_) => {}
                 Err(e) => {
                     eprintln!("{}", style::red(&format!("read error: {}", e)));
                     break;
                 }
             }
+        }
 
-            let line = input.trim();
-            if line.is_empty() {
-                continue;
-            }
-            if line == "exit" || line == "quit" {
-                println!("{}", style::dim("bye."));
-                break;
-            }
-
-            self.history.push(line.to_string());
-
-            let started = Instant::now();
-            let result = dispatch(registry, self, line);
-            print_status(&result, started.elapsed());
+        if let Some(path) = history_path.as_deref()
+            && let Err(e) = editor.save_history(path)
+        {
+            eprintln!(
+                "{}",
+                style::dim(&format!(
+                    "warning: could not save history to {}: {}",
+                    path.display(),
+                    e
+                ))
+            );
         }
     }
 }
 
+/// Resolve the file used to persist line-edit history across sessions.
+///
+/// Priority: `TAU_HISTORY_FILE` env var > `$HOME/.tau_history`.  Returns
+/// `None` when neither is resolvable (history is then in-memory only).
+fn resolve_history_path() -> Option<PathBuf> {
+    if let Ok(explicit) = env::var("TAU_HISTORY_FILE")
+        && !explicit.is_empty()
+    {
+        return Some(PathBuf::from(explicit));
+    }
+    let home = env::var("HOME").ok().filter(|s| !s.is_empty())?;
+    Some(Path::new(&home).join(HISTORY_FILENAME))
+}
+
 /// Dispatch policy:
-/// 1. First whitespace token matches a registered command → run it.
-/// 2. Otherwise, if a TCP connection is active → send `line` as a tauql
-///    statement, print the response, surface `ERR ...` as an error.
-/// 3. Otherwise → "unknown command".
+/// - If the first whitespace token matches a registered command, run it.
+/// - Otherwise, if a TCP connection is active, send `line` as a tauql
+///   statement, print the response, and surface `ERR ...` as an error.
+/// - Otherwise, return "unknown command".
 fn dispatch(registry: &Registry, repl: &mut Repl, line: &str) -> CommandResult {
     let name = line.split_whitespace().next().unwrap_or("");
     if let Some(cmd) = registry.find(name) {
@@ -256,5 +320,20 @@ mod tests {
         dispatch(&registry, &mut repl, "HELLO world").unwrap();
         // The command should have fired locally - no traffic to the server.
         assert_eq!(hits.get(), 1);
+    }
+
+    #[test]
+    fn resolve_history_path_prefers_env_var() {
+        let saved = env::var("TAU_HISTORY_FILE").ok();
+        // SAFETY: tests in this crate are run with --test-threads logic that
+        // does not assume process-wide env var stability; this scoped set/restore
+        // is sufficient for sequential coverage.
+        unsafe { env::set_var("TAU_HISTORY_FILE", "/tmp/tau-history-test") };
+        let p = resolve_history_path().expect("should resolve");
+        assert_eq!(p, PathBuf::from("/tmp/tau-history-test"));
+        match saved {
+            Some(v) => unsafe { env::set_var("TAU_HISTORY_FILE", v) },
+            None => unsafe { env::remove_var("TAU_HISTORY_FILE") },
+        }
     }
 }
