@@ -21,6 +21,12 @@ where
 {
     store: Arc<RwLock<Box<dyn Store<V>>>>,
     wal: Option<Arc<Mutex<Wal>>>,
+    /// When `true` (default), `append` calls `checkpoint()` immediately after a
+    /// store-side compaction so the WAL never holds superseded entries.  Set to
+    /// `false` to defer that work to an explicit caller — useful in bulk-load
+    /// paths where many compactions fire and a single trailing checkpoint
+    /// suffices.
+    auto_checkpoint: std::sync::atomic::AtomicBool,
 }
 
 impl<V> Clone for Database<V>
@@ -31,6 +37,10 @@ where
         Self {
             store: self.store.clone(),
             wal: self.wal.clone(),
+            auto_checkpoint: std::sync::atomic::AtomicBool::new(
+                self.auto_checkpoint
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
         }
     }
 }
@@ -45,6 +55,7 @@ where
         Self {
             store: Arc::new(RwLock::new(Box::new(store))),
             wal: None,
+            auto_checkpoint: std::sync::atomic::AtomicBool::new(true),
         }
     }
 
@@ -55,7 +66,17 @@ where
         Self {
             store: Arc::new(RwLock::new(Box::new(store))),
             wal: Some(Arc::new(Mutex::new(wal))),
+            auto_checkpoint: std::sync::atomic::AtomicBool::new(true),
         }
+    }
+
+    /// Control whether `append` automatically rewrites the WAL after a
+    /// compaction.  When disabled, the WAL grows past the live layer set but
+    /// each `append` avoids the rewrite cost (full read of every live layer
+    /// + atomic rename).  Call `Database::checkpoint` manually to compact.
+    pub fn set_auto_checkpoint(&self, on: bool) {
+        self.auto_checkpoint
+            .store(on, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Open an existing WAL, replay it into `store`, then return a live
@@ -113,34 +134,26 @@ where
                 );
                 // WAL first — do not update in-memory state if this fails.
                 if let Some(wal) = &self.wal {
-                    let entry = WalEntry {
-                        layer_id: layer.id,
-                        lens: lens.name.to_string(),
-                        taus: layer
-                            .taus
-                            .iter()
-                            .map(|t| (t.start, t.end, t.value.clone()))
-                            .collect(),
-                    };
                     wal.lock()
                         .map_err(|_| io::Error::other("WAL mutex poisoned"))?
-                        .append(&entry)?;
+                        .append_layer(&lens.name, &layer)?;
                     debug!(lens = %lens.name, layer_id = layer.id, "WAL entry written");
                 }
 
-                // Then store — detect whether auto-compaction fired.
+                // Then store — append returns whether compaction fired.
                 let did_compact = {
                     let mut store = self
                         .store
                         .write()
                         .map_err(|_| io::Error::other("store lock poisoned"))?;
-                    let before = store.layers(&lens.name).map(|l| l.len()).unwrap_or(0);
-                    store.append(&lens.name, layer)?;
-                    let after = store.layers(&lens.name).map(|l| l.len()).unwrap_or(0);
-                    after < before + 1
+                    store.append(&lens.name, layer)?
                 }; // store write-lock released here
 
-                if did_compact {
+                if did_compact
+                    && self
+                        .auto_checkpoint
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                {
                     self.checkpoint()?;
                 }
 

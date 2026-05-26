@@ -13,7 +13,7 @@ use crc32fast::Hasher;
 use crate::libtau::crypto;
 use crate::libtau::model::{Layer, LayerId, Tau};
 use crate::libtau::storage::store::{COMPACT_THRESHOLD, Store, compact_layers};
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::{self, BufReader, BufWriter, Cursor, Read, Write};
 use std::path::Path;
@@ -140,12 +140,24 @@ impl<V: Codec> DiskEntry<V> {
 /// Disk-backed implementation of the Store trait.
 pub struct Disk<V> {
     path: std::path::PathBuf,
-    lenses: BTreeMap<String, Vec<Layer<V>>>,
+    lenses: HashMap<String, Vec<Layer<V>>>,
     compact_threshold: usize,
     key: Option<[u8; 32]>,
     /// Open file handle for O(entry) appends.  `None` when encryption is
     /// enabled — encrypted files are written atomically via `flush()`.
     append_writer: Option<BufWriter<std::fs::File>>,
+    /// When `false`, [`Disk::append`] skips the per-record `flush + sync_data`
+    /// and the caller must call [`Disk::sync`] (or rely on drop) to commit.
+    /// Defaults to `true`.
+    fsync_each: bool,
+    /// When `false`, post-compaction rewrites are skipped — the on-disk file
+    /// keeps growing past the live set, but each `append` avoids the
+    /// `close fd + flush + reopen` round-trip.  Defaults to `true`.
+    rewrite_on_compact: bool,
+    /// Reusable byte buffer used to batch one record into a single `write_all`
+    /// call (instead of 7+ small calls into the BufWriter).  Cleared between
+    /// records; capacity grows to the largest record seen.
+    record_buf: Vec<u8>,
 }
 
 impl<V: Clone + Codec> Disk<V> {
@@ -156,7 +168,7 @@ impl<V: Clone + Codec> Disk<V> {
     /// unencrypted `TAU` file is always readable regardless of `key`.
     pub fn open(path: impl AsRef<Path>, key: Option<[u8; 32]>) -> io::Result<Self> {
         let path = path.as_ref().to_path_buf();
-        let mut lenses: BTreeMap<String, Vec<Layer<V>>> = BTreeMap::new();
+        let mut lenses: HashMap<String, Vec<Layer<V>>> = HashMap::new();
 
         if path.exists() {
             let file = std::fs::File::open(&path)?;
@@ -241,7 +253,7 @@ impl<V: Clone + Codec> Disk<V> {
 
         let append_writer = if key.is_none() {
             let f = OpenOptions::new().append(true).open(&path)?;
-            Some(BufWriter::new(f))
+            Some(BufWriter::with_capacity(256 * 1024, f))
         } else {
             None
         };
@@ -252,6 +264,9 @@ impl<V: Clone + Codec> Disk<V> {
             compact_threshold: COMPACT_THRESHOLD,
             key,
             append_writer,
+            fsync_each: true,
+            rewrite_on_compact: true,
+            record_buf: Vec::with_capacity(256),
         })
     }
 
@@ -280,18 +295,46 @@ impl<V: Clone + Codec> Disk<V> {
 
         let append_writer = if key.is_none() {
             let f = OpenOptions::new().append(true).open(&path)?;
-            Some(BufWriter::new(f))
+            Some(BufWriter::with_capacity(256 * 1024, f))
         } else {
             None
         };
 
         Ok(Self {
             path,
-            lenses: BTreeMap::new(),
+            lenses: HashMap::new(),
             compact_threshold: COMPACT_THRESHOLD,
             key,
             append_writer,
+            fsync_each: true,
+            rewrite_on_compact: true,
+            record_buf: Vec::with_capacity(256),
         })
+    }
+
+    /// Toggle per-record `fsync` for the append path.  When `false`,
+    /// [`Disk::append`] still buffers the write but skips `flush + sync_data`;
+    /// the caller must call [`Disk::sync`] (or drop the store) for durability.
+    pub fn set_fsync_each(&mut self, on: bool) {
+        self.fsync_each = on;
+    }
+
+    /// Toggle whether the file is rewritten after each compaction.  When
+    /// disabled, the file grows past the live layer set but each `append`
+    /// avoids the close/flush/reopen round-trip.  Call [`Disk::flush`]
+    /// manually to compact the file.
+    pub fn set_rewrite_on_compact(&mut self, on: bool) {
+        self.rewrite_on_compact = on;
+    }
+
+    /// Flush the buffered append writer and `sync_data` the file.  No-op when
+    /// no append writer exists (encrypted backends always rewrite atomically).
+    pub fn sync(&mut self) -> io::Result<()> {
+        if let Some(w) = &mut self.append_writer {
+            w.flush()?;
+            w.get_ref().sync_data()?;
+        }
+        Ok(())
     }
 
     /// Flush all in-memory state to disk.
@@ -335,40 +378,59 @@ impl<V: Clone + Codec> Disk<V> {
 }
 
 impl<V: Clone + PartialEq + Codec + Send + Sync + 'static> Store<V> for Disk<V> {
-    fn append(&mut self, lens: &str, layer: Layer<V>) -> io::Result<()> {
+    fn append(&mut self, lens: &str, layer: Layer<V>) -> io::Result<bool> {
+        let fsync_each = self.fsync_each;
         // Write to disk in O(entry) time when unencrypted append mode is active.
-        if let Some(writer) = &mut self.append_writer {
-            let entry = DiskEntry {
-                layer_id: layer.id,
-                lens: lens.to_string(),
-                taus: layer
-                    .taus
-                    .iter()
-                    .map(|t| Tau::new(t.start, t.end, t.value.clone()))
-                    .collect(),
-            };
-            entry.write(writer)?;
-            writer.flush()?;
-            writer.get_ref().sync_data()?;
+        // Split-borrow self so we can mutate `record_buf` and `append_writer`
+        // concurrently.
+        let Self {
+            append_writer,
+            record_buf,
+            ..
+        } = self;
+        if let Some(writer) = append_writer.as_mut() {
+            // Batch the whole record into a reusable buffer, then issue a
+            // single write_all into the BufWriter.  Avoids the 4+ syscall-shaped
+            // small write_all calls that each pay BufWriter indirection cost.
+            record_buf.clear();
+            record_buf.extend_from_slice(&layer.id.to_le_bytes());
+            record_buf.extend_from_slice(&(lens.len() as u32).to_le_bytes());
+            record_buf.extend_from_slice(lens.as_bytes());
+            record_buf.extend_from_slice(&(layer.taus.len() as u32).to_le_bytes());
+            for tau in layer.taus.iter() {
+                record_buf.extend_from_slice(&tau.start.to_le_bytes());
+                record_buf.extend_from_slice(&tau.end.to_le_bytes());
+                tau.value.write_encoded(record_buf)?;
+            }
+            writer.write_all(record_buf)?;
+            if fsync_each {
+                writer.flush()?;
+                writer.get_ref().sync_data()?;
+            }
         }
 
-        let layers = self.lenses.entry(lens.to_string()).or_default();
+        let layers = if let Some(l) = self.lenses.get_mut(lens) {
+            l
+        } else {
+            self.lenses.entry(lens.to_string()).or_default()
+        };
         let before = layers.len();
         layers.push(layer);
+        let mut did_compact = false;
         if layers.len() > self.compact_threshold {
             compact_layers(layers);
+            did_compact = layers.len() < before + 1;
         }
-        let did_compact = self.lenses.get(lens).map(|l| l.len()).unwrap_or(0) < before + 1;
 
         // After compaction, rewrite the file to drop superseded entries.
-        if did_compact && self.append_writer.is_some() {
+        if did_compact && self.rewrite_on_compact && self.append_writer.is_some() {
             self.append_writer = None; // close old fd before rewrite
             self.flush()?;
             let f = OpenOptions::new().append(true).open(&self.path)?;
             self.append_writer = Some(BufWriter::new(f));
         }
 
-        Ok(())
+        Ok(did_compact)
     }
 
     fn layers(&self, lens: &str) -> Option<&Vec<Layer<V>>> {
