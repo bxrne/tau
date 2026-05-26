@@ -5,6 +5,9 @@
 //! reference to the `Repl` (so commands can read or grow its history),
 //! plus the raw input line.
 
+use std::fs::File;
+use std::io::{self, BufRead, BufReader, IsTerminal, Write};
+
 use crate::repl::Repl;
 
 pub type CommandResult = Result<(), String>;
@@ -62,8 +65,7 @@ pub fn help_command() -> Command {
 
 pub fn clear_command() -> Command {
     Command::new("clear", "Clear the screen", |_, _, _| {
-        use std::io::{IsTerminal, Write};
-        let mut out = std::io::stdout();
+        let mut out = io::stdout();
         if out.is_terminal() {
             // ESC[2J = clear screen, ESC[H = cursor to home.  Matches what
             // the standard `clear(1)` emits for most terminals.
@@ -210,6 +212,124 @@ pub fn use_command() -> Command {
             Ok(())
         },
     )
+}
+
+/// Client-side bulk load.  Reads a CSV (`start,end,value` per row, `#`
+/// comments and blank lines skipped) from the **client's** filesystem and
+/// ships it to the active connection as a sequence of multi-tau `APPEND`
+/// statements.  Use this when the data lives on your machine (e.g. a laptop
+/// driving a Docker container).  For files already inside the server's
+/// filesystem use the server-side `COPY LENS x FROM "<path>"` statement.
+pub fn load_command() -> Command {
+    Command::new(
+        "load",
+        "load <lens> <local-path> [chunk] - send a local CSV as batched APPENDs",
+        |_, repl, line| {
+            let args: Vec<&str> = line.split_whitespace().skip(1).collect();
+            if args.len() < 2 || args.len() > 3 {
+                return Err("usage: load <lens> <local-path> [chunk]".to_string());
+            }
+            let lens = args[0];
+            let path = args[1];
+            let chunk: usize = if args.len() == 3 {
+                args[2]
+                    .parse()
+                    .map_err(|_| format!("invalid chunk size {:?}", args[2]))?
+            } else {
+                256
+            };
+            if chunk == 0 {
+                return Err("chunk size must be >= 1".to_string());
+            }
+
+            let conn = repl
+                .manager
+                .active_mut()
+                .ok_or_else(|| "no active connection - try `connect`".to_string())?;
+
+            let file = File::open(path).map_err(|e| format!("open {}: {}", path, e))?;
+            let reader = BufReader::new(file);
+            let mut buffer: Vec<String> = Vec::with_capacity(chunk);
+            let mut total: u64 = 0;
+            let mut chunks: u64 = 0;
+
+            for (lineno, raw) in reader.lines().enumerate() {
+                let line = raw.map_err(|e| format!("read {} line {}: {}", path, lineno + 1, e))?;
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.starts_with('#') {
+                    continue;
+                }
+                let mut parts = trimmed.splitn(3, ',');
+                let start = parts
+                    .next()
+                    .ok_or_else(|| format!("{}:{}: missing start", path, lineno + 1))?
+                    .trim();
+                let end = parts
+                    .next()
+                    .ok_or_else(|| format!("{}:{}: missing end", path, lineno + 1))?
+                    .trim();
+                let value = parts
+                    .next()
+                    .ok_or_else(|| format!("{}:{}: missing value", path, lineno + 1))?
+                    .trim();
+                buffer.push(format!("{} {} {}", start, end, value));
+                if buffer.len() >= chunk {
+                    let resp = ship(conn, lens, &buffer)?;
+                    if !resp.starts_with("OK") {
+                        return Err(format!(
+                            "server rejected chunk #{} at row {}: {}",
+                            chunks + 1,
+                            total + buffer.len() as u64,
+                            resp.strip_prefix("ERR ").unwrap_or(&resp)
+                        ));
+                    }
+                    total += buffer.len() as u64;
+                    chunks += 1;
+                    buffer.clear();
+                }
+            }
+            if !buffer.is_empty() {
+                let resp = ship(conn, lens, &buffer)?;
+                if !resp.starts_with("OK") {
+                    return Err(format!(
+                        "server rejected final chunk: {}",
+                        resp.strip_prefix("ERR ").unwrap_or(&resp)
+                    ));
+                }
+                total += buffer.len() as u64;
+                chunks += 1;
+            }
+
+            println!(
+                "loaded {} rows into {} ({} chunk{})",
+                total,
+                lens,
+                chunks,
+                if chunks == 1 { "" } else { "s" }
+            );
+            Ok(())
+        },
+    )
+}
+
+/// Build and send one `APPEND LENS <lens> s e v, s e v, ...` statement
+/// over `conn`, returning the trimmed response line.
+fn ship(
+    conn: &mut crate::tcpmgr::Connection,
+    lens: &str,
+    taus: &[String],
+) -> Result<String, String> {
+    let mut stmt = String::with_capacity(32 + taus.len() * 24);
+    stmt.push_str("APPEND LENS ");
+    stmt.push_str(lens);
+    stmt.push(' ');
+    for (i, t) in taus.iter().enumerate() {
+        if i > 0 {
+            stmt.push_str(", ");
+        }
+        stmt.push_str(t);
+    }
+    conn.send(&stmt).map_err(|e| e.to_string())
 }
 
 pub fn connections_command() -> Command {
@@ -426,5 +546,135 @@ mod tests {
         assert!((c.action)(&registry, &mut repl, "connections").is_ok());
         repl.manager.connect("dev", &addr.to_string()).unwrap();
         assert!((c.action)(&registry, &mut repl, "connections").is_ok());
+    }
+
+    /// Listener that captures every received line so a test can assert on
+    /// the exact wire traffic produced by `load`.
+    fn capture_listener() -> (
+        std::net::SocketAddr,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) {
+        use std::io::{BufRead, BufReader, Write};
+        use std::sync::{Arc, Mutex};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let lines = Arc::new(Mutex::new(Vec::<String>::new()));
+        let shared = lines.clone();
+        std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                let read = stream.try_clone().unwrap();
+                let mut writer = stream;
+                let mut reader = BufReader::new(read);
+                let mut buf = String::new();
+                while reader.read_line(&mut buf).unwrap_or(0) > 0 {
+                    shared
+                        .lock()
+                        .unwrap()
+                        .push(buf.trim_end_matches(['\r', '\n']).to_string());
+                    writer.write_all(b"OK\n").unwrap();
+                    buf.clear();
+                }
+            }
+        });
+        (addr, lines)
+    }
+
+    #[test]
+    fn load_command_rejects_wrong_arity_and_chunk() {
+        let registry = Registry::new();
+        let mut repl = Repl::new("τ: ".into());
+        let c = load_command();
+        assert!((c.action)(&registry, &mut repl, "load").is_err());
+        assert!((c.action)(&registry, &mut repl, "load only").is_err());
+        assert!((c.action)(&registry, &mut repl, "load a b c d").is_err());
+        assert!((c.action)(&registry, &mut repl, "load lens /tmp/x notanumber").is_err());
+    }
+
+    #[test]
+    fn load_command_errors_with_no_active_connection() {
+        let registry = Registry::new();
+        let mut repl = Repl::new("τ: ".into());
+        let c = load_command();
+        let err = (c.action)(&registry, &mut repl, "load x /tmp/nope.csv").unwrap_err();
+        assert!(err.starts_with("no active connection"));
+    }
+
+    #[test]
+    fn load_command_errors_when_file_missing() {
+        let (addr, _) = capture_listener();
+        let registry = Registry::new();
+        let mut repl = Repl::new("τ: ".into());
+        repl.manager.connect("dev", &addr.to_string()).unwrap();
+        let c = load_command();
+        let err = (c.action)(&registry, &mut repl, "load x /tmp/no-such-file.csv").unwrap_err();
+        assert!(err.contains("open"));
+    }
+
+    #[test]
+    fn load_command_chunks_rows_and_skips_comments() {
+        let (addr, lines) = capture_listener();
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("tauctl-load-{}.csv", std::process::id()));
+        std::fs::write(
+            &path,
+            b"# header\n\n0,10,1\n10,20,2\n20,30,3\n30,40,4\n40,50,5\n",
+        )
+        .unwrap();
+
+        let registry = Registry::new();
+        let mut repl = Repl::new("τ: ".into());
+        repl.manager.connect("dev", &addr.to_string()).unwrap();
+        let c = load_command();
+        let cmd = format!("load temp {} 2", path.display());
+        (c.action)(&registry, &mut repl, &cmd).expect("load should succeed");
+
+        let captured = lines.lock().unwrap().clone();
+        // 5 rows, chunk size 2 -> chunks of 2, 2, 1.
+        assert_eq!(captured.len(), 3);
+        assert_eq!(captured[0], "APPEND LENS temp 0 10 1, 10 20 2");
+        assert_eq!(captured[1], "APPEND LENS temp 20 30 3, 30 40 4");
+        assert_eq!(captured[2], "APPEND LENS temp 40 50 5");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn load_command_propagates_server_err_mid_stream() {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                let read = stream.try_clone().unwrap();
+                let mut writer = stream;
+                let mut reader = BufReader::new(read);
+                let mut buf = String::new();
+                let mut n = 0;
+                while reader.read_line(&mut buf).unwrap_or(0) > 0 {
+                    n += 1;
+                    let resp = if n == 2 {
+                        b"ERR type mismatch\n".to_vec()
+                    } else {
+                        b"OK\n".to_vec()
+                    };
+                    writer.write_all(&resp).unwrap();
+                    buf.clear();
+                }
+            }
+        });
+
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("tauctl-load-err-{}.csv", std::process::id()));
+        std::fs::write(&path, b"0,1,1\n1,2,2\n2,3,3\n3,4,4\n").unwrap();
+
+        let registry = Registry::new();
+        let mut repl = Repl::new("τ: ".into());
+        repl.manager.connect("dev", &addr.to_string()).unwrap();
+        let c = load_command();
+        let cmd = format!("load lens {} 1", path.display());
+        let err = (c.action)(&registry, &mut repl, &cmd).unwrap_err();
+        assert!(err.contains("type mismatch"), "got: {err}");
+
+        std::fs::remove_file(&path).ok();
     }
 }

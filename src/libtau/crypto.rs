@@ -1,9 +1,12 @@
+use std::env;
+use std::io;
+use std::process;
+
 use aes_gcm::{
     Aes256Gcm, Nonce,
     aead::{Aead, KeyInit},
 };
 use rand::RngCore;
-use std::io;
 
 fn decode_hex(s: &str) -> Option<Vec<u8>> {
     if !s.len().is_multiple_of(2) {
@@ -16,14 +19,14 @@ fn decode_hex(s: &str) -> Option<Vec<u8>> {
 }
 
 pub fn parse_key_from_env() -> Option<[u8; 32]> {
-    let hex = std::env::var("TAU_ENCRYPTION_KEY").ok()?;
+    let hex = env::var("TAU_ENCRYPTION_KEY").ok()?;
     let bytes = decode_hex(&hex).unwrap_or_else(|| {
         eprintln!("TAU_ENCRYPTION_KEY must be 64 hex chars (32 bytes)");
-        std::process::exit(1);
+        process::exit(1);
     });
     if bytes.len() != 32 {
         eprintln!("TAU_ENCRYPTION_KEY must be exactly 32 bytes (64 hex chars)");
-        std::process::exit(1);
+        process::exit(1);
     }
     let mut key = [0u8; 32];
     key.copy_from_slice(&bytes);

@@ -37,11 +37,15 @@
 //! Response codes: `OK`, `OK BYE`, `VAL <v>`, `VAL NIL`, `RANGE <n>; …`,
 //! `NAMES <n>; …`, `ERR <message>`.
 
+use std::collections::HashMap;
+use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use clap::Parser;
 use rcgen::generate_simple_self_signed;
@@ -49,7 +53,7 @@ use rustls::ServerConfig;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::server::ServerConnection;
 use tau::libtau::crypto;
-use tau::{Codec, ExecError, Executor, Output, Perm, User, UserStore, parse};
+use tau::{Codec, ExecError, Executor, Metrics, Output, Perm, User, UserStore, parse};
 use tracing::{debug, error, info, trace, warn};
 
 /// Tau time-series database TCP server.
@@ -113,6 +117,24 @@ pub struct Config {
     /// --password seed it with an initial global admin.
     #[arg(long, value_name = "PATH")]
     pub users_file: Option<PathBuf>,
+
+    /// Expose a Prometheus metrics endpoint on this port (e.g. 9100).
+    /// Serves GET /metrics in the text/plain; version=0.0.4 format.
+    /// Disabled when omitted.
+    #[arg(long, value_name = "PORT")]
+    pub metrics_port: Option<u16>,
+
+    /// Maximum number of concurrent client connections.  New connections that
+    /// would exceed the limit are accepted and immediately closed with an
+    /// `ERR server at connection limit` response so callers see a clear cause
+    /// and the OS does not silently queue the connection.
+    #[arg(long, value_name = "N", default_value_t = 1024)]
+    pub max_connections: usize,
+
+    /// Idle timeout per client connection, in seconds. Connections that go
+    /// this long without sending a complete line are closed. 0 disables.
+    #[arg(long, value_name = "SECS", default_value_t = 300)]
+    pub idle_timeout_secs: u64,
 }
 
 fn main() -> io::Result<()> {
@@ -168,7 +190,7 @@ fn main() -> io::Result<()> {
         if store.names().is_empty()
             && let (Some(u), Some(p)) = (config.username.as_ref(), config.password.as_ref())
         {
-            let mut grants = std::collections::HashMap::new();
+            let mut grants = HashMap::new();
             grants.insert("*".to_string(), Perm::ALL);
             store
                 .add(User::new(u, p, grants))
@@ -201,13 +223,27 @@ fn main() -> io::Result<()> {
         None
     };
 
+    // Metrics HTTP endpoint (optional).
+    if let Some(port) = config.metrics_port {
+        let metrics = executor.read().unwrap().metrics.clone();
+        thread::Builder::new()
+            .name("tau-metrics".into())
+            .spawn(move || serve_metrics_http(port, metrics))
+            .expect("failed to spawn metrics thread");
+        info!(port, "metrics endpoint enabled");
+    }
+
     let bind = config.bind.clone();
     let listener = TcpListener::bind(&bind)?;
     info!(%bind, "tau server listening");
 
-    // TODO: gate connection acceptance with a semaphore bounded to a max
-    // connection count; unbounded thread::spawn will exhaust OS resources
-    // under a connection flood.
+    let connection_limit = config.max_connections;
+    let idle_timeout = if config.idle_timeout_secs == 0 {
+        None
+    } else {
+        Some(Duration::from_secs(config.idle_timeout_secs))
+    };
+    let active_connections = Arc::new(AtomicUsize::new(0));
     for incoming in listener.incoming() {
         match incoming {
             Ok(stream) => {
@@ -215,16 +251,30 @@ fn main() -> io::Result<()> {
                     .peer_addr()
                     .map(|a| a.to_string())
                     .unwrap_or_else(|_| "?".into());
-                debug!(%peer, "accepted connection");
+                let metrics = executor.read().unwrap().metrics.clone();
+                let in_flight = active_connections.fetch_add(1, Ordering::AcqRel) + 1;
+                if in_flight > connection_limit {
+                    metrics.record_rejected_connection();
+                    active_connections.fetch_sub(1, Ordering::AcqRel);
+                    warn!(%peer, connection_limit, "rejecting connection: server at capacity");
+                    let mut s = stream;
+                    let _ = s.write_all(b"ERR server at connection limit\n");
+                    let _ = s.flush();
+                    continue;
+                }
+                metrics.connections.fetch_add(1, Ordering::Relaxed);
+                debug!(%peer, in_flight, "accepted connection");
                 let exec = executor.clone();
                 let tls = tls_config.clone();
                 let auth = auth_enabled;
+                let active_clone = active_connections.clone();
                 thread::Builder::new()
                     .name("tau-conn".into())
                     .spawn(move || {
-                        if let Err(e) = handle(stream, exec, tls, auth) {
+                        if let Err(e) = handle(stream, exec, tls, auth, idle_timeout) {
                             warn!(error = %e, "connection ended with error");
                         }
+                        active_clone.fetch_sub(1, Ordering::AcqRel);
                     })
                     .expect("failed to spawn connection thread");
             }
@@ -235,20 +285,128 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
-fn build_tls_config(
-    cert_path: Option<&std::path::Path>,
-    key_path: Option<&std::path::Path>,
-) -> io::Result<ServerConfig> {
+/// Minimal HTTP server that serves `GET /metrics` in Prometheus text format.
+///
+/// One thread per request; fine for scrape intervals >= 1 s. The listener
+/// runs until the process exits. Every accepted request is traced at
+/// `trace` (method, path, peer) and at `debug` (status, bytes, duration).
+fn serve_metrics_http(port: u16, metrics: Arc<Metrics>) {
+    let listener = match TcpListener::bind(format!("0.0.0.0:{port}")) {
+        Ok(l) => l,
+        Err(e) => {
+            error!(port, error = %e, "could not bind metrics listener");
+            return;
+        }
+    };
+    info!(port, "metrics HTTP listener ready");
+    for stream in listener.incoming() {
+        let mut s = match stream {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = %e, "metrics accept failed");
+                continue;
+            }
+        };
+        let m = metrics.clone();
+        thread::Builder::new()
+            .name("tau-metrics-req".into())
+            .spawn(move || {
+                handle_metrics_request(&mut s, &m);
+            })
+            .expect("failed to spawn metrics request thread");
+    }
+}
+
+/// Parse the request line, render Prometheus text, write the HTTP response.
+/// Unknown paths return 404 so misconfigured scrapers fail loudly.
+fn handle_metrics_request(s: &mut TcpStream, metrics: &Arc<Metrics>) {
+    let started = Instant::now();
+    let peer = s
+        .peer_addr()
+        .map(|a| a.to_string())
+        .unwrap_or_else(|_| "?".into());
+
+    // Read the request line. Bounded by 4 KiB so a malicious client cannot
+    // grow the buffer arbitrarily.
+    let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
+    let _ = s.set_write_timeout(Some(Duration::from_secs(5)));
+    let mut buf = [0u8; 4096];
+    let n = match s.read(&mut buf) {
+        Ok(n) => n,
+        Err(e) => {
+            warn!(%peer, error = %e, "metrics read failed");
+            return;
+        }
+    };
+    if n == 0 {
+        return;
+    }
+    let head = String::from_utf8_lossy(&buf[..n]);
+    let request_line = head.lines().next().unwrap_or("").to_string();
+    trace!(%peer, request = %request_line, "metrics request");
+
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or("");
+    let path = parts.next().unwrap_or("");
+
+    let (status, body, ctype) = match (method, path) {
+        ("GET", "/metrics") | ("HEAD", "/metrics") => (
+            "200 OK",
+            if method == "HEAD" {
+                String::new()
+            } else {
+                metrics.prometheus_text()
+            },
+            "text/plain; version=0.0.4; charset=utf-8",
+        ),
+        ("GET", "/healthz") | ("GET", "/") => (
+            "200 OK",
+            "tau metrics endpoint ready\n".to_string(),
+            "text/plain; charset=utf-8",
+        ),
+        ("GET", _) | ("HEAD", _) => (
+            "404 Not Found",
+            "not found\n".to_string(),
+            "text/plain; charset=utf-8",
+        ),
+        _ => (
+            "405 Method Not Allowed",
+            "method not allowed\n".to_string(),
+            "text/plain; charset=utf-8",
+        ),
+    };
+
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    if let Err(e) = s.write_all(response.as_bytes()) {
+        warn!(%peer, error = %e, "metrics write failed");
+        return;
+    }
+    let _ = s.flush();
+    debug!(
+        %peer,
+        method,
+        path,
+        status,
+        bytes = body.len(),
+        elapsed_us = started.elapsed().as_micros() as u64,
+        "metrics request handled"
+    );
+}
+
+fn build_tls_config(cert_path: Option<&Path>, key_path: Option<&Path>) -> io::Result<ServerConfig> {
     let (certs, private_key) = match (cert_path, key_path) {
         (Some(cp), Some(kp)) => {
-            let cert_file = std::fs::File::open(cp)?;
+            let cert_file = File::open(cp)?;
             let certs: Vec<CertificateDer<'static>> =
-                rustls_pemfile::certs(&mut std::io::BufReader::new(cert_file))
+                rustls_pemfile::certs(&mut BufReader::new(cert_file))
                     .collect::<Result<_, _>>()
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-            let key_file = std::fs::File::open(kp)?;
-            let key = rustls_pemfile::private_key(&mut std::io::BufReader::new(key_file))
+            let key_file = File::open(kp)?;
+            let key = rustls_pemfile::private_key(&mut BufReader::new(key_file))
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
                 .ok_or_else(|| {
                     io::Error::new(io::ErrorKind::InvalidData, "no private key found in file")
@@ -293,10 +451,11 @@ fn parse_auth_line(line: &str) -> Option<(String, String)> {
 /// user's per-database CRUDA grants are enforced.
 fn run_query_loop<S: Read + Write>(
     reader: &mut BufReader<S>,
-    peer: std::net::SocketAddr,
+    peer: SocketAddr,
     exec: &Arc<RwLock<Executor>>,
     auth_enabled: bool,
 ) -> io::Result<()> {
+    let metrics = exec.read().unwrap().metrics.clone();
     let mut authenticated_user: Option<String> = None;
     let mut line_buf = String::new();
 
@@ -315,6 +474,7 @@ fn run_query_loop<S: Read + Write>(
         if auth_enabled && authenticated_user.is_none() {
             match parse_auth_line(trimmed) {
                 Some((u, p)) => {
+                    metrics.record_auth_attempt();
                     let ok = exec.read().unwrap().users.verify(&u, &p).is_some();
                     if ok {
                         reader.get_mut().write_all(b"OK\n")?;
@@ -322,6 +482,8 @@ fn run_query_loop<S: Read + Write>(
                         info!(%peer, user = %u, "authenticated");
                         authenticated_user = Some(u);
                     } else {
+                        metrics.record_auth_failure();
+                        metrics.record_error();
                         warn!(%peer, user = %u, "authentication failed");
                         reader.get_mut().write_all(b"ERR authentication failed\n")?;
                         reader.get_mut().flush()?;
@@ -329,6 +491,8 @@ fn run_query_loop<S: Read + Write>(
                     }
                 }
                 None => {
+                    metrics.record_auth_failure();
+                    metrics.record_error();
                     warn!(%peer, "first message was not AUTH");
                     reader
                         .get_mut()
@@ -348,19 +512,18 @@ fn run_query_loop<S: Read + Write>(
         }
 
         trace!(%peer, user = ?authenticated_user, query = %trimmed, "dispatching");
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         let response = handle_query(trimmed, exec, authenticated_user.as_deref());
         let elapsed = started.elapsed();
-        let status = if response.starts_with("ERR ") {
-            "err"
-        } else {
-            "ok"
-        };
+        let is_err = response.starts_with("ERR ");
+        if is_err {
+            metrics.record_error();
+        }
         debug!(
             %peer,
             user = ?authenticated_user,
             elapsed_us = elapsed.as_micros() as u64,
-            status,
+            status = if is_err { "err" } else { "ok" },
             "handled query"
         );
         let response_line = format!("{response}\n");
@@ -377,9 +540,14 @@ fn handle(
     exec: Arc<RwLock<Executor>>,
     tls_config: Option<Arc<ServerConfig>>,
     auth_enabled: bool,
+    idle_timeout: Option<Duration>,
 ) -> io::Result<()> {
     let peer = stream.peer_addr()?;
     stream.set_nodelay(true)?;
+    if let Some(timeout) = idle_timeout {
+        stream.set_read_timeout(Some(timeout))?;
+        stream.set_write_timeout(Some(timeout))?;
+    }
     info!(%peer, "client connected");
 
     if let Some(cfg) = tls_config {

@@ -33,9 +33,11 @@ use crc32fast::Hasher;
 use crate::libtau::crypto;
 use crate::libtau::model::{Layer, LayerId, Tau, Timestamp};
 use crate::libtau::storage::Store;
-use std::fs::{File, OpenOptions};
+#[cfg(test)]
+use std::collections::HashSet;
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tracing::{debug, instrument, warn};
 
 /// Encode a single value `V` to/from a string token with no whitespace or
@@ -146,7 +148,7 @@ impl<V: Codec> WalEntry<V> {
 /// Append-only write-ahead log backed by a single flat file.
 pub struct Wal {
     writer: BufWriter<File>,
-    path: std::path::PathBuf,
+    path: PathBuf,
     key: Option<[u8; 32]>,
     /// When `false`, `append` skips the per-record `flush + sync_data` and
     /// callers must call [`Wal::sync`] explicitly (or rely on drop / process
@@ -487,7 +489,7 @@ impl Wal {
             writer.flush()?;
             writer.get_ref().sync_data()?;
         }
-        std::fs::rename(&tmp, &self.path)?;
+        fs::rename(&tmp, &self.path)?;
         let file = OpenOptions::new().append(true).open(&self.path)?;
         self.writer = BufWriter::new(file);
         Ok(())
@@ -497,10 +499,10 @@ impl Wal {
     ///
     /// Used internally to verify WAL rotation in tests.
     #[cfg(test)]
-    pub fn data_layer_ids(&self) -> io::Result<std::collections::HashSet<LayerId>> {
+    pub fn data_layer_ids(&self) -> io::Result<HashSet<LayerId>> {
         let file = File::open(&self.path)?;
         let reader = BufReader::new(file);
-        let mut ids = std::collections::HashSet::new();
+        let mut ids = HashSet::new();
         for line in reader.lines() {
             let line = line?;
             let trimmed = line.trim();
@@ -510,7 +512,7 @@ impl Wal {
             // Data line: "<crc32> <layer_id> <lens> [taus...]"
             // We only need layer_id; skip checksum verification here.
             let mut parts = trimmed.splitn(3, ' ');
-            let _ck = parts.next();
+            let _ = parts.next();
             if let Some(id_str) = parts.next()
                 && let Ok(id) = id_str.parse::<LayerId>()
             {
@@ -734,10 +736,7 @@ mod tests {
         let tmp = NamedTempFile::new().unwrap();
         // write entries with checksums and a blank line
         {
-            let mut f = std::fs::OpenOptions::new()
-                .write(true)
-                .open(tmp.path())
-                .unwrap();
+            let mut f = OpenOptions::new().write(true).open(tmp.path()).unwrap();
             // Valid entry with checksum
             writeln!(f, "{} 1 x 0:10:42", crc32("1 x 0:10:42")).unwrap();
             writeln!(f).unwrap(); // blank
@@ -778,10 +777,7 @@ mod tests {
     fn wal_skips_corrupted_entry() {
         let tmp = NamedTempFile::new().unwrap();
         {
-            let mut f = std::fs::OpenOptions::new()
-                .write(true)
-                .open(tmp.path())
-                .unwrap();
+            let mut f = OpenOptions::new().write(true).open(tmp.path()).unwrap();
             // Valid entry
             writeln!(f, "{} 1 x 0:10:42", crc32("1 x 0:10:42")).unwrap();
             // Corrupted entry (wrong checksum)
@@ -816,7 +812,7 @@ mod tests {
         }
 
         // File must not contain the plaintext value
-        let raw = std::fs::read_to_string(tmp.path()).unwrap();
+        let raw = fs::read_to_string(tmp.path()).unwrap();
         assert!(!raw.contains("99"), "plaintext value leaked into WAL file");
         assert!(raw.starts_with("E:"), "encrypted line must start with E:");
 
@@ -886,7 +882,7 @@ mod tests {
         }
 
         // Raw file must not contain the plaintext stmt
-        let raw = std::fs::read_to_string(tmp.path()).unwrap();
+        let raw = fs::read_to_string(tmp.path()).unwrap();
         assert!(!raw.contains("secret"), "plaintext schema leaked into WAL");
         assert!(raw.contains("SE:"), "encrypted schema must use SE: prefix");
 

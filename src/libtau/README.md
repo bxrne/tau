@@ -6,20 +6,6 @@ The core library. Everything the server and any future client library needs live
 
 `libtau` implements a time-series database based on **immutable, layered temporal intervals**. The central idea is that data is never corrected in-place. When a value changes, a new layer is appended on top of existing ones, and the newest layer always wins at query time. This is the same model used in bitemporal databases and event-sourced systems - it makes the full correction history available for free and eliminates write-write conflicts entirely.
 
-## Module layout
-
-| Module | Responsibility |
-|--------|---------------|
-| `model` | The three primitive types: `Tau`, `Layer`, `Lens` |
-| `value` | The dynamic runtime value type used by the executor |
-| `storage` | Pluggable backends: in-memory, binary disk, write-ahead log |
-| `database` | Orchestration layer - owns a store and an optional WAL |
-| `ql` | Query language: AST definitions and nom-based parser |
-| `executor` | Wires parsed statements to a registry of live databases |
-| `auth` | Single-credential argon2id helper (legacy, kept for backward compat) |
-| `users` | Multi-user store with per-database **CRUDA** grants and atomic file persistence |
-| `crypto` | AES-256-GCM primitives shared by WAL and Disk encryption |
-
 ## Design decisions
 
 ### Generics over a dynamic dispatch boundary
@@ -34,10 +20,14 @@ There is no delete operation in the traditional sense. Deleting a value means ap
 
 A derived lens is an AST expression stored at definition time. Every `AT` or `RANGE` query re-evaluates the expression from scratch - there is no materialisation, no caching, and no incremental maintenance. This is correct and simple, but it means a deeply nested chain of derived lenses re-evaluates each intermediate step on every point lookup. For 1.0, this is fine; for hot derived lenses over large ranges it may need a materialised view path.
 
-### Auth and crypto are standalone modules
+### Crypto is a standalone module
 
-`auth` and `crypto` have no dependency on the storage or executor modules. They expose small, focused APIs: `Credentials::new`/`verify` for auth, `encrypt`/`decrypt` for symmetric AES-GCM. The server wires them together; the library doesn't force any security policy on embedders.
+`crypto` has no dependency on the storage or executor modules. It exposes a small, focused API: `encrypt`/`decrypt` for symmetric AES-256-GCM with a random 12-byte nonce per blob. The server wires it into the WAL and Disk paths; the library doesn't force any security policy on embedders.
 
 ### Multi-user authorisation lives next to the executor
 
-`users` defines a 5-bit `Perm` bitmap (`C`, `R`, `U`, `D`, `A`) and a `UserStore` that maps `database_name → Perm` per user - with `"*"` as a wildcard that grants on every database (including ones created later). The `Executor` owns one of these and exposes `exec_as(stmt, caller)` / `exec_read_as` that check the matched user's grants before delegating to the plain `exec`/`exec_read` path. Unrestricted `exec` and `exec_read` are still available for library / test use and for schema-replay startup. Persistence is a single text file, rewritten atomically on every mutation.
+`users` defines a 5-bit `Perm` bitmap (`C`, `R`, `U`, `D`, `A`) and a `UserStore` that maps `database_name -> Perm` per user - with `"*"` as a wildcard that grants on every database (including ones created later). The `Executor` owns one of these and exposes `exec_as(stmt, caller)` / `exec_read_as` that check the matched user's grants before delegating to the plain `exec`/`exec_read` path. Unrestricted `exec` and `exec_read` are still available for library / test use and for schema-replay startup. Persistence is a single text file, rewritten atomically on every mutation.
+
+### Metrics are shared via Arc
+
+The `Executor` owns an `Arc<Metrics>` field. The TCP server receives a clone of that Arc and shares it with the metrics HTTP thread. This lets the metrics endpoint read counters without going through the executor lock - the counters use `Relaxed` atomics because they are best-effort observability data, not synchronisation barriers.

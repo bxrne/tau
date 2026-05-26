@@ -3,13 +3,15 @@
 //! Entry point is [`parse`], which returns a single [`Stmt`].  Operator
 //! precedence (lowest → highest) is:
 //!
-//! 1. `||`
-//! 2. `&&`
-//! 3. `==`, `!=`, `<`, `<=`, `>`, `>=`
-//! 4. `+`, `-`
-//! 5. `*`, `/`, `%`
-//! 6. unary `-`, `!`
-//! 7. literals, identifiers, `(` expr `)`
+//! - `||`
+//! - `&&`
+//! - `==`, `!=`, `<`, `<=`, `>`, `>=`
+//! - `+`, `-`
+//! - `*`, `/`, `%`
+//! - unary `-`, `!`
+//! - literals, identifiers, `(` expr `)`
+
+use std::sync::Arc;
 
 use nom::{
     IResult, Parser,
@@ -555,7 +557,7 @@ fn literal(i: &str) -> IResult<&str, Literal> {
     alt((
         value(Literal::Null, tag_no_case("null")),
         map(bool_lit, Literal::Bool),
-        map(string_lit, Literal::Str),
+        map(string_lit, |s| Literal::Str(Arc::from(s.as_str()))),
         map(float_lit, Literal::Float),
         map(integer, Literal::Int),
     ))

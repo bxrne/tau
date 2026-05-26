@@ -37,6 +37,8 @@
 //!
 //! Keywords are case-insensitive; identifiers and literals are not.
 
+use std::sync::Arc;
+
 /// Declared value type for a base lens. Used only as a creation hint;
 /// the storage engine itself is generic over `V`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,11 +52,15 @@ pub enum Type {
 
 /// A literal value embedded in a query.  Floats use a string form so we can
 /// keep `Literal: Eq`, which is convenient for AST tests.
+///
+/// `Str` uses `Arc<str>` so that cloning a literal (e.g. when an expression
+/// is re-evaluated per query) is an atomic reference-count bump rather than a
+/// heap allocation + copy.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Literal {
     Int(i64),
     Float(f64),
-    Str(String),
+    Str(Arc<str>),
     Bool(bool),
     Null,
 }

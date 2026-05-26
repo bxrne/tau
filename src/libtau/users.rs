@@ -525,7 +525,7 @@ mod tests {
     fn store_open_rejects_malformed_lines() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("u");
-        std::fs::write(&path, "only_one_field\n").unwrap();
+        fs::write(&path, "only_one_field\n").unwrap();
         assert!(UserStore::open(&path).is_err());
     }
 }

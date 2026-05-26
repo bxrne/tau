@@ -3,6 +3,7 @@ use crate::libtau::storage::wal::Codec;
 use crate::libtau::storage::{Store, Wal, WalEntry};
 use std::io;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use tracing::{debug, info, instrument, warn};
 
@@ -26,7 +27,7 @@ where
     /// `false` to defer that work to an explicit caller - useful in bulk-load
     /// paths where many compactions fire and a single trailing checkpoint
     /// suffices.
-    auto_checkpoint: std::sync::atomic::AtomicBool,
+    auto_checkpoint: AtomicBool,
 }
 
 impl<V> Clone for Database<V>
@@ -37,10 +38,7 @@ where
         Self {
             store: self.store.clone(),
             wal: self.wal.clone(),
-            auto_checkpoint: std::sync::atomic::AtomicBool::new(
-                self.auto_checkpoint
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            ),
+            auto_checkpoint: AtomicBool::new(self.auto_checkpoint.load(Ordering::Relaxed)),
         }
     }
 }
@@ -55,7 +53,7 @@ where
         Self {
             store: Arc::new(RwLock::new(Box::new(store))),
             wal: None,
-            auto_checkpoint: std::sync::atomic::AtomicBool::new(true),
+            auto_checkpoint: AtomicBool::new(true),
         }
     }
 
@@ -66,7 +64,7 @@ where
         Self {
             store: Arc::new(RwLock::new(Box::new(store))),
             wal: Some(Arc::new(Mutex::new(wal))),
-            auto_checkpoint: std::sync::atomic::AtomicBool::new(true),
+            auto_checkpoint: AtomicBool::new(true),
         }
     }
 
@@ -75,8 +73,7 @@ where
     /// each `append` avoids the rewrite cost (full read of every live layer
     /// + atomic rename).  Call `Database::checkpoint` manually to compact.
     pub fn set_auto_checkpoint(&self, on: bool) {
-        self.auto_checkpoint
-            .store(on, std::sync::atomic::Ordering::Relaxed);
+        self.auto_checkpoint.store(on, Ordering::Relaxed);
     }
 
     /// Open an existing WAL, replay it into `store`, then return a live
@@ -149,11 +146,7 @@ where
                     store.append(&lens.name, layer)?
                 }; // store write-lock released here
 
-                if did_compact
-                    && self
-                        .auto_checkpoint
-                        .load(std::sync::atomic::Ordering::Relaxed)
-                {
+                if did_compact && self.auto_checkpoint.load(Ordering::Relaxed) {
                     self.checkpoint()?;
                 }
 
@@ -270,6 +263,15 @@ where
         };
         debug!(lens = %lens.name, t, found = result.is_some(), "point lookup");
         result
+    }
+
+    /// Cheaper point lookup for base lenses that takes the name as `&str`
+    /// directly, skipping the `Arc<str>` allocation that `lens()` + `at()`
+    /// would perform on every call.  Only valid for base lenses - callers must
+    /// ensure `name` refers to a base lens before calling this.
+    #[inline]
+    pub fn at_name(&self, name: &str, t: Timestamp) -> Option<V> {
+        self.store.read().expect("store lock poisoned").at(name, t)
     }
 
     /// Snapshot of the layer stack for `lens`, cheap-cloned through the

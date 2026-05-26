@@ -54,23 +54,20 @@ jobs:
             target
           key: ${{ runner.os }}-bench-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-bench-
-      - name: Pre-generate CSV samples (so timed runs don't include fs writes)
-        run: mkdir -p bench-samples
       - name: Build bench with release-bench profile
         run: |
           cargo build --profile release-bench --bin bench
           ls -la target/release-bench/bench
       - name: Run bench (quick grid, best-of-5)
-        # --quick keeps the grid small but exercises every workload at every
-        # span.  --repeat 5 takes the fastest of 5 runs to dampen CI noise.
-        # /tmp is tmpfs on the runner; for the real-disk story use the release
-        # workflow which writes under $GITHUB_WORKSPACE.
+        # --quick keeps the grid small (plain TCP, no auth, WAL on/off,
+        # every workload).  --repeat 5 takes the fastest of 5 runs to dampen
+        # CI noise.  /tmp is tmpfs on the runner; the release workflow uses
+        # $GITHUB_WORKSPACE for real-disk fsync numbers.
         run: |
           ./target/release-bench/bench \
             --quick \
-            --workloads all \
-            --spans second,year,decade,century,millennium,aeon \
             --repeat 5 \
+            --ops 1000 \
             --label "ci-${{ github.sha }}" \
             --out bench-results.csv \
             | tee bench-results.txt
