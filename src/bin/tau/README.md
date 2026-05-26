@@ -18,16 +18,39 @@ One statement per line in, one response line out. Statements are the same querie
 
 Values are encoded with a one-character type tag: `i<int>`, `f<float>`, `s<percent-escaped>`, `b<0|1>`, `n` (null).
 
-### Authentication handshake
+### Authentication handshake and multi-user authorisation
 
-When `--auth` is set, the first message from every client must be `AUTH <username> <password>`. Any other message before authentication is answered with `ERR authentication failed` and the connection is closed. After a successful `AUTH`, the session proceeds normally.
+When `--auth` is set, the first message from every client must be `AUTH <username> <password>`. Any other message before authentication is answered with `ERR authentication failed` and the connection is closed. After a successful `AUTH`, the session is bound to that user and every subsequent statement is dispatched through `Executor::exec_as` so the user's CRUDA grants are enforced.
 
 ```
 → AUTH admin s3cr3t
 ← OK
 → CREATE DATABASE main
 ← OK
+→ CREATE USER alice PASSWORD "p4ss"
+← OK
+→ GRANT R ON main TO alice
+← OK
 ```
+
+Two user-store modes:
+
+- **In-memory single user**: `--auth --username admin --password s3cr3t`. Bootstraps one global-admin user; no persistence. Convenient for ephemeral dev.
+- **Persistent multi-user**: `--auth --users-file /var/lib/tau/users`. On first run with `--username`/`--password` the file is seeded with that user as global admin; afterwards the file is the source of truth and every `CREATE USER` / `DROP USER` / `GRANT` / `REVOKE` is atomically rewritten to it.
+
+Permission model (CRUDA bitmap, per database, plus wildcard `"*"`):
+
+| bit | grants                                       |
+|-----|----------------------------------------------|
+| `C` | `CREATE LENS`, `DERIVE LENS`                 |
+| `R` | `AT`, `RANGE`, `REDUCE`, `SHOW LENSES`       |
+| `U` | `APPEND LENS`, `COPY LENS`                   |
+| `D` | `DROP LENS` (also `DROP DATABASE` with `A`)  |
+| `A` | admin - manage users, grant/revoke, create DBs |
+
+Effective permissions for user *U* on database *D* = `grants[D] | grants["*"]`. A user with `A` on `"*"` is a **global admin** - required for `CREATE DATABASE`, `CREATE USER`, `DROP USER`, `SHOW USERS`, and `SHOW GRANTS` of other users. Promotion is just `GRANT A ON * TO <user>`.
+
+`SHOW DATABASES` is automatically filtered for non-admin callers to only databases they hold any grant on.
 
 ## Concurrency model
 
@@ -41,7 +64,7 @@ This is a simple and correct model. The tradeoff is that a slow write (e.g. a WA
 
 ## TLS
 
-Pass `--tls` to enable. With no cert/key paths provided, an ephemeral self-signed certificate is generated at startup — convenient for development but not for production (clients cannot verify the server identity). For production, provide `--tls-cert` and `--tls-key` pointing to PEM-encoded files.
+Pass `--tls` to enable. With no cert/key paths provided, an ephemeral self-signed certificate is generated at startup - convenient for development but not for production (clients cannot verify the server identity). For production, provide `--tls-cert` and `--tls-key` pointing to PEM-encoded files.
 
 TLS is handled by `rustls`. The server does not perform client certificate authentication.
 
@@ -63,4 +86,4 @@ If Tau ever needs to support thousands of concurrent connections (unlikely for a
 
 ### Single executor for all databases
 
-All named databases live inside one `Executor` protected by one lock. This keeps startup simple — there is no per-database file or configuration — but it means the lock is contended across all databases. A future multi-tenant mode might want per-database executors and per-database locks.
+All named databases live inside one `Executor` protected by one lock. This keeps startup simple - there is no per-database file or configuration - but it means the lock is contended across all databases. A future multi-tenant mode might want per-database executors and per-database locks.

@@ -59,7 +59,7 @@ struct Result {
     lookup_ops_per_sec: f64,
 }
 
-/// Xorshift64 — deterministic, no deps.
+/// Xorshift64 - deterministic, no deps.
 struct Rng(u64);
 impl Rng {
     fn new(seed: u64) -> Self {
@@ -186,7 +186,7 @@ fn run_cell(cell: Cell, scratch_root: &Path) -> Result {
     // Pre-create lens handles to avoid measuring Arc<str> allocation.
     let lenses: Vec<_> = (0..8u64).map(|i| db.lens(lens_name(i))).collect();
 
-    // Warmup — touch each lens once with a small layer at far-future timestamps
+    // Warmup - touch each lens once with a small layer at far-future timestamps
     // so the first append does not pay HashMap rehash cost in the timed loop.
     for (i, l) in lenses.iter().enumerate() {
         let layer = Layer::new(
@@ -200,14 +200,12 @@ fn run_cell(cell: Cell, scratch_root: &Path) -> Result {
         db.append(l, layer).unwrap();
     }
 
-    // ----- Append phase -----
     let t0 = Instant::now();
     for (lens_idx, layer) in workload {
         db.append(&lenses[lens_idx as usize], layer).unwrap();
     }
     let append_elapsed = t0.elapsed();
 
-    // ----- Lookup phase -----
     let t1 = Instant::now();
     let mut sink: u64 = 0;
     for (lens_idx, t) in lookups {

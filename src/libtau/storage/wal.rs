@@ -139,7 +139,7 @@ impl<V: Codec> WalEntry<V> {
     }
 }
 
-// TODO: add a truncation / rotation path — after a compaction checkpoint, entries
+// TODO: add a truncation / rotation path - after a compaction checkpoint, entries
 // whose layers are fully covered by the compacted layer can be discarded from
 // the front of the file. Without this the WAL grows without bound.
 
@@ -230,7 +230,7 @@ impl Wal {
     ) -> io::Result<()> {
         use std::fmt::Write as _;
 
-        // Encrypted path keeps the original serialise() route — encryption
+        // Encrypted path keeps the original serialise() route - encryption
         // dominates cost and the buffer allocation noise is negligible.
         if self.key.is_some() {
             let entry: WalEntry<V> = WalEntry {

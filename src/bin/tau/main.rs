@@ -6,11 +6,11 @@
 //!
 //! # Security
 //!
-//! * `--tls` — enables TLS. Provide `--tls-cert` / `--tls-key` PEM files or
+//! * `--tls` - enables TLS. Provide `--tls-cert` / `--tls-key` PEM files or
 //!   omit both to generate an ephemeral self-signed certificate (dev only).
-//! * `--auth` — enables authentication. Requires `--username` and `--password`.
+//! * `--auth` - enables authentication. Requires `--username` and `--password`.
 //!   The first message from every client must be `AUTH <user> <pass>\n`.
-//! * `TAU_ENCRYPTION_KEY` env var — 64 hex chars (32 bytes). When set, WAL
+//! * `TAU_ENCRYPTION_KEY` env var - 64 hex chars (32 bytes). When set, WAL
 //!   entries are AES-256-GCM encrypted before being written to disk.
 //!
 //! # Wire format
@@ -48,10 +48,9 @@ use rcgen::generate_simple_self_signed;
 use rustls::ServerConfig;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::server::ServerConnection;
-use tau::libtau::auth::Credentials;
 use tau::libtau::crypto;
-use tau::{Codec, ExecError, Executor, Output, parse};
-use tracing::{error, info, warn};
+use tau::{Codec, ExecError, Executor, Output, Perm, User, UserStore, parse};
+use tracing::{debug, error, info, trace, warn};
 
 /// Tau time-series database TCP server.
 #[derive(Parser, Debug)]
@@ -92,18 +91,28 @@ pub struct Config {
     #[arg(long, value_name = "PATH")]
     pub tls_key: Option<PathBuf>,
 
-    /// Enable username/password authentication.
+    /// Enable username/password authentication.  Without --users-file, a
+    /// single in-memory user is bootstrapped from --username/--password as a
+    /// global admin.  With --users-file, the file is the source of truth.
     #[arg(long)]
     pub auth: bool,
 
-    /// Username for authentication (requires --auth).
+    /// Username for the bootstrap admin (when --users-file is missing or new).
+    /// Requires --auth.
     #[arg(long, value_name = "NAME")]
     pub username: Option<String>,
 
-    /// Password for authentication (requires --auth). Hashed with argon2id at
-    /// startup; the plaintext is not retained.
+    /// Password for the bootstrap admin.  Hashed with argon2id at startup; the
+    /// plaintext is not retained.  Requires --auth.
     #[arg(long, value_name = "PASS")]
     pub password: Option<String>,
+
+    /// Persistent multi-user database file (plain text).  When set, loads
+    /// users on startup and persists every CREATE/DROP USER and GRANT/REVOKE
+    /// back to the file.  When the file does not yet exist, --username and
+    /// --password seed it with an initial global admin.
+    #[arg(long, value_name = "PATH")]
+    pub users_file: Option<PathBuf>,
 }
 
 fn main() -> io::Result<()> {
@@ -145,26 +154,50 @@ fn main() -> io::Result<()> {
         )))
     };
 
-    // Build credentials (if auth enabled).
-    let credentials: Option<Arc<Credentials>> = if config.auth {
-        let username = config.username.ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "--auth requires --username")
-        })?;
-        let password = config.password.ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "--auth requires --password")
-        })?;
-        info!(%username, "authentication enabled");
-        Some(Arc::new(Credentials::new(&username, &password)))
-    } else {
-        None
-    };
+    // Build the user store and (optionally) bootstrap an initial admin.
+    let auth_enabled = config.auth;
+    if auth_enabled {
+        let mut store = match config.users_file.as_ref() {
+            Some(path) => UserStore::open(path)?,
+            None => UserStore::new(),
+        };
+
+        // Bootstrap: if no users exist yet AND --username/--password were
+        // provided, seed the store with a global-admin user.  Persists when a
+        // file path is configured.
+        if store.names().is_empty()
+            && let (Some(u), Some(p)) = (config.username.as_ref(), config.password.as_ref())
+        {
+            let mut grants = std::collections::HashMap::new();
+            grants.insert("*".to_string(), Perm::ALL);
+            store
+                .add(User::new(u, p, grants))
+                .map_err(io::Error::other)?;
+            info!(user = %u, "bootstrapped global admin");
+        }
+
+        if store.names().is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "--auth: no users configured. Provide --username/--password to bootstrap a global admin or supply a populated --users-file",
+            ));
+        }
+
+        info!(users = store.names().len(), "authentication enabled");
+        executor.write().unwrap().users = store;
+    }
 
     // Build TLS config (if TLS enabled).
     let tls_config: Option<Arc<ServerConfig>> = if config.tls {
         let server_cfg = build_tls_config(config.tls_cert.as_deref(), config.tls_key.as_deref())?;
-        info!("TLS enabled");
+        info!(
+            cert = ?config.tls_cert,
+            key = ?config.tls_key,
+            "TLS enabled"
+        );
         Some(Arc::new(server_cfg))
     } else {
+        debug!("TLS disabled (plain TCP)");
         None
     };
 
@@ -178,13 +211,18 @@ fn main() -> io::Result<()> {
     for incoming in listener.incoming() {
         match incoming {
             Ok(stream) => {
+                let peer = stream
+                    .peer_addr()
+                    .map(|a| a.to_string())
+                    .unwrap_or_else(|_| "?".into());
+                debug!(%peer, "accepted connection");
                 let exec = executor.clone();
-                let creds = credentials.clone();
                 let tls = tls_config.clone();
+                let auth = auth_enabled;
                 thread::Builder::new()
                     .name("tau-conn".into())
                     .spawn(move || {
-                        if let Err(e) = handle(stream, exec, tls, creds) {
+                        if let Err(e) = handle(stream, exec, tls, auth) {
                             warn!(error = %e, "connection ended with error");
                         }
                     })
@@ -219,7 +257,7 @@ fn build_tls_config(
         }
         (None, None) => {
             warn!(
-                "no TLS cert/key provided — generating ephemeral self-signed certificate (not for production)"
+                "no TLS cert/key provided - generating ephemeral self-signed certificate (not for production)"
             );
             let certified = generate_simple_self_signed(vec!["localhost".to_string()])
                 .map_err(io::Error::other)?;
@@ -250,15 +288,16 @@ fn parse_auth_line(line: &str) -> Option<(String, String)> {
 
 /// Drive a single client connection over any `Read + Write` stream.
 ///
-/// Enforces authentication (if credentials are provided) as the very first
-/// exchange before any query is processed.
+/// Enforces authentication (when `auth_enabled`) as the very first exchange,
+/// then routes every subsequent statement through `exec_as` so the matched
+/// user's per-database CRUDA grants are enforced.
 fn run_query_loop<S: Read + Write>(
     reader: &mut BufReader<S>,
     peer: std::net::SocketAddr,
     exec: &Arc<RwLock<Executor>>,
-    credentials: Option<&Credentials>,
+    auth_enabled: bool,
 ) -> io::Result<()> {
-    let mut authenticated = credentials.is_none();
+    let mut authenticated_user: Option<String> = None;
     let mut line_buf = String::new();
 
     loop {
@@ -273,16 +312,27 @@ fn run_query_loop<S: Read + Write>(
             continue;
         }
 
-        if !authenticated {
-            match (parse_auth_line(trimmed), credentials) {
-                (Some((u, p)), Some(creds)) if creds.verify(&u, &p) => {
-                    reader.get_mut().write_all(b"OK\n")?;
-                    reader.get_mut().flush()?;
-                    authenticated = true;
+        if auth_enabled && authenticated_user.is_none() {
+            match parse_auth_line(trimmed) {
+                Some((u, p)) => {
+                    let ok = exec.read().unwrap().users.verify(&u, &p).is_some();
+                    if ok {
+                        reader.get_mut().write_all(b"OK\n")?;
+                        reader.get_mut().flush()?;
+                        info!(%peer, user = %u, "authenticated");
+                        authenticated_user = Some(u);
+                    } else {
+                        warn!(%peer, user = %u, "authentication failed");
+                        reader.get_mut().write_all(b"ERR authentication failed\n")?;
+                        reader.get_mut().flush()?;
+                        break;
+                    }
                 }
-                _ => {
-                    warn!(%peer, "authentication failed");
-                    reader.get_mut().write_all(b"ERR authentication failed\n")?;
+                None => {
+                    warn!(%peer, "first message was not AUTH");
+                    reader
+                        .get_mut()
+                        .write_all(b"ERR authentication required\n")?;
                     reader.get_mut().flush()?;
                     break;
                 }
@@ -291,18 +341,34 @@ fn run_query_loop<S: Read + Write>(
         }
 
         if trimmed.eq_ignore_ascii_case("QUIT") || trimmed.eq_ignore_ascii_case("EXIT") {
+            info!(%peer, user = ?authenticated_user, "client quit");
             reader.get_mut().write_all(b"OK BYE\n")?;
             reader.get_mut().flush()?;
             break;
         }
 
-        let response = handle_query(trimmed, exec);
+        trace!(%peer, user = ?authenticated_user, query = %trimmed, "dispatching");
+        let started = std::time::Instant::now();
+        let response = handle_query(trimmed, exec, authenticated_user.as_deref());
+        let elapsed = started.elapsed();
+        let status = if response.starts_with("ERR ") {
+            "err"
+        } else {
+            "ok"
+        };
+        debug!(
+            %peer,
+            user = ?authenticated_user,
+            elapsed_us = elapsed.as_micros() as u64,
+            status,
+            "handled query"
+        );
         let response_line = format!("{response}\n");
         reader.get_mut().write_all(response_line.as_bytes())?;
         reader.get_mut().flush()?;
     }
 
-    info!(%peer, "client disconnected");
+    info!(%peer, user = ?authenticated_user, "client disconnected");
     Ok(())
 }
 
@@ -310,38 +376,39 @@ fn handle(
     stream: TcpStream,
     exec: Arc<RwLock<Executor>>,
     tls_config: Option<Arc<ServerConfig>>,
-    credentials: Option<Arc<Credentials>>,
+    auth_enabled: bool,
 ) -> io::Result<()> {
     let peer = stream.peer_addr()?;
     stream.set_nodelay(true)?;
     info!(%peer, "client connected");
 
-    let creds = credentials.as_deref();
-
     if let Some(cfg) = tls_config {
         let conn = ServerConnection::new(cfg).map_err(io::Error::other)?;
         let tls_stream = rustls::StreamOwned::new(conn, stream);
         let mut reader = BufReader::new(tls_stream);
-        run_query_loop(&mut reader, peer, &exec, creds)
+        run_query_loop(&mut reader, peer, &exec, auth_enabled)
     } else {
         let mut reader = BufReader::new(stream);
-        run_query_loop(&mut reader, peer, &exec, creds)
+        run_query_loop(&mut reader, peer, &exec, auth_enabled)
     }
 }
 
 /// Parse + dispatch one query line.  Returns the response line (without the
 /// trailing newline).  Lock-routing: read-only statements take the shared
-/// lock; everything else takes the exclusive lock.
-fn handle_query(query: &str, exec: &Arc<RwLock<Executor>>) -> String {
+/// lock; everything else takes the exclusive lock.  When `caller` is `Some`,
+/// the statement is executed via `exec_as` so per-user CRUDA permissions are
+/// enforced.
+fn handle_query(query: &str, exec: &Arc<RwLock<Executor>>, caller: Option<&str>) -> String {
     let stmt = match parse(query) {
         Ok((rest, s)) if rest.trim().is_empty() => s,
         Ok((rest, _)) => return format!("ERR trailing input: {rest:?}"),
         Err(e) => return format!("ERR parse: {e}"),
     };
-    let result = if stmt.is_read_only() {
-        exec.read().unwrap().exec_read(&stmt)
-    } else {
-        exec.write().unwrap().exec(&stmt)
+    let result = match (stmt.is_read_only(), caller) {
+        (true, Some(u)) => exec.read().unwrap().exec_read_as(&stmt, u),
+        (true, None) => exec.read().unwrap().exec_read(&stmt),
+        (false, Some(u)) => exec.write().unwrap().exec_as(&stmt, u),
+        (false, None) => exec.write().unwrap().exec(&stmt),
     };
     match result {
         Ok(o) => format_output(&o),
@@ -371,6 +438,19 @@ fn format_output(o: &Output) -> String {
             }
             out
         }
+        Output::Grants(rows) => {
+            let mut out = format!("GRANTS {}", rows.len());
+            for (user, grants) in rows {
+                out.push(';');
+                out.push(' ');
+                out.push_str(user);
+                for (db, perm) in grants {
+                    out.push(' ');
+                    out.push_str(&format!("{}:{}", db, perm));
+                }
+            }
+            out
+        }
     }
 }
 
@@ -392,6 +472,9 @@ fn format_error(e: &ExecError) -> String {
         ExecError::InvalidRange => "invalid range (start >= end)".into(),
         ExecError::Io(m) => format!("storage error: {m}"),
         ExecError::CycleDetected(n) => format!("cycle detected in derived lens: {n}"),
+        ExecError::PermissionDenied(m) => format!("permission denied: {m}"),
+        ExecError::DuplicateUser(n) => format!("duplicate user: {n}"),
+        ExecError::UnknownUser(n) => format!("unknown user: {n}"),
     }
 }
 
@@ -407,36 +490,36 @@ mod tests {
     #[test]
     fn empty_response_for_ddl() {
         let e = exec();
-        assert_eq!(handle_query("CREATE DATABASE main", &e), "OK");
-        assert_eq!(handle_query("CREATE LENS x int", &e), "OK");
+        assert_eq!(handle_query("CREATE DATABASE main", &e, None), "OK");
+        assert_eq!(handle_query("CREATE LENS x int", &e, None), "OK");
     }
 
     #[test]
     fn value_response_round_trips_through_codec() {
         let e = exec();
-        handle_query("CREATE DATABASE main", &e);
-        handle_query("CREATE LENS x int", &e);
-        handle_query("APPEND LENS x 0 10 42", &e);
-        assert_eq!(handle_query("AT LENS x 5", &e), "VAL i42");
+        handle_query("CREATE DATABASE main", &e, None);
+        handle_query("CREATE LENS x int", &e, None);
+        handle_query("APPEND LENS x 0 10 42", &e, None);
+        assert_eq!(handle_query("AT LENS x 5", &e, None), "VAL i42");
     }
 
     #[test]
     fn nil_response_for_uncovered_lookup() {
         let e = exec();
-        handle_query("CREATE DATABASE main", &e);
-        handle_query("CREATE LENS x int", &e);
-        assert_eq!(handle_query("AT LENS x 5", &e), "VAL NIL");
+        handle_query("CREATE DATABASE main", &e, None);
+        handle_query("CREATE LENS x int", &e, None);
+        assert_eq!(handle_query("AT LENS x 5", &e, None), "VAL NIL");
     }
 
     #[test]
     fn range_response_lists_segments() {
         let e = exec();
-        handle_query("CREATE DATABASE main", &e);
-        handle_query("CREATE LENS x int", &e);
-        handle_query("APPEND LENS x 0 5 1", &e);
-        handle_query("APPEND LENS x 5 10 2", &e);
+        handle_query("CREATE DATABASE main", &e, None);
+        handle_query("CREATE LENS x int", &e, None);
+        handle_query("APPEND LENS x 0 5 1", &e, None);
+        handle_query("APPEND LENS x 5 10 2", &e, None);
         assert_eq!(
-            handle_query("RANGE LENS x 0 10", &e),
+            handle_query("RANGE LENS x 0 10", &e, None),
             "RANGE 2; 0:5:i1; 5:10:i2"
         );
     }
@@ -444,44 +527,44 @@ mod tests {
     #[test]
     fn empty_range_response_has_zero_count() {
         let e = exec();
-        handle_query("CREATE DATABASE main", &e);
-        handle_query("CREATE LENS x int", &e);
-        assert_eq!(handle_query("RANGE LENS x 0 10", &e), "RANGE 0");
+        handle_query("CREATE DATABASE main", &e, None);
+        handle_query("CREATE LENS x int", &e, None);
+        assert_eq!(handle_query("RANGE LENS x 0 10", &e, None), "RANGE 0");
     }
 
     #[test]
     fn parse_error_is_reported() {
         let e = exec();
-        let r = handle_query("BOGUS QUERY", &e);
+        let r = handle_query("BOGUS QUERY", &e, None);
         assert!(r.starts_with("ERR parse:"), "got: {r}");
     }
 
     #[test]
     fn trailing_input_is_rejected() {
         let e = exec();
-        let r = handle_query("CREATE DATABASE a JUNK", &e);
+        let r = handle_query("CREATE DATABASE a JUNK", &e, None);
         assert!(r.starts_with("ERR trailing input"), "got: {r}");
     }
 
     #[test]
     fn execution_error_is_reported() {
         let e = exec();
-        let r = handle_query("CREATE LENS x int", &e);
+        let r = handle_query("CREATE LENS x int", &e, None);
         assert!(r.starts_with("ERR no active database"), "got: {r}");
     }
 
     #[test]
     fn read_only_router_picks_shared_lock() {
         let e = exec();
-        handle_query("CREATE DATABASE main", &e);
-        handle_query("CREATE LENS x int", &e);
-        handle_query("APPEND LENS x 0 100 7", &e);
+        handle_query("CREATE DATABASE main", &e, None);
+        handle_query("CREATE LENS x int", &e, None);
+        handle_query("APPEND LENS x 0 100 7", &e, None);
 
         let mut handles = vec![];
         for _ in 0..8 {
             let e = e.clone();
             handles.push(thread::spawn(move || {
-                assert_eq!(handle_query("AT LENS x 50", &e), "VAL i7");
+                assert_eq!(handle_query("AT LENS x 50", &e, None), "VAL i7");
             }));
         }
         for h in handles {

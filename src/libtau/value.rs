@@ -4,7 +4,7 @@
 //! Every base lens in an executor-managed database stores `Value`s, so a
 //! single `Database<Value>` can back any declared lens type (`int`, `float`,
 //! `str`, `bool`, `bytes`). The executor enforces, per lens, that appended
-//! values match the declared type — derived lenses are unconstrained because
+//! values match the declared type - derived lenses are unconstrained because
 //! their type is determined by the expression they wrap.
 //!
 //! `Codec` is implemented so values can flow through the WAL.  The encoding
@@ -197,7 +197,7 @@ mod tests {
         assert!(!enc.contains(' '));
         assert!(!enc.contains(':'));
         // The escape character is allowed; only the *literal* % from the value
-        // is escaped — the escapes themselves contain `%`.
+        // is escaped - the escapes themselves contain `%`.
         assert_eq!(Value::decode(&enc), Some(v));
     }
 

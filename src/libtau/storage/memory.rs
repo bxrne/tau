@@ -34,7 +34,7 @@ where
     V: Clone + PartialEq + Send + Sync + 'static,
 {
     fn append(&mut self, lens: &str, layer: Layer<V>) -> io::Result<bool> {
-        // Hot path: lens already known — borrow without allocating a String.
+        // Hot path: lens already known - borrow without allocating a String.
         let layers = if let Some(l) = self.lenses.get_mut(lens) {
             l
         } else {
