@@ -2,6 +2,9 @@
 name = "tau"
 version = "0.0.0" # x-release-please-version
 edition = "2024"
+license-file = "LICENSE"
+description = "Tau time-series database (PolyForm Noncommercial 1.0.0; not redistributable for commercial use)."
+publish = false
 
 [[bin]]
 name = "tau"

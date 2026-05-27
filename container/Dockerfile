@@ -50,7 +50,7 @@ FROM scratch
 LABEL org.opencontainers.image.source="https://github.com/bxrne/tau"
 LABEL org.opencontainers.image.url="https://github.com/bxrne/tau"
 LABEL org.opencontainers.image.description="Tau time-series database server (scratch musl static)."
-LABEL org.opencontainers.image.licenses="MIT"
+LABEL org.opencontainers.image.licenses="LicenseRef-PolyForm-Noncommercial-1.0.0"
 LABEL org.opencontainers.image.title="tau"
 LABEL org.opencontainers.image.documentation="https://github.com/bxrne/tau/blob/master/README.md"
 

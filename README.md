@@ -437,3 +437,22 @@ The runtime base image is `scratch` with no shell, `curl` or `wget`, so docker's
 ## Roadmap
 
 See [`ROADMAP.md`](ROADMAP.md) for what's done and what remains. End-to-end integration tests and the operational tooling suite are the major remaining items.
+
+## License
+
+Tau is distributed under the [PolyForm Noncommercial License 1.0.0](LICENSE).
+
+**Permitted (no payment required):**
+
+- Personal use, hobby projects, research, experimentation, study, and hobby projects.
+- Use by charitable organisations, educational institutions, public research bodies, public safety / health agencies, environmental protection organisations, and government institutions.
+- Self-hosting Tau for any of the above, including running the Docker image inside your own infrastructure.
+- Modifying Tau and distributing the modified source so long as recipients receive the same licence terms.
+
+**Not permitted without a separate commercial licence:**
+
+- Any commercial purpose, including using Tau (or a derivative of it) as part of a paid product, paid service, or revenue-generating business activity.
+- Hosting Tau as a managed service that you sell access to.
+- Internal use by a for-profit company for production workloads.
+
+If you need a commercial licence, open an issue or get in touch via the email associated with the repository owner. The default position is "no" unless we explicitly agree otherwise in writing.

@@ -1,41 +1,83 @@
 name: Release
 
+# Release-please opens / merges a release PR (commit message
+# `chore(master): release X.Y.Z`).  When that merge lands, this workflow
+# runs once more, sees that release-please created a GitHub Release, and
+# fans out into the docker, build, upload, and bench jobs.
+#
+# Important: GitHub does NOT fire a `release: { types: [published] }`
+# event for a release created by `GITHUB_TOKEN` from inside a workflow.
+# Chaining off `needs.release-please.outputs.release_created` is the
+# documented workaround - no PAT required.
+
 on:
   push:
     branches: [master]
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
-      include_optional_tools:
-        description: "Include additional artifacts"
+      tag:
+        description: "Existing release tag to (re)build artifacts for, e.g. v0.4.0"
         required: true
-        default: true
-        type: boolean
+        type: string
 
 permissions:
   contents: write
   pull-requests: write
+  packages: write
 
 jobs:
   release-please:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
       - uses: actions/checkout@v4
       - uses: googleapis/release-please-action@v4
+        id: release
         with:
           release-type: simple
           draft: false
 
+  # Resolve the tag this workflow run is building artifacts for, regardless
+  # of whether the trigger was `push` (via release-please) or
+  # `workflow_dispatch` (manual rebuild).  Other jobs key off
+  # `needs.gate.outputs.should_release == 'true'`.
+  gate:
+    runs-on: ubuntu-latest
+    needs: release-please
+    if: always()
+    outputs:
+      should_release: ${{ steps.decide.outputs.should_release }}
+      tag_name: ${{ steps.decide.outputs.tag_name }}
+    steps:
+      - name: Decide
+        id: decide
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+            echo "tag_name=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ needs.release-please.outputs.release_created }}" = "true" ]; then
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+            echo "tag_name=${{ needs.release-please.outputs.tag_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            echo "tag_name=" >> "$GITHUB_OUTPUT"
+          fi
+
   docker:
-    if: github.event_name == 'release'
+    needs: gate
+    if: needs.gate.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.tag_name }}
       - name: Resolve image name
         id: image
         run: |
@@ -47,21 +89,24 @@ jobs:
         run: |
           docker build -f container/Dockerfile \
             -t ${{ steps.image.outputs.name }}:latest \
-            -t ${{ steps.image.outputs.name }}:${{ github.event.release.tag_name }} \
+            -t ${{ steps.image.outputs.name }}:${{ needs.gate.outputs.tag_name }} \
             .
       - name: Push Docker image
         run: |
           docker push ${{ steps.image.outputs.name }}:latest
-          docker push ${{ steps.image.outputs.name }}:${{ github.event.release.tag_name }}
+          docker push ${{ steps.image.outputs.name }}:${{ needs.gate.outputs.tag_name }}
 
   build:
-    if: github.event_name == 'release'
+    needs: gate
+    if: needs.gate.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     strategy:
       matrix:
         target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.tag_name }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -82,20 +127,24 @@ jobs:
           path: tau-${{ matrix.target }}.tar.gz
 
   upload-release:
-    needs: build
+    needs: [gate, build]
+    if: needs.gate.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.gate.outputs.tag_name }}
           files: |
             tau-x86_64-unknown-linux-gnu/*.tar.gz
             tau-aarch64-unknown-linux-gnu/*.tar.gz
 
+  # Bench results upload as a release asset only.  The release PR body
+  # is left alone - benchmark numbers do not leak into the release notes.
   bench-release-artifact:
-    if: github.event_name == 'release'
-    needs: build
+    needs: [gate, build]
+    if: needs.gate.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -103,27 +152,27 @@ jobs:
       RUSTFLAGS: "-C target-cpu=native -C codegen-units=1"
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.tag_name }}
       - uses: dtolnay/rust-toolchain@stable
       - name: Build bench (release-bench profile)
         run: cargo build --profile release-bench --bin bench
       - name: Run bench (full grid, best-of-5)
         # Full grid covers transport (plain/TLS), auth (none/password), WAL
         # (off/on) and every workload (append, at-lookup, range, reduce).
-        # best-of-5 picks the fastest of 5 runs per cell so runner noise does
-        # not dominate. Results are uploaded as a release asset but never
-        # appended to the release notes (keeps the release PR body clean for
-        # release-please's auto-edits).
+        # best-of-5 picks the fastest of 5 runs per cell so runner noise
+        # does not dominate.
         run: |
           ./target/release-bench/bench \
             --repeat 5 \
             --ops 2000 \
             --scratch "$GITHUB_WORKSPACE/.bench-scratch" \
-            --label "${{ github.event.release.tag_name }}" \
+            --label "${{ needs.gate.outputs.tag_name }}" \
             --out bench-results.csv \
             | tee bench-results.txt
       - name: Upload bench CSV to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload "${{ github.event.release.tag_name }}" \
+          gh release upload "${{ needs.gate.outputs.tag_name }}" \
             bench-results.csv bench-results.txt --clobber
