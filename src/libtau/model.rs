@@ -110,6 +110,7 @@ mod tests {
     use hegel::TestCase;
     use hegel::generators as gs;
     use hegel::generators::Generator;
+    use pretty_assertions::assert_eq;
 
     /// Generate a valid `Tau<i32>` (start < end).  Both bounds are constrained
     /// to a manageable range so shrunken counterexamples remain readable.

@@ -368,6 +368,7 @@ mod tests {
     use hegel::TestCase;
     use hegel::generators as gs;
     use hegel::generators::Generator;
+    use pretty_assertions::assert_eq;
     use tempfile::tempdir;
 
     /// Generator over `Perm` (any of the 32 possible 5-bit bitmaps).

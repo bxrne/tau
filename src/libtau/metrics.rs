@@ -425,6 +425,7 @@ mod tests {
     use super::*;
     use hegel::TestCase;
     use hegel::generators as gs;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn counters_start_at_zero() {

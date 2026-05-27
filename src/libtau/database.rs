@@ -337,6 +337,7 @@ mod tests {
     use hegel::TestCase;
     use hegel::generators as gs;
     use hegel::generators::Generator;
+    use pretty_assertions::assert_eq;
 
     fn layer(id: u64, items: &[(i64, i64, i64)]) -> Layer<i64> {
         Layer::new(

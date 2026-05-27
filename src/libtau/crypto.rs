@@ -68,6 +68,7 @@ mod tests {
     use super::*;
     use hegel::TestCase;
     use hegel::generators as gs;
+    use pretty_assertions::assert_eq;
 
     #[hegel::test]
     fn encrypt_decrypt_roundtrips(tc: TestCase) {

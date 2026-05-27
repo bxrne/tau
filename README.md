@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/bxrne/tau/actions/workflows/ci.yml/badge.svg)](https://github.com/bxrne/tau/actions/workflows/ci.yml)
 [![Release](https://github.com/bxrne/tau/actions/workflows/release.yml/badge.svg)](https://github.com/bxrne/tau/actions/workflows/release.yml)
+[![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=bxrne_tau&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=bxrne_tau)
 
 A time-series database built on immutable, layered temporal intervals.
 
@@ -308,6 +309,16 @@ cargo build --release
 cargo test --all-features
 cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt
+```
+
+## Testing
+
+Tests take quite a while sequentially, a better test runner with a nicer ui like `nextest` is recommended.
+
+```bash
+cargo install --locked cargo-nextest
+
+cargo nextest run
 ```
 
 Toolchain is pinned to Rust **1.94.1** (edition 2024) via `rust-toolchain.toml`. CI runs fmt -> build -> clippy -> tests.

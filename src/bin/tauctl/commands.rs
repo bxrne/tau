@@ -355,6 +355,7 @@ pub fn connections_command() -> Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     fn echo_listener() -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
         use std::io::{BufRead, BufReader, Write};

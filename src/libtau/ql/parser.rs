@@ -570,6 +570,7 @@ mod tests {
     use hegel::TestCase;
     use hegel::generators as gs;
     use hegel::generators::Generator;
+    use pretty_assertions::assert_eq;
 
     fn parsed(input: &str) -> Stmt {
         let (rest, s) = parse(input).expect("parse failed");
