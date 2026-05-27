@@ -1,0 +1,57 @@
+# The URL the site will be built for
+base_url = "https://tau.bxrne.com"
+
+title = "Tau docs"
+description = "Minimal docs for the Tau time series engine."
+default_language = "en"
+
+theme = "zerm"
+
+# Whether to automatically compile all Sass files in the sass directory
+compile_sass = true
+
+# Whether to build a search index to be used later on by a JavaScript library
+build_search_index = true
+generate_sitemap = true
+
+taxonomies = [
+  { name = "tags" },
+  { name = "categories" },
+]
+
+[markdown]
+
+[markdown.highlighting]
+theme = "catppuccin-mocha"
+
+[search]
+index_format = "elasticlunr_javascript"
+
+[extra]
+author = "Tau Team"
+show_author = false
+show_categories = true
+show_tags = true
+
+theme_color = "orange"
+custom_css = "custom.css"
+
+show_menu_items = 10
+menu_more = "more"
+read_more = "read more"
+
+full_width = true
+
+logo_text = "tau"
+logo_home_link = "/"
+
+main_menu = [
+  { url = "/about/", name = "about" },
+  { url = "/contact/", name = "contact" },
+  { url = "/posts/", name = "guides" },
+  { url = "/changelog/", name = "changelog" },
+  { url = "/search/", name = "search" },
+  { url = "https://github.com/bxrne/tau", name = "GitHub", external = true },
+]
+
+copyright = "©2026 Adam Byrne"

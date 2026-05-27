@@ -1,0 +1,25 @@
+{% import "macros/head.html" as head -%}
+{% extends "index.html" -%}
+
+{%- block title %}
+    <title>Search - {{ config.title }}</title>
+{%- endblock title -%}
+
+{%- block main -%}
+    <article class="post">
+        <header>
+            <h1 class="post-title">
+                <a href="{{ current_url }}">Search</a>
+            </h1>
+        </header>
+
+        <div class="search">
+            <input id="search-input" class="search-input" type="search" placeholder="Search the docs" autofocus>
+            <div id="search-results" class="search-results"></div>
+        </div>
+    </article>
+
+    <script defer src="{{ get_url(path="elasticlunr.min.js") }}"></script>
+    <script defer src="{{ get_url(path="search_index." ~ lang ~ ".js") }}"></script>
+    <script defer src="{{ get_url(path="search.js") }}"></script>
+{%- endblock main -%}
