@@ -1280,6 +1280,7 @@ fn numeric_min_max(a: Value, b: Value, want_max: bool) -> Result<Value, ExecErro
 mod tests {
     use super::*;
     use crate::libtau::ql::parse;
+    use pretty_assertions::assert_eq;
 
     /// Parse + run.  Panics on parse failure; returns `Result` on exec.
     fn run(exec: &mut Executor, q: &str) -> Result<Output, ExecError> {

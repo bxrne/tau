@@ -186,6 +186,7 @@ fn format_elapsed(elapsed: Duration) -> String {
 mod tests {
     use super::*;
     use crate::commands::{Command, Registry};
+    use pretty_assertions::assert_eq;
     use std::cell::Cell;
     use std::io::{BufRead, BufReader, Write};
     use std::net::{SocketAddr, TcpListener};

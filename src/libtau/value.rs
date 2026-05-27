@@ -161,6 +161,7 @@ mod tests {
     use hegel::TestCase;
     use hegel::generators as gs;
     use hegel::generators::Generator;
+    use pretty_assertions::assert_eq;
 
     /// Generator over every `Value` variant.  Strings stay small and finite to
     /// keep counterexamples readable; floats avoid NaN because round-trip

@@ -67,6 +67,7 @@ mod tests {
     use hegel::TestCase;
     use hegel::generators as gs;
     use hegel::generators::Generator;
+    use pretty_assertions::{assert_eq, assert_ne};
 
     /// Generator over a non-overlapping `Vec<Tau<i8>>`.  Small `i8` values
     /// produce frequent equality, which exercises the adjacent-merge code.

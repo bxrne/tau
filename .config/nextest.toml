@@ -1,0 +1,52 @@
+# cargo-nextest config.
+#
+# Install:  cargo install cargo-nextest --locked
+# Run:      cargo nextest run --release
+#
+# Nextest runs each test in its own process so a panic in one cannot pollute
+# another, and groups output by status with categories at the end.  This is
+# noticeably nicer than `cargo test` for Hegel-heavy suites since failures
+# get isolated panic traces and successes don't drown them out.
+
+[profile.default]
+# Each `#[hegel::test]` runs ~100 randomized cases and can call into the
+# filesystem (tempfile + WAL).  Give them headroom so the slow-test footer
+# doesn't fire on every storage property.
+slow-timeout = { period = "30s", terminate-after = 3 }
+
+# Retries are off by default - tests should be deterministic.  If a flaky
+# integration test slips in, set this to 1 here rather than scattering
+# `#[ignore]` markers.
+retries = 0
+
+# Print every test result, not just failures.  For local dev this matches
+# the usual `cargo test` mental model.
+status-level = "pass"
+final-status-level = "fail"
+
+# Output captured stdout/stderr only on failure - mirrors `cargo test`.
+success-output = "never"
+failure-output = "immediate-final"
+
+# Categorise tests by binary in the summary.  Useful when one of the bin
+# crates fails so you can spot it without scrolling.
+fail-fast = false
+
+[profile.ci]
+# Tighter profile for CI: fail fast and surface output of every failure
+# inline so the GitHub Actions log shows the panic without a click.
+slow-timeout = { period = "60s", terminate-after = 2 }
+retries = 0
+failure-output = "immediate-final"
+fail-fast = true
+status-level = "fail"
+final-status-level = "fail"
+
+# Run the lib test binary at lower concurrency than default - each Hegel
+# property test internally fans out to 100+ shrinking iterations, so packing
+# the host CPU with parallel test binaries actually slows the total wall
+# clock.
+[[profile.ci.overrides]]
+filter = "binary(tau)"
+test-group = "@global"
+threads-required = 2

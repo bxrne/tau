@@ -652,6 +652,7 @@ mod tests {
     use hegel::TestCase;
     use hegel::generators as gs;
     use hegel::generators::Generator;
+    use pretty_assertions::assert_eq;
     use tau::Stmt;
 
     fn exec() -> Arc<RwLock<Executor>> {
