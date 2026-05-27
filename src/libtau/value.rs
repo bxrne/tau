@@ -158,90 +158,116 @@ impl Codec for Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hegel::TestCase;
+    use hegel::generators as gs;
+    use hegel::generators::Generator;
 
-    #[test]
-    fn type_name_matches_variant() {
-        assert_eq!(Value::Int(1).type_name(), "int");
-        assert_eq!(Value::Float(1.0).type_name(), "float");
-        assert_eq!(Value::Str("x".into()).type_name(), "str");
-        assert_eq!(Value::Bool(true).type_name(), "bool");
-        assert_eq!(Value::Null.type_name(), "null");
+    /// Generator over every `Value` variant.  Strings stay small and finite to
+    /// keep counterexamples readable; floats avoid NaN because round-trip
+    /// equality on NaN is intentionally false.
+    fn value_gen() -> impl Generator<Value> {
+        gs::one_of(vec![
+            gs::integers::<i64>().map(Value::Int).boxed(),
+            gs::floats::<f64>()
+                .filter(|f| !f.is_nan())
+                .map(Value::Float)
+                .boxed(),
+            gs::text()
+                .max_size(64)
+                .map(|s| Value::Str(Arc::from(s.as_str())))
+                .boxed(),
+            gs::booleans().map(Value::Bool).boxed(),
+            gs::just(Value::Null).boxed(),
+        ])
     }
 
-    #[test]
-    fn ty_returns_type_or_none_for_null() {
-        assert_eq!(Value::Int(0).ty(), Some(Type::Int));
-        assert_eq!(Value::Float(0.0).ty(), Some(Type::Float));
-        assert_eq!(Value::Str("".into()).ty(), Some(Type::Str));
-        assert_eq!(Value::Bool(false).ty(), Some(Type::Bool));
-        assert_eq!(Value::Null.ty(), None);
+    #[hegel::test]
+    fn type_name_matches_variant(tc: TestCase) {
+        let v = tc.draw(value_gen());
+        let expected = match &v {
+            Value::Int(_) => "int",
+            Value::Float(_) => "float",
+            Value::Str(_) => "str",
+            Value::Bool(_) => "bool",
+            Value::Null => "null",
+        };
+        assert_eq!(v.type_name(), expected);
     }
 
-    #[test]
-    fn from_literal_preserves_payload() {
-        assert_eq!(Value::from(Literal::Int(42)), Value::Int(42));
-        assert_eq!(Value::from(Literal::Float(1.5)), Value::Float(1.5));
-        assert_eq!(
-            Value::from(Literal::Str("hi".into())),
-            Value::Str("hi".into())
-        );
-        assert_eq!(Value::from(Literal::Bool(true)), Value::Bool(true));
-        assert_eq!(Value::from(Literal::Null), Value::Null);
+    #[hegel::test]
+    fn ty_returns_type_for_non_null(tc: TestCase) {
+        let v = tc.draw(value_gen());
+        match (&v, v.ty()) {
+            (Value::Int(_), Some(Type::Int)) => {}
+            (Value::Float(_), Some(Type::Float)) => {}
+            (Value::Str(_), Some(Type::Str)) => {}
+            (Value::Bool(_), Some(Type::Bool)) => {}
+            (Value::Null, None) => {}
+            (val, ty) => panic!("mismatch: {:?} -> {:?}", val, ty),
+        }
     }
 
-    #[test]
-    fn codec_int_round_trip() {
-        let v = Value::Int(-12345);
-        assert_eq!(Value::decode(&v.encode()), Some(v));
+    #[hegel::test]
+    fn from_literal_owned_and_ref_agree(tc: TestCase) {
+        let v = tc.draw(value_gen());
+        let lit: Literal = match v.clone() {
+            Value::Int(i) => Literal::Int(i),
+            Value::Float(f) => Literal::Float(f),
+            Value::Str(s) => Literal::Str(s),
+            Value::Bool(b) => Literal::Bool(b),
+            Value::Null => Literal::Null,
+        };
+        let owned: Value = Value::from(lit.clone());
+        let by_ref: Value = Value::from(&lit);
+        assert_eq!(owned, v);
+        assert_eq!(by_ref, v);
     }
 
-    #[test]
-    fn codec_float_round_trip() {
-        let v = Value::Float(1.23456);
-        assert_eq!(Value::decode(&v.encode()), Some(v));
+    #[hegel::test]
+    fn codec_roundtrips_every_value(tc: TestCase) {
+        let v = tc.draw(value_gen());
+        // Float NaN is filtered out by the generator; for everything else
+        // PartialEq must hold across encode + decode.
+        let encoded = v.encode();
+        let decoded = Value::decode(&encoded).expect("decode must succeed for produced encoding");
+        assert_eq!(v, decoded);
     }
 
-    #[test]
-    fn codec_bool_round_trip() {
-        assert_eq!(Value::decode("b1"), Some(Value::Bool(true)));
-        assert_eq!(Value::decode("b0"), Some(Value::Bool(false)));
-    }
-
-    #[test]
-    fn codec_null_round_trip() {
-        assert_eq!(Value::decode("n"), Some(Value::Null));
-        assert_eq!(Value::Null.encode(), "n");
-    }
-
-    #[test]
-    fn codec_str_escapes_space_colon_percent() {
-        let v = Value::Str("a b:c%d".into());
+    #[hegel::test]
+    fn codec_str_encoding_never_contains_separators(tc: TestCase) {
+        let s = tc.draw(gs::text().max_size(128));
+        let v = Value::Str(Arc::from(s.as_str()));
         let enc = v.encode();
-        assert!(!enc.contains(' '));
-        assert!(!enc.contains(':'));
-        // The escape character is allowed; only the *literal* % from the value
-        // is escaped - the escapes themselves contain `%`.
-        assert_eq!(Value::decode(&enc), Some(v));
+        // The WAL line format uses space and colon as separators - neither
+        // may appear in an encoded value or replay would mis-tokenise.
+        assert!(
+            !enc[1..].contains(' '),
+            "encoded str must not contain raw space: {enc:?}"
+        );
+        assert!(
+            !enc[1..].contains(':'),
+            "encoded str must not contain raw colon: {enc:?}"
+        );
     }
 
-    #[test]
-    fn codec_str_empty_round_trip() {
-        let v = Value::Str(Arc::from(""));
-        assert_eq!(Value::decode(&v.encode()), Some(v));
+    #[hegel::test]
+    fn codec_decode_never_panics_on_arbitrary_input(tc: TestCase) {
+        let s = tc.draw(gs::text().max_size(128));
+        let _ = Value::decode(&s);
     }
 
-    #[test]
-    fn codec_rejects_unknown_tag() {
-        assert_eq!(Value::decode("z42"), None);
-    }
-
-    #[test]
-    fn codec_rejects_malformed_bool() {
-        assert_eq!(Value::decode("b2"), None);
-    }
-
-    #[test]
-    fn codec_rejects_null_with_payload() {
-        assert_eq!(Value::decode("nx"), None);
+    #[hegel::test]
+    fn codec_rejects_unknown_or_malformed_tags(tc: TestCase) {
+        // Any first byte outside the known tag set must yield None.
+        let known: [char; 5] = ['i', 'f', 's', 'b', 'n'];
+        let tag = tc.draw(gs::characters().filter(move |c| !known.contains(c)));
+        let payload = tc.draw(gs::text().max_size(16));
+        let mut bytes = String::with_capacity(payload.len() + 4);
+        bytes.push(tag);
+        bytes.push_str(&payload);
+        assert!(
+            Value::decode(&bytes).is_none(),
+            "tag {tag:?} should be rejected"
+        );
     }
 }

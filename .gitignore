@@ -2,3 +2,4 @@
 *.wal
 /store.dat
 /thermostat.disk
+/.hegel

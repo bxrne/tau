@@ -443,110 +443,180 @@ impl<V: Clone + PartialEq + Codec + Send + Sync + 'static> Store<V> for Disk<V> 
 mod tests {
     use super::*;
     use crate::libtau::model::Tau;
+    use hegel::TestCase;
+    use hegel::generators as gs;
+    use hegel::generators::Generator;
     use tempfile::NamedTempFile;
 
-    fn layer(id: u64, items: &[(i64, i64, i32)]) -> Layer<i32> {
-        Layer::new(
-            id,
-            items.iter().map(|&(s, e, v)| Tau::new(s, e, v)).collect(),
+    /// Generator over a sorted, non-overlapping `Vec<Tau<i32>>`.
+    fn taus_gen() -> impl Generator<Vec<Tau<i32>>> {
+        gs::vecs(
+            gs::integers::<i64>()
+                .min_value(1)
+                .max_value(50)
+                .flat_map(|width| {
+                    gs::integers::<i64>()
+                        .min_value(0)
+                        .max_value(20)
+                        .flat_map(move |gap| gs::integers::<i32>().map(move |v| (width, gap, v)))
+                }),
         )
+        .min_size(1)
+        .max_size(8)
+        .map(|specs| {
+            let mut taus = Vec::with_capacity(specs.len());
+            let mut cursor: i64 = 0;
+            for (width, gap, v) in specs {
+                let s = cursor + gap;
+                let e = s + width;
+                taus.push(Tau::new(s, e, v));
+                cursor = e;
+            }
+            taus
+        })
     }
 
-    #[test]
-    fn create_and_append() {
+    fn lens_name_gen() -> impl Generator<String> {
+        gs::from_regex("[a-z][a-z0-9_]{0,8}").fullmatch(true)
+    }
+
+    #[hegel::test]
+    fn create_append_at_matches_in_memory(tc: TestCase) {
+        let lens = tc.draw(lens_name_gen());
+        let layer = Layer::new(1, tc.draw(taus_gen()));
+        let probe = tc.draw(gs::integers::<i64>().min_value(-10).max_value(2000));
         let tmp = NamedTempFile::new().unwrap();
         let mut store = Disk::create(tmp.path(), None).unwrap();
-        store.append("x", layer(1, &[(0, 10, 42)])).unwrap();
-        assert_eq!(store.at("x", 5), Some(42));
-        assert_eq!(store.at("x", 10), None);
+        store.append(&lens, layer.clone()).unwrap();
+
+        let expected = layer
+            .taus
+            .iter()
+            .find(|t| t.contains(probe))
+            .map(|t| t.value);
+        assert_eq!(store.at(&lens, probe), expected);
     }
 
-    #[test]
-    fn open_replays_data() {
+    #[hegel::test]
+    fn open_after_flush_replays_data_unencrypted(tc: TestCase) {
+        let lens = tc.draw(lens_name_gen());
+        let layer = Layer::new(1, tc.draw(taus_gen()));
+        let probe = tc.draw(gs::integers::<i64>().min_value(-10).max_value(2000));
         let tmp = NamedTempFile::new().unwrap();
         {
             let mut store = Disk::create(tmp.path(), None).unwrap();
-            store.append("x", layer(1, &[(0, 10, 42)])).unwrap();
+            store.append(&lens, layer.clone()).unwrap();
             store.flush().unwrap();
         }
-
-        let store = Disk::open(tmp.path(), None).unwrap();
-        assert_eq!(store.at("x", 5), Some(42));
+        let store: Disk<i32> = Disk::open(tmp.path(), None).unwrap();
+        let expected = layer
+            .taus
+            .iter()
+            .find(|t| t.contains(probe))
+            .map(|t| t.value);
+        assert_eq!(store.at(&lens, probe), expected);
     }
 
-    #[test]
-    fn multiple_layers_shadow() {
+    #[hegel::test]
+    fn open_after_flush_replays_data_encrypted(tc: TestCase) {
+        let key_bytes = tc.draw(gs::vecs(gs::integers::<u8>()).min_size(32).max_size(32));
+        let lens = tc.draw(lens_name_gen());
+        let layer = Layer::new(1, tc.draw(taus_gen()));
+        let probe = tc.draw(gs::integers::<i64>().min_value(-10).max_value(2000));
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&key_bytes);
         let tmp = NamedTempFile::new().unwrap();
         {
-            let mut store = Disk::create(tmp.path(), None).unwrap();
-            store.append("s", layer(1, &[(0, 20, 1)])).unwrap();
-            store.append("s", layer(2, &[(5, 15, 2)])).unwrap();
+            let mut store = Disk::create(tmp.path(), Some(key)).unwrap();
+            store.append(&lens, layer.clone()).unwrap();
             store.flush().unwrap();
         }
+        // Encrypted file must start with `TAUE`.
+        let raw = fs::read(tmp.path()).unwrap();
+        assert_eq!(&raw[..4], b"TAUE");
 
-        let store = Disk::open(tmp.path(), None).unwrap();
-        assert_eq!(store.at("s", 3), Some(1));
-        assert_eq!(store.at("s", 7), Some(2));
-        assert_eq!(store.at("s", 17), Some(1));
+        let store: Disk<i32> = Disk::open(tmp.path(), Some(key)).unwrap();
+        let expected = layer
+            .taus
+            .iter()
+            .find(|t| t.contains(probe))
+            .map(|t| t.value);
+        assert_eq!(store.at(&lens, probe), expected);
     }
 
-    #[test]
-    fn multiple_lenses_independent() {
+    #[hegel::test]
+    fn encrypted_file_rejects_open_without_key(tc: TestCase) {
+        let key_bytes = tc.draw(gs::vecs(gs::integers::<u8>()).min_size(32).max_size(32));
+        let lens = tc.draw(lens_name_gen());
+        let layer = Layer::new(1, tc.draw(taus_gen()));
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&key_bytes);
         let tmp = NamedTempFile::new().unwrap();
         {
-            let mut store = Disk::create(tmp.path(), None).unwrap();
-            store.append("a", layer(1, &[(0, 10, 1)])).unwrap();
-            store.append("b", layer(1, &[(0, 10, 2)])).unwrap();
+            let mut store = Disk::create(tmp.path(), Some(key)).unwrap();
+            store.append(&lens, layer).unwrap();
             store.flush().unwrap();
         }
-
-        let store = Disk::open(tmp.path(), None).unwrap();
-        assert_eq!(store.at("a", 5), Some(1));
-        assert_eq!(store.at("b", 5), Some(2));
-    }
-
-    #[test]
-    fn invalid_magic_returns_error() {
-        let tmp = NamedTempFile::new().unwrap();
-        // Write garbage header
-        fs::write(tmp.path(), b"GARB").unwrap();
-        let result = Disk::<i32>::open(tmp.path(), None);
+        let result: io::Result<Disk<i32>> = Disk::open(tmp.path(), None);
         assert!(result.is_err());
     }
 
-    #[test]
-    fn encrypted_create_and_flush_roundtrip() {
-        let key = [0x77u8; 32];
+    #[hegel::test]
+    fn encrypted_file_rejects_open_with_wrong_key(tc: TestCase) {
+        let lens = tc.draw(lens_name_gen());
+        let layer = Layer::new(1, tc.draw(taus_gen()));
+        let key_a = [0xAAu8; 32];
+        let key_b = [0xBBu8; 32];
         let tmp = NamedTempFile::new().unwrap();
         {
-            let mut store = Disk::create(tmp.path(), Some(key)).unwrap();
-            store.append("x", layer(1, &[(0, 10, 42)])).unwrap();
+            let mut store = Disk::create(tmp.path(), Some(key_a)).unwrap();
+            store.append(&lens, layer).unwrap();
             store.flush().unwrap();
         }
-
-        // Raw file must start with TAUE magic
-        let raw = fs::read(tmp.path()).unwrap();
-        assert_eq!(&raw[..4], b"TAUE", "encrypted file must start with TAUE");
-
-        // Re-open with key - data must be intact
-        let store = Disk::open(tmp.path(), Some(key)).unwrap();
-        assert_eq!(store.at("x", 5), Some(42));
+        let result: io::Result<Disk<i32>> = Disk::open(tmp.path(), Some(key_b));
+        assert!(result.is_err());
     }
 
-    #[test]
-    fn encrypted_open_without_key_returns_error() {
-        let key = [0x88u8; 32];
+    #[hegel::test]
+    fn invalid_magic_rejected(tc: TestCase) {
+        // Any 4-byte preamble that is neither "TAU" + version nor "TAUE" must
+        // be rejected.  We generate junk bytes whose first 4 are not the
+        // valid magic.
+        let bytes = tc.draw(gs::vecs(gs::integers::<u8>()).min_size(4).max_size(64));
+        if &bytes[..3] == b"TAU" {
+            return; // skip valid prefixes (rare but possible)
+        }
+        let tmp = NamedTempFile::new().unwrap();
+        fs::write(tmp.path(), &bytes).unwrap();
+        let result: io::Result<Disk<i32>> = Disk::open(tmp.path(), None);
+        assert!(result.is_err());
+    }
+
+    #[hegel::test]
+    fn multiple_lenses_round_trip(tc: TestCase) {
+        let entries: Vec<(String, Layer<i32>)> = (0..3)
+            .map(|i| {
+                let mut name = tc.draw(lens_name_gen());
+                let layer = Layer::new(1, tc.draw(taus_gen()));
+                // disambiguate names by suffix so we always get N distinct lenses
+                name.push_str(&i.to_string());
+                (name, layer)
+            })
+            .collect();
         let tmp = NamedTempFile::new().unwrap();
         {
-            let mut store = Disk::create(tmp.path(), Some(key)).unwrap();
-            store.append("x", layer(1, &[(0, 10, 1)])).unwrap();
+            let mut store = Disk::create(tmp.path(), None).unwrap();
+            for (name, layer) in &entries {
+                store.append(name, layer.clone()).unwrap();
+            }
             store.flush().unwrap();
         }
-
-        let result = Disk::<i32>::open(tmp.path(), None);
-        assert!(
-            result.is_err(),
-            "opening encrypted file without key must fail"
-        );
+        let store: Disk<i32> = Disk::open(tmp.path(), None).unwrap();
+        for (name, layer) in &entries {
+            // Probe somewhere inside the layer's range.
+            let t = layer.min_start;
+            let expected = layer.at(t).copied();
+            assert_eq!(store.at(name, t), expected);
+        }
     }
 }

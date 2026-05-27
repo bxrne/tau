@@ -49,27 +49,32 @@ pub fn bold(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hegel::TestCase;
+    use hegel::generators as gs;
 
-    #[test]
-    fn paint_with_enabled_wraps_in_escape_sequence() {
-        assert_eq!(paint_with(true, "36", "hi"), "\x1b[36mhi\x1b[0m");
+    #[hegel::test]
+    fn paint_with_disabled_is_identity(tc: TestCase) {
+        let seq = tc.draw(gs::from_regex("[0-9]{1,3}").fullmatch(true));
+        let s = tc.draw(gs::text().max_size(64));
+        assert_eq!(paint_with(false, &seq, &s), s);
     }
 
-    #[test]
-    fn paint_with_disabled_returns_plain_string() {
-        assert_eq!(paint_with(false, "36", "hi"), "hi");
-    }
-
-    #[test]
-    fn paint_with_handles_empty_input() {
-        assert_eq!(paint_with(true, "31", ""), "\x1b[31m\x1b[0m");
-        assert_eq!(paint_with(false, "31", ""), "");
+    #[hegel::test]
+    fn paint_with_enabled_wraps_in_csi(tc: TestCase) {
+        let seq = tc.draw(gs::from_regex("[0-9]{1,3}").fullmatch(true));
+        let s = tc.draw(gs::text().max_size(64));
+        let painted = paint_with(true, &seq, &s);
+        assert_eq!(painted, format!("\x1b[{seq}m{s}\x1b[0m"));
+        // And the body is always recoverable by stripping the CSI/reset pair.
+        let body = painted
+            .strip_prefix(&format!("\x1b[{seq}m"))
+            .and_then(|x| x.strip_suffix("\x1b[0m"))
+            .unwrap();
+        assert_eq!(body, s);
     }
 
     #[test]
     fn helpers_use_distinct_color_codes() {
-        // Force-enable via paint_with so the assertions are deterministic
-        // regardless of how the test binary's stdout is wired up.
         assert!(paint_with(true, "36", "x").contains("[36m"));
         assert!(paint_with(true, "31", "x").contains("[31m"));
         assert!(paint_with(true, "2", "x").contains("[2m"));

@@ -62,3 +62,37 @@ pub fn decrypt(key: &[u8; 32], blob: &[u8]) -> io::Result<Vec<u8>> {
         )
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hegel::TestCase;
+    use hegel::generators as gs;
+
+    #[hegel::test]
+    fn encrypt_decrypt_roundtrips(tc: TestCase) {
+        let key_bytes = tc.draw(gs::vecs(gs::integers::<u8>()).min_size(32).max_size(32));
+        let plaintext = tc.draw(gs::vecs(gs::integers::<u8>()).max_size(2048));
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&key_bytes);
+        let cipher = encrypt(&key, &plaintext);
+        let recovered = decrypt(&key, &cipher).expect("decrypt must succeed on its own ciphertext");
+        assert_eq!(plaintext, recovered);
+    }
+
+    #[hegel::test]
+    fn decrypt_rejects_too_short_blobs(tc: TestCase) {
+        let blob = tc.draw(gs::vecs(gs::integers::<u8>()).max_size(11));
+        let key = [0u8; 32];
+        assert!(decrypt(&key, &blob).is_err());
+    }
+
+    #[hegel::test]
+    fn decrypt_rejects_wrong_key(tc: TestCase) {
+        let plaintext = tc.draw(gs::vecs(gs::integers::<u8>()).min_size(1).max_size(512));
+        let key_a = [0x11u8; 32];
+        let key_b = [0x22u8; 32];
+        let cipher = encrypt(&key_a, &plaintext);
+        assert!(decrypt(&key_b, &cipher).is_err());
+    }
+}

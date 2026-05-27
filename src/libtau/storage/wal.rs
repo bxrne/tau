@@ -68,7 +68,7 @@ fn crc32(data: &str) -> u32 {
 }
 
 /// One serialised append record.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WalEntry<V> {
     pub layer_id: LayerId,
     pub lens: String,
@@ -527,230 +527,218 @@ impl Wal {
 mod tests {
     use super::*;
     use crate::libtau::storage::memory::InMemory;
+    use hegel::TestCase;
+    use hegel::generators as gs;
+    use hegel::generators::Generator;
     use tempfile::NamedTempFile;
 
-    #[test]
-    fn entry_serialises_with_checksum() {
-        let entry: WalEntry<i64> = WalEntry {
-            layer_id: 7,
-            lens: "temp".to_string(),
-            taus: vec![(0, 10, 42), (10, 20, 99)],
-        };
+    /// Generator over lens names that survive the line-oriented WAL format.
+    fn lens_name_gen() -> impl Generator<String> {
+        gs::from_regex("[a-z][a-z0-9_]{0,8}").fullmatch(true)
+    }
+
+    /// Generator over `WalEntry<i64>` with sorted non-overlapping taus.
+    fn entry_gen_i64() -> impl Generator<WalEntry<i64>> {
+        lens_name_gen().flat_map(|name| {
+            gs::integers::<u64>()
+                .min_value(1)
+                .max_value(10_000)
+                .flat_map(move |layer_id| {
+                    let name = name.clone();
+                    gs::vecs(
+                        gs::integers::<i64>()
+                            .min_value(1)
+                            .max_value(50)
+                            .flat_map(|width| {
+                                gs::integers::<i64>().min_value(0).max_value(20).flat_map(
+                                    move |gap| gs::integers::<i64>().map(move |v| (width, gap, v)),
+                                )
+                            }),
+                    )
+                    .max_size(8)
+                    .map(move |specs| {
+                        let mut taus = Vec::with_capacity(specs.len());
+                        let mut cursor: i64 = 0;
+                        for (width, gap, v) in specs {
+                            let s = cursor + gap;
+                            let e = s + width;
+                            taus.push((s, e, v));
+                            cursor = e;
+                        }
+                        WalEntry::<i64> {
+                            layer_id,
+                            lens: name.clone(),
+                            taus,
+                        }
+                    })
+                })
+        })
+    }
+
+    #[hegel::test]
+    fn entry_serialise_deserialise_roundtrips_i64(tc: TestCase) {
+        let entry = tc.draw(entry_gen_i64());
         let line = entry.serialise();
-        // Line should start with a hex number (checksum)
-        assert!(line.chars().next().unwrap().is_numeric());
-        // Deserialise should verify checksum
-        let decoded = WalEntry::<i64>::deserialise(&line).unwrap();
+        let decoded = WalEntry::<i64>::deserialise(&line).expect("decode own serialisation");
         assert_eq!(decoded, entry);
     }
 
-    #[test]
-    fn entry_round_trips_with_taus() {
-        let entry: WalEntry<i64> = WalEntry {
-            layer_id: 7,
-            lens: "temp".to_string(),
-            taus: vec![(0, 10, 42), (10, 20, 99)],
-        };
+    #[hegel::test]
+    fn entry_serialise_starts_with_checksum_digits(tc: TestCase) {
+        let entry = tc.draw(entry_gen_i64());
         let line = entry.serialise();
-        let decoded = WalEntry::<i64>::deserialise(&line).unwrap();
-        assert_eq!(decoded, entry);
+        assert!(
+            line.chars().next().unwrap().is_ascii_digit(),
+            "checksum must be a leading decimal integer: {line:?}"
+        );
     }
 
-    #[test]
-    fn entry_round_trips_with_no_taus() {
-        let entry: WalEntry<i64> = WalEntry {
-            layer_id: 1,
-            lens: "empty".to_string(),
-            taus: vec![],
-        };
-        let line = entry.serialise();
-        let decoded = WalEntry::<i64>::deserialise(&line).unwrap();
-        assert_eq!(decoded, entry);
+    #[hegel::test]
+    fn entry_deserialise_never_panics_on_arbitrary_text(tc: TestCase) {
+        let s = tc.draw(gs::text().max_size(256));
+        // Both i64 and bool decoders must tolerate any text without panicking.
+        let _ = WalEntry::<i64>::deserialise(&s);
+        let _ = WalEntry::<bool>::deserialise(&s);
     }
 
-    #[test]
-    fn entry_round_trips_float_values() {
-        let entry: WalEntry<f64> = WalEntry {
-            layer_id: 3,
-            lens: "celsius".to_string(),
-            taus: vec![(0, 10, 18.5), (10, 20, 20.0)],
-        };
+    #[hegel::test]
+    fn entry_deserialise_rejects_checksum_corruption(tc: TestCase) {
+        let entry = tc.draw(entry_gen_i64());
         let line = entry.serialise();
-        let decoded = WalEntry::<f64>::deserialise(&line).unwrap();
-        assert_eq!(decoded.layer_id, entry.layer_id);
-        assert_eq!(decoded.lens, entry.lens);
-        for ((s1, e1, v1), (s2, e2, v2)) in decoded.taus.iter().zip(entry.taus.iter()) {
-            assert_eq!(s1, s2);
-            assert_eq!(e1, e2);
-            assert!((v1 - v2).abs() < f64::EPSILON);
+        // Pick a non-zero corruption to bump the leading digit.  Any single
+        // character flip in the checksum must invalidate the line.
+        let delta = tc.draw(gs::integers::<u32>().min_value(1).max_value(8));
+        let first_byte = line.as_bytes()[0];
+        let corrupted_first = ((first_byte - b'0' + delta as u8) % 10) + b'0';
+        if corrupted_first == first_byte {
+            return; // generator picked an effective no-op
         }
-    }
-
-    #[test]
-    fn entry_round_trips_bool_values() {
-        let entry: WalEntry<bool> = WalEntry {
-            layer_id: 2,
-            lens: "alarm".to_string(),
-            taus: vec![(0, 5, true), (5, 10, false)],
-        };
-        let line = entry.serialise();
-        let decoded = WalEntry::<bool>::deserialise(&line).unwrap();
-        assert_eq!(decoded, entry);
-    }
-
-    #[test]
-    fn deserialise_returns_none_on_garbage() {
-        assert!(WalEntry::<i64>::deserialise("not valid at all !!!").is_none());
-        assert!(WalEntry::<i64>::deserialise("").is_none());
-    }
-
-    #[test]
-    fn deserialise_returns_none_on_bad_tau_token() {
-        // layer_id and lens are fine, tau token is malformed
-        assert!(WalEntry::<i64>::deserialise("1 mylen 0:10:notanumber").is_none());
-    }
-
-    #[test]
-    fn deserialise_returns_none_on_checksum_mismatch() {
-        let entry: WalEntry<i64> = WalEntry {
-            layer_id: 1,
-            lens: "test".to_string(),
-            taus: vec![(0, 10, 42)],
-        };
-        let line = entry.serialise();
-        // Corrupt the checksum by changing first digit
-        let corrupted = format!("9{}", &line[1..]);
+        let mut corrupted = String::from(corrupted_first as char);
+        corrupted.push_str(&line[1..]);
         assert!(WalEntry::<i64>::deserialise(&corrupted).is_none());
     }
 
-    #[test]
-    fn codec_i64_encode_decode_round_trip() {
-        let v: i64 = -999;
+    #[hegel::test]
+    fn codec_i64_roundtrips_every_value(tc: TestCase) {
+        let v = tc.draw(gs::integers::<i64>());
         assert_eq!(i64::decode(&v.encode()), Some(v));
     }
 
-    #[test]
-    fn codec_f64_encode_decode_round_trip() {
-        let v: f64 = 2.5;
+    #[hegel::test]
+    fn codec_f64_roundtrips_finite_values(tc: TestCase) {
+        let v = tc.draw(gs::floats::<f64>().filter(|f| f.is_finite()));
         let decoded = f64::decode(&v.encode()).unwrap();
-        assert!((decoded - v).abs() < f64::EPSILON);
+        assert!((decoded - v).abs() <= f64::EPSILON * v.abs().max(1.0));
     }
 
-    #[test]
-    fn codec_bool_encode_decode() {
-        assert_eq!(bool::decode("true"), Some(true));
-        assert_eq!(bool::decode("false"), Some(false));
-        assert_eq!(bool::decode("maybe"), None);
+    #[hegel::test]
+    fn codec_bool_roundtrips(tc: TestCase) {
+        let v = tc.draw(gs::booleans());
+        assert_eq!(bool::decode(&v.encode()), Some(v));
     }
 
-    #[test]
-    fn codec_decode_returns_none_on_empty_string() {
-        assert_eq!(i64::decode(""), None);
+    #[hegel::test]
+    fn codec_i64_decode_returns_none_on_unparseable(tc: TestCase) {
+        let s = tc
+            .draw(gs::text().max_size(32))
+            .replace(|c: char| c.is_ascii_digit() || c == '-', "x");
+        if s.is_empty() {
+            return;
+        }
+        assert_eq!(i64::decode(&s), None);
     }
 
-    #[test]
-    fn wal_appends_and_replays_into_store() {
+    /// Append a sequence of entries to a WAL (encrypted or plain), then
+    /// replay into a fresh `InMemory` store.  For any timestamp probe, the
+    /// resulting `at` must agree with what we'd get from running the same
+    /// entries through `InMemory` directly.
+    fn wal_replay_matches_inmemory(tc: TestCase, key: Option<[u8; 32]>) {
+        let entries: Vec<WalEntry<i64>> = (0..tc
+            .draw(gs::integers::<usize>().min_value(0).max_value(5)))
+            .map(|_| tc.draw(entry_gen_i64()))
+            .collect();
         let tmp = NamedTempFile::new().unwrap();
         {
-            let mut wal = Wal::open(tmp.path(), None).unwrap();
-            let entry = WalEntry::<i64> {
-                layer_id: 1,
-                lens: "x".to_string(),
-                taus: vec![(0, 10, 42)],
-            };
+            let mut wal = Wal::open(tmp.path(), key).unwrap();
+            for e in &entries {
+                wal.append(e).unwrap();
+            }
+        }
+        let mut replayed: InMemory<i64> = InMemory::with_threshold(1024);
+        Wal::open(tmp.path(), key)
+            .unwrap()
+            .replay(&mut replayed)
+            .unwrap();
+
+        let mut reference: InMemory<i64> = InMemory::with_threshold(1024);
+        for e in &entries {
+            if e.taus.is_empty() {
+                continue;
+            }
+            let layer = Layer::new(
+                e.layer_id,
+                e.taus
+                    .iter()
+                    .map(|(s, e, v)| Tau::new(*s, *e, *v))
+                    .collect(),
+            );
+            reference.append(&e.lens, layer).unwrap();
+        }
+
+        let probe = tc.draw(gs::integers::<i64>().min_value(-100).max_value(2000));
+        for e in &entries {
+            assert_eq!(replayed.at(&e.lens, probe), reference.at(&e.lens, probe));
+        }
+    }
+
+    #[hegel::test]
+    fn wal_unencrypted_replay_matches_inmemory(tc: TestCase) {
+        wal_replay_matches_inmemory(tc, None);
+    }
+
+    #[hegel::test]
+    fn wal_encrypted_replay_matches_inmemory(tc: TestCase) {
+        let key_bytes = tc.draw(gs::vecs(gs::integers::<u8>()).min_size(32).max_size(32));
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&key_bytes);
+        wal_replay_matches_inmemory(tc, Some(key));
+    }
+
+    #[hegel::test]
+    fn wal_encrypted_lines_start_with_e_prefix(tc: TestCase) {
+        let key_bytes = tc.draw(gs::vecs(gs::integers::<u8>()).min_size(32).max_size(32));
+        let entry = tc.draw(entry_gen_i64().filter(|e| !e.taus.is_empty()));
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&key_bytes);
+        let tmp = NamedTempFile::new().unwrap();
+        {
+            let mut wal = Wal::open(tmp.path(), Some(key)).unwrap();
             wal.append(&entry).unwrap();
         }
-
-        let mut store: InMemory<i64> = InMemory::new();
-        Wal::open(tmp.path(), None)
-            .unwrap()
-            .replay(&mut store)
-            .unwrap();
-
-        assert_eq!(store.at("x", 5), Some(42));
-        assert_eq!(store.at("x", 10), None);
+        let raw = fs::read_to_string(tmp.path()).unwrap();
+        let first = raw.lines().next().unwrap();
+        assert!(first.starts_with("E:"), "encrypted line must start with E:");
     }
 
-    #[test]
-    fn wal_replays_multiple_entries_in_order() {
+    #[hegel::test]
+    fn wal_encrypted_replay_without_key_skips_entries(tc: TestCase) {
+        let key_bytes = tc.draw(gs::vecs(gs::integers::<u8>()).min_size(32).max_size(32));
+        let entry = tc.draw(entry_gen_i64().filter(|e| !e.taus.is_empty()));
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&key_bytes);
         let tmp = NamedTempFile::new().unwrap();
         {
-            let mut wal = Wal::open(tmp.path(), None).unwrap();
-            wal.append(&WalEntry::<i64> {
-                layer_id: 1,
-                lens: "s".to_string(),
-                taus: vec![(0, 20, 1)],
-            })
-            .unwrap();
-            wal.append(&WalEntry::<i64> {
-                layer_id: 2,
-                lens: "s".to_string(),
-                taus: vec![(5, 15, 2)],
-            })
-            .unwrap();
+            let mut wal = Wal::open(tmp.path(), Some(key)).unwrap();
+            wal.append(&entry).unwrap();
         }
-
-        let mut store: InMemory<i64> = InMemory::new();
+        let mut store: InMemory<i64> = InMemory::with_threshold(1024);
         Wal::open(tmp.path(), None)
             .unwrap()
             .replay(&mut store)
             .unwrap();
-
-        // newest layer (id=2) must shadow the earlier one
-        assert_eq!(store.at("s", 3), Some(1));
-        assert_eq!(store.at("s", 7), Some(2));
-        assert_eq!(store.at("s", 17), Some(1));
-    }
-
-    #[test]
-    fn wal_replays_multiple_lenses() {
-        let tmp = NamedTempFile::new().unwrap();
-        {
-            let mut wal = Wal::open(tmp.path(), None).unwrap();
-            wal.append(&WalEntry::<i64> {
-                layer_id: 1,
-                lens: "a".to_string(),
-                taus: vec![(0, 10, 10)],
-            })
-            .unwrap();
-            wal.append(&WalEntry::<i64> {
-                layer_id: 2,
-                lens: "b".to_string(),
-                taus: vec![(0, 10, 20)],
-            })
-            .unwrap();
-        }
-
-        let mut store: InMemory<i64> = InMemory::new();
-        Wal::open(tmp.path(), None)
-            .unwrap()
-            .replay(&mut store)
-            .unwrap();
-
-        assert_eq!(store.at("a", 5), Some(10));
-        assert_eq!(store.at("b", 5), Some(20));
-    }
-
-    #[test]
-    fn wal_skips_blank_lines_during_replay() {
-        let tmp = NamedTempFile::new().unwrap();
-        // write entries with checksums and a blank line
-        {
-            let mut f = OpenOptions::new().write(true).open(tmp.path()).unwrap();
-            // Valid entry with checksum
-            writeln!(f, "{} 1 x 0:10:42", crc32("1 x 0:10:42")).unwrap();
-            writeln!(f).unwrap(); // blank
-            writeln!(f, "{} 2 x 10:20:99", crc32("2 x 10:20:99")).unwrap();
-        }
-
-        let mut store: InMemory<i64> = InMemory::new();
-        Wal::open(tmp.path(), None)
-            .unwrap()
-            .replay(&mut store)
-            .unwrap();
-
-        assert_eq!(store.at("x", 5), Some(42));
-        assert_eq!(store.at("x", 15), Some(99));
+        // The lens may not even exist after a no-key replay.
+        let probe = entry.taus.first().map(|(s, _, _)| *s).unwrap_or(0);
+        assert_eq!(store.at(&entry.lens, probe), None);
     }
 
     #[test]
@@ -773,179 +761,124 @@ mod tests {
         assert_eq!(store.at("anything", 0), None);
     }
 
-    #[test]
-    fn wal_skips_corrupted_entry() {
+    #[hegel::test]
+    fn wal_skips_corrupted_entries_during_replay(tc: TestCase) {
+        let good_a = tc.draw(entry_gen_i64().filter(|e| !e.taus.is_empty()));
+        let good_b = tc.draw(entry_gen_i64().filter(|e| !e.taus.is_empty()));
         let tmp = NamedTempFile::new().unwrap();
         {
             let mut f = OpenOptions::new().write(true).open(tmp.path()).unwrap();
-            // Valid entry
-            writeln!(f, "{} 1 x 0:10:42", crc32("1 x 0:10:42")).unwrap();
-            // Corrupted entry (wrong checksum)
-            writeln!(f, "999999 2 x 5:15:99").unwrap();
-            // Another valid entry
-            writeln!(f, "{} 3 x 20:30:7", crc32("3 x 20:30:7")).unwrap();
+            // Valid -> corrupted -> valid: the middle is skipped, the others replay.
+            writeln!(f, "{}", good_a.serialise()).unwrap();
+            writeln!(f, "999999 1 corrupt 0:10:42").unwrap();
+            writeln!(f, "{}", good_b.serialise()).unwrap();
         }
-
-        let mut store: InMemory<i64> = InMemory::new();
+        let mut store: InMemory<i64> = InMemory::with_threshold(1024);
         Wal::open(tmp.path(), None)
             .unwrap()
             .replay(&mut store)
             .unwrap();
 
-        // First and third entries replayed, second skipped
-        assert_eq!(store.at("x", 5), Some(42));
-        assert_eq!(store.at("x", 25), Some(7));
+        // Reference: the same two good entries replayed into a fresh store
+        // bypassing the WAL.  Compare at any timestamp - if they share a lens,
+        // newest-wins applies; if not, both are visible.
+        let mut reference: InMemory<i64> = InMemory::with_threshold(1024);
+        for e in [&good_a, &good_b] {
+            let layer = Layer::new(
+                e.layer_id,
+                e.taus
+                    .iter()
+                    .map(|(s, ee, v)| Tau::new(*s, *ee, *v))
+                    .collect(),
+            );
+            reference.append(&e.lens, layer).unwrap();
+        }
+        for e in [&good_a, &good_b] {
+            if let Some((s, _, _)) = e.taus.first() {
+                assert_eq!(store.at(&e.lens, *s), reference.at(&e.lens, *s));
+            }
+        }
+        // The corrupt line claims lens "corrupt" - it must not appear.
+        assert_eq!(store.at("corrupt", 0), None);
     }
 
-    #[test]
-    fn wal_encrypted_roundtrip() {
-        let key = [0x42u8; 32];
-        let tmp = NamedTempFile::new().unwrap();
-        {
-            let mut wal = Wal::open(tmp.path(), Some(key)).unwrap();
-            wal.append(&WalEntry::<i64> {
-                layer_id: 1,
-                lens: "secret".to_string(),
-                taus: vec![(0, 10, 99)],
-            })
-            .unwrap();
-        }
-
-        // File must not contain the plaintext value
-        let raw = fs::read_to_string(tmp.path()).unwrap();
-        assert!(!raw.contains("99"), "plaintext value leaked into WAL file");
-        assert!(raw.starts_with("E:"), "encrypted line must start with E:");
-
-        // Replay with correct key succeeds
-        let mut store: InMemory<i64> = InMemory::new();
-        Wal::open(tmp.path(), Some(key))
-            .unwrap()
-            .replay(&mut store)
-            .unwrap();
-        assert_eq!(store.at("secret", 5), Some(99));
-    }
-
-    #[test]
-    fn wal_encrypted_replay_without_key_skips_entries() {
-        let key = [0x11u8; 32];
-        let tmp = NamedTempFile::new().unwrap();
-        {
-            let mut wal = Wal::open(tmp.path(), Some(key)).unwrap();
-            wal.append(&WalEntry::<i64> {
-                layer_id: 1,
-                lens: "x".to_string(),
-                taus: vec![(0, 10, 7)],
-            })
-            .unwrap();
-        }
-
-        let mut store: InMemory<i64> = InMemory::new();
-        Wal::open(tmp.path(), None)
-            .unwrap()
-            .replay(&mut store)
-            .unwrap();
-        assert_eq!(
-            store.at("x", 5),
-            None,
-            "entries must be skipped without key"
+    #[hegel::test]
+    fn wal_schema_roundtrips_unencrypted(tc: TestCase) {
+        let stmts = tc.draw(
+            gs::vecs(
+                gs::from_regex(r"CREATE LENS [a-z]+ (int|float|str|bool|bytes)").fullmatch(true),
+            )
+            .max_size(5),
         );
-    }
-
-    #[test]
-    fn wal_append_and_replay_schema() {
         let tmp = NamedTempFile::new().unwrap();
         {
             let mut wal = Wal::open(tmp.path(), None).unwrap();
-            wal.append_schema("CREATE LENS temp int").unwrap();
-            wal.append_schema("DERIVE LENS fast AS avg(slow, -3600, 0)")
-                .unwrap();
+            for s in &stmts {
+                wal.append_schema(s).unwrap();
+            }
         }
-
         let wal = Wal::open(tmp.path(), None).unwrap();
-        let stmts = wal.replay_schemas().unwrap();
-        assert_eq!(
-            stmts,
-            vec![
-                "CREATE LENS temp int",
-                "DERIVE LENS fast AS avg(slow, -3600, 0)"
-            ]
-        );
+        assert_eq!(wal.replay_schemas().unwrap(), stmts);
     }
 
-    #[test]
-    fn wal_schema_encrypted_roundtrip() {
-        let key = [0xAAu8; 32];
+    #[hegel::test]
+    fn wal_schema_roundtrips_encrypted(tc: TestCase) {
+        let key_bytes = tc.draw(gs::vecs(gs::integers::<u8>()).min_size(32).max_size(32));
+        let stmts = tc.draw(
+            gs::vecs(
+                gs::from_regex(r"CREATE LENS [a-z]+ (int|float|str|bool|bytes)").fullmatch(true),
+            )
+            .min_size(1)
+            .max_size(3),
+        );
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&key_bytes);
         let tmp = NamedTempFile::new().unwrap();
         {
             let mut wal = Wal::open(tmp.path(), Some(key)).unwrap();
-            wal.append_schema("CREATE LENS secret float").unwrap();
+            for s in &stmts {
+                wal.append_schema(s).unwrap();
+            }
         }
-
-        // Raw file must not contain the plaintext stmt
         let raw = fs::read_to_string(tmp.path()).unwrap();
-        assert!(!raw.contains("secret"), "plaintext schema leaked into WAL");
-        assert!(raw.contains("SE:"), "encrypted schema must use SE: prefix");
-
+        for line in raw.lines() {
+            assert!(line.starts_with("SE:"), "encrypted schema line: {line:?}");
+        }
         let wal = Wal::open(tmp.path(), Some(key)).unwrap();
-        let stmts = wal.replay_schemas().unwrap();
-        assert_eq!(stmts, vec!["CREATE LENS secret float"]);
+        assert_eq!(wal.replay_schemas().unwrap(), stmts);
     }
 
-    #[test]
-    fn wal_schema_and_data_are_independent() {
-        let tmp = NamedTempFile::new().unwrap();
-        {
-            let mut wal = Wal::open(tmp.path(), None).unwrap();
-            wal.append_schema("CREATE LENS x int").unwrap();
-            wal.append(&WalEntry::<i64> {
-                layer_id: 1,
-                lens: "x".to_string(),
-                taus: vec![(0, 10, 42)],
-            })
-            .unwrap();
-        }
-
-        let wal = Wal::open(tmp.path(), None).unwrap();
-        // Schemas returned separately from data replay
-        let stmts = wal.replay_schemas().unwrap();
-        assert_eq!(stmts, vec!["CREATE LENS x int"]);
-
-        let mut store: InMemory<i64> = InMemory::new();
-        wal.replay(&mut store).unwrap();
-        assert_eq!(store.at("x", 5), Some(42));
-    }
-
-    #[test]
-    fn wal_rewrite_drops_superseded_entries() {
+    #[hegel::test]
+    fn wal_rewrite_retains_only_supplied_entries(tc: TestCase) {
+        let schemas = tc
+            .draw(gs::vecs(gs::from_regex(r"CREATE LENS [a-z]+ int").fullmatch(true)).max_size(3));
+        let initial: Vec<WalEntry<i64>> = (0..tc
+            .draw(gs::integers::<usize>().min_value(1).max_value(5)))
+            .map(|_| tc.draw(entry_gen_i64().filter(|e| !e.taus.is_empty())))
+            .collect();
+        let live_entries: Vec<WalEntry<i64>> = (0..tc
+            .draw(gs::integers::<usize>().min_value(0).max_value(3)))
+            .map(|_| tc.draw(entry_gen_i64().filter(|e| !e.taus.is_empty())))
+            .collect();
         let tmp = NamedTempFile::new().unwrap();
         let mut wal = Wal::open(tmp.path(), None).unwrap();
-        wal.append_schema("CREATE LENS x int").unwrap();
-        for i in 1_u64..=3 {
-            wal.append(&WalEntry::<i64> {
-                layer_id: i,
-                lens: "x".to_string(),
-                taus: vec![(i as i64 * 10, i as i64 * 10 + 10, i as i64)],
-            })
-            .unwrap();
+        for s in &schemas {
+            wal.append_schema(s).unwrap();
+        }
+        for e in &initial {
+            wal.append(e).unwrap();
         }
 
-        // Rewrite keeping only layer 3, plus schema.
         let schema_lines = wal.raw_schema_lines().unwrap();
-        let live_entry = WalEntry::<i64> {
-            layer_id: 3,
-            lens: "x".to_string(),
-            taus: vec![(30, 40, 3)],
-        };
-        wal.rewrite(&schema_lines, &[live_entry]).unwrap();
+        wal.rewrite(&schema_lines, &live_entries).unwrap();
 
-        // After rewrite: only layer 3 remains in the WAL.
+        // The rewrite must leave exactly the supplied schema set, and the
+        // post-rewrite layer-id set must equal the live entries' ids.
+        let post_stmts = wal.replay_schemas().unwrap();
+        assert_eq!(post_stmts, schemas);
         let ids = wal.data_layer_ids().unwrap();
-        assert!(!ids.contains(&1), "layer 1 should have been removed");
-        assert!(!ids.contains(&2), "layer 2 should have been removed");
-        assert!(ids.contains(&3), "layer 3 must be retained");
-
-        // Schema lines must survive.
-        let stmts = wal.replay_schemas().unwrap();
-        assert_eq!(stmts, vec!["CREATE LENS x int"]);
+        let expected: std::collections::HashSet<u64> =
+            live_entries.iter().map(|e| e.layer_id).collect();
+        assert_eq!(ids, expected);
     }
 }

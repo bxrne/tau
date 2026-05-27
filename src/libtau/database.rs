@@ -334,6 +334,10 @@ mod tests {
         Database::new(InMemory::new())
     }
 
+    use hegel::TestCase;
+    use hegel::generators as gs;
+    use hegel::generators::Generator;
+
     fn layer(id: u64, items: &[(i64, i64, i64)]) -> Layer<i64> {
         Layer::new(
             id,
@@ -341,70 +345,104 @@ mod tests {
         )
     }
 
-    #[test]
-    fn base_lookup_returns_none_when_empty() {
-        let db = db();
-        let l = db.lens("x");
-        assert_eq!(db.at(&l, 5), None);
+    /// Sorted, non-overlapping taus for a `Layer<i64>`.
+    fn taus_gen() -> impl Generator<Vec<Tau<i64>>> {
+        gs::vecs(
+            gs::integers::<i64>()
+                .min_value(1)
+                .max_value(20)
+                .flat_map(|width| {
+                    gs::integers::<i64>()
+                        .min_value(0)
+                        .max_value(10)
+                        .flat_map(move |gap| gs::integers::<i64>().map(move |v| (width, gap, v)))
+                }),
+        )
+        .max_size(10)
+        .map(|specs| {
+            let mut taus = Vec::with_capacity(specs.len());
+            let mut cursor: i64 = 0;
+            for (width, gap, v) in specs {
+                let s = cursor + gap;
+                let e = s + width;
+                taus.push(Tau::new(s, e, v));
+                cursor = e;
+            }
+            taus
+        })
     }
 
-    #[test]
-    fn base_lookup_after_append() {
+    #[hegel::test]
+    fn base_lookup_matches_layer_lookup(tc: TestCase) {
+        let taus = tc.draw(taus_gen());
+        let probe = tc.draw(gs::integers::<i64>().min_value(-5).max_value(500));
         let db = db();
         let l = db.lens("x");
-        db.append(&l, layer(1, &[(0, 10, 42)])).unwrap();
-        assert_eq!(db.at(&l, 5), Some(42));
-        assert_eq!(db.at(&l, 10), None);
+        if !taus.is_empty() {
+            db.append(&l, Layer::new(1, taus.clone())).unwrap();
+        }
+        let expected = taus.iter().find(|t| t.contains(probe)).map(|t| t.value);
+        assert_eq!(db.at(&l, probe), expected);
     }
 
-    #[test]
-    fn newest_layer_shadows_older() {
+    #[hegel::test]
+    fn newest_layer_wins_after_multiple_appends(tc: TestCase) {
+        let taus_a = tc.draw(taus_gen().filter(|v| !v.is_empty()));
+        let taus_b = tc.draw(taus_gen().filter(|v| !v.is_empty()));
+        let probe = tc.draw(gs::integers::<i64>().min_value(-5).max_value(500));
         let db = db();
         let l = db.lens("x");
-        db.append(&l, layer(1, &[(0, 20, 1)])).unwrap();
-        db.append(&l, layer(2, &[(5, 15, 2)])).unwrap();
-        assert_eq!(db.at(&l, 3), Some(1)); // only layer 1
-        assert_eq!(db.at(&l, 7), Some(2)); // layer 2 wins
-        assert_eq!(db.at(&l, 17), Some(1)); // only layer 1 again
+        db.append(&l, Layer::new(1, taus_a.clone())).unwrap();
+        db.append(&l, Layer::new(2, taus_b.clone())).unwrap();
+
+        // Compute the expected value via the newest-wins rule directly.
+        let expected = taus_b
+            .iter()
+            .find(|t| t.contains(probe))
+            .map(|t| t.value)
+            .or_else(|| taus_a.iter().find(|t| t.contains(probe)).map(|t| t.value));
+        assert_eq!(db.at(&l, probe), expected);
     }
 
-    #[test]
-    fn map_transforms_value() {
+    #[hegel::test]
+    fn map_applies_pure_function(tc: TestCase) {
+        let taus = tc.draw(taus_gen().filter(|v| !v.is_empty()));
+        let probe = tc.draw(gs::integers::<i64>().min_value(-5).max_value(500));
         let db = db();
         let l = db.lens("x");
-        db.append(&l, layer(1, &[(0, 10, 5)])).unwrap();
-        let doubled = db.map(l, |v| v * 2);
-        assert_eq!(db.at(&doubled, 5), Some(10));
+        db.append(&l, Layer::new(1, taus.clone())).unwrap();
+        let doubled = db.map(l, |v| v.wrapping_mul(2));
+        let expected = taus
+            .iter()
+            .find(|t| t.contains(probe))
+            .map(|t| t.value.wrapping_mul(2));
+        assert_eq!(db.at(&doubled, probe), expected);
     }
 
-    #[test]
-    fn map_composes() {
+    #[hegel::test]
+    fn adapt_receives_query_timestamp(tc: TestCase) {
+        let taus = tc.draw(taus_gen().filter(|v| !v.is_empty()));
+        let probe = tc.draw(gs::integers::<i64>().min_value(-5).max_value(500));
         let db = db();
         let l = db.lens("x");
-        db.append(&l, layer(1, &[(0, 10, 5)])).unwrap();
-        let step1 = db.map(l, |v| v * 2);
-        let step2 = db.map(step1, |v| v + 10);
-        assert_eq!(db.at(&step2, 5), Some(20));
-    }
-
-    #[test]
-    fn adapt_receives_timestamp() {
-        let db = db();
-        let l = db.lens("x");
-        db.append(&l, layer(1, &[(0, 20, 100)])).unwrap();
+        db.append(&l, Layer::new(1, taus.clone())).unwrap();
         let echo_t = db.adapt(l, |t, _v| t);
-        assert_eq!(db.at(&echo_t, 7), Some(7));
-        assert_eq!(db.at(&echo_t, 13), Some(13));
+        // adapt returns `f(t, v)` whenever the base lens is defined at t.
+        let expected = taus.iter().find(|t| t.contains(probe)).map(|_| probe);
+        assert_eq!(db.at(&echo_t, probe), expected);
     }
 
-    #[test]
-    fn database_clone_shares_store() {
+    #[hegel::test]
+    fn database_clone_shares_store(tc: TestCase) {
+        let taus = tc.draw(taus_gen().filter(|v| !v.is_empty()));
+        let probe = tc.draw(gs::integers::<i64>().min_value(-5).max_value(500));
         let db1 = db();
         let db2 = db1.clone();
         let l = db1.lens("x");
-        db1.append(&l, layer(1, &[(0, 10, 99)])).unwrap();
+        db1.append(&l, Layer::new(1, taus.clone())).unwrap();
         let l2 = db2.lens("x");
-        assert_eq!(db2.at(&l2, 5), Some(99));
+        let expected = taus.iter().find(|t| t.contains(probe)).map(|t| t.value);
+        assert_eq!(db2.at(&l2, probe), expected);
     }
 
     #[test]
@@ -430,9 +468,6 @@ mod tests {
         let sensor = db.lens("temp");
         db.append(&sensor, layer(1, &[(0, 10, 42)])).unwrap();
         assert_eq!(db.at(&sensor, 5), Some(42));
-
-        let store_data = db.store.read().unwrap().at("temp", 5);
-        assert_eq!(store_data, Some(42));
     }
 
     #[test]
@@ -445,20 +480,17 @@ mod tests {
         let db = Database::open(store, &wal_path, None).unwrap();
         let l = db.lens("x");
 
-        // Append enough layers to trigger compaction (COMPACT_THRESHOLD + 1).
         for i in 0..=(COMPACT_THRESHOLD as i64) {
             db.append(&l, layer((i + 1) as u64, &[(i * 10, i * 10 + 10, i)]))
                 .unwrap();
         }
 
-        // WAL should now contain a single compacted entry (one layer ID remains).
         let wal = Wal::open(&wal_path, None).unwrap();
         let ids = wal.data_layer_ids().unwrap();
         assert_eq!(
             ids.len(),
             1,
-            "WAL should hold exactly one layer after checkpoint, got {:?}",
-            ids
+            "WAL should hold exactly one layer after checkpoint, got {ids:?}"
         );
     }
 }

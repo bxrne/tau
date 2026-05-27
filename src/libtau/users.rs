@@ -365,18 +365,66 @@ impl UserStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hegel::TestCase;
+    use hegel::generators as gs;
+    use hegel::generators::Generator;
     use tempfile::tempdir;
 
-    fn make_grants(items: &[(&str, Perm)]) -> HashMap<String, Perm> {
-        items.iter().map(|(d, p)| (d.to_string(), *p)).collect()
+    /// Generator over `Perm` (any of the 32 possible 5-bit bitmaps).
+    fn perm_gen() -> impl Generator<Perm> {
+        gs::integers::<u8>()
+            .min_value(0)
+            .max_value(0b1_1111)
+            .map(Perm)
     }
 
-    #[test]
-    fn perm_parse_letters_in_any_case_and_order() {
-        assert_eq!(Perm::parse("CRUDA").unwrap(), Perm::ALL);
-        assert_eq!(Perm::parse("Adurc").unwrap(), Perm::ALL);
-        assert_eq!(Perm::parse("R").unwrap(), Perm::R);
-        assert_eq!(Perm::parse("rd").unwrap(), Perm::R | Perm::D);
+    /// Generator over short ASCII identifiers - good enough for db / user
+    /// names.  `fullmatch(true)` ensures the *entire* string is alphanumeric;
+    /// the default `from_regex` only requires a substring match, which would
+    /// happily include `\r`, `\n`, or whitespace and break the line-oriented
+    /// user-store format.  This matches the identifier grammar enforced by
+    /// the QL parser before any name reaches `User` / `UserStore`.
+    fn name_gen() -> impl Generator<String> {
+        gs::from_regex("[a-z][a-z0-9_]{0,15}").fullmatch(true)
+    }
+
+    /// Generator over a grants HashMap.
+    fn grants_gen() -> impl Generator<HashMap<String, Perm>> {
+        gs::vecs(name_gen().flat_map(|n| perm_gen().map(move |p| (n.clone(), p))))
+            .max_size(6)
+            .map(|pairs| pairs.into_iter().collect())
+    }
+
+    #[hegel::test]
+    fn perm_display_parse_roundtrip(tc: TestCase) {
+        let p = tc.draw(perm_gen());
+        let s = p.to_string();
+        assert_eq!(Perm::parse(&s).unwrap(), p);
+    }
+
+    #[hegel::test]
+    fn perm_parse_letter_order_is_irrelevant(tc: TestCase) {
+        // Any permutation of a subset of CRUDA parses to the same Perm.
+        let p = tc.draw(perm_gen());
+        let s = p.to_string();
+        let mut chars: Vec<char> = s.chars().collect();
+        if chars.len() <= 1 || chars == vec!['-'] {
+            return;
+        }
+        // Permute by rotating - cheap deterministic shuffle from a draw.
+        let shift = tc.draw(gs::integers::<usize>().min_value(0).max_value(4));
+        let len = chars.len();
+        chars.rotate_left(shift % len.max(1));
+        let permuted: String = chars.into_iter().collect();
+        assert_eq!(Perm::parse(&permuted).unwrap(), p);
+    }
+
+    #[hegel::test]
+    fn perm_parse_case_insensitive(tc: TestCase) {
+        let p = tc.draw(perm_gen());
+        let upper = p.to_string();
+        let lower = upper.to_lowercase();
+        assert_eq!(Perm::parse(&upper), Perm::parse(&lower));
     }
 
     #[test]
@@ -386,131 +434,174 @@ mod tests {
         assert_eq!(Perm::parse("").unwrap(), Perm::NONE);
     }
 
-    #[test]
-    fn perm_parse_rejects_unknown_letter() {
-        assert!(Perm::parse("CRX").is_err());
-    }
-
-    #[test]
-    fn perm_display_round_trips() {
-        for p in [
-            Perm::NONE,
-            Perm::R,
-            Perm::C | Perm::R | Perm::U | Perm::D,
-            Perm::ALL,
-        ] {
-            let s = p.to_string();
-            assert_eq!(Perm::parse(&s).unwrap(), p);
-        }
-    }
-
-    #[test]
-    fn perm_contains_and_bitops() {
-        let p = Perm::C | Perm::R;
-        assert!(p.contains(Perm::R));
-        assert!(!p.contains(Perm::U));
-        assert!((p & Perm::C).contains(Perm::C));
-    }
-
-    #[test]
-    fn user_verify_accepts_correct_password() {
-        let u = User::new("alice", "s3cret", HashMap::new());
-        assert!(u.verify("s3cret"));
-        assert!(!u.verify("nope"));
-    }
-
-    #[test]
-    fn user_effective_unions_wildcard_with_direct() {
-        let u = User::new(
-            "alice",
-            "p",
-            make_grants(&[("main", Perm::R), ("*", Perm::C)]),
+    #[hegel::test]
+    fn perm_parse_rejects_unknown_letter(tc: TestCase) {
+        let bad = tc.draw(
+            gs::characters().filter(|c| !"CRUDAcruda \t".contains(*c) && *c != '*' && *c != '-'),
         );
-        let eff = u.effective("main");
-        assert!(eff.contains(Perm::R));
-        assert!(eff.contains(Perm::C));
-        let other = u.effective("other_db");
-        assert!(other.contains(Perm::C));
-        assert!(!other.contains(Perm::R));
+        let mut s = String::from("CR");
+        s.push(bad);
+        assert!(Perm::parse(&s).is_err());
     }
 
-    #[test]
-    fn user_is_global_admin_only_with_wildcard_admin() {
-        let u1 = User::new("a", "p", make_grants(&[("*", Perm::A)]));
-        assert!(u1.is_global_admin());
-        let u2 = User::new("a", "p", make_grants(&[("main", Perm::A)]));
-        assert!(!u2.is_global_admin());
-        assert!(u2.is_admin_anywhere());
+    #[hegel::test]
+    fn perm_bitops_are_commutative_and_associative(tc: TestCase) {
+        let a = tc.draw(perm_gen());
+        let b = tc.draw(perm_gen());
+        let c = tc.draw(perm_gen());
+        assert_eq!(a | b, b | a);
+        assert_eq!(a & b, b & a);
+        assert_eq!((a | b) | c, a | (b | c));
+        assert_eq!((a & b) & c, a & (b & c));
     }
 
-    #[test]
-    fn user_to_and_from_line_round_trip() {
-        let u = User::new(
-            "alice",
-            "secret",
-            make_grants(&[("main", Perm::R | Perm::U), ("*", Perm::A)]),
-        );
+    #[hegel::test]
+    fn perm_contains_iff_bits_are_subset(tc: TestCase) {
+        let p = tc.draw(perm_gen());
+        let q = tc.draw(perm_gen());
+        let expected = (p.0 & q.0) == q.0;
+        assert_eq!(p.contains(q), expected);
+    }
+
+    #[hegel::test]
+    fn perm_insert_remove_inverse(tc: TestCase) {
+        let mut p = tc.draw(perm_gen());
+        let q = tc.draw(perm_gen());
+        let original = p;
+        p.insert(q);
+        p.remove(q);
+        // After insert+remove of the same bits, the originally-not-present bits
+        // are now gone; the result is `original & !q`.
+        assert_eq!(p, Perm(original.0 & !q.0));
+    }
+
+    #[hegel::test]
+    fn user_verify_accepts_correct_password_only(tc: TestCase) {
+        let name = tc.draw(name_gen());
+        let pw = tc.draw(gs::text().min_size(1).max_size(32));
+        let other = tc.draw(gs::text().min_size(1).max_size(32).filter({
+            let pw = pw.clone();
+            move |s| *s != pw
+        }));
+        let u = User::new(&name, &pw, HashMap::new());
+        assert!(u.verify(&pw));
+        assert!(!u.verify(&other));
+    }
+
+    #[hegel::test]
+    fn user_effective_equals_direct_union_wildcard(tc: TestCase) {
+        let grants = tc.draw(grants_gen());
+        let db = tc.draw(name_gen());
+        let u = User::new("u", "p", grants.clone());
+
+        let direct = grants.get(&db).copied().unwrap_or_default();
+        let wildcard = grants.get("*").copied().unwrap_or_default();
+        let expected = direct | wildcard;
+
+        assert_eq!(u.effective(&db), expected);
+    }
+
+    #[hegel::test]
+    fn user_is_global_admin_iff_admin_on_wildcard(tc: TestCase) {
+        let grants = tc.draw(grants_gen());
+        let u = User::new("u", "p", grants.clone());
+        let expected = grants
+            .get("*")
+            .map(|p| p.contains(Perm::A))
+            .unwrap_or(false);
+        assert_eq!(u.is_global_admin(), expected);
+    }
+
+    #[hegel::test]
+    fn user_is_admin_anywhere_iff_any_grant_has_admin(tc: TestCase) {
+        let grants = tc.draw(grants_gen());
+        let u = User::new("u", "p", grants.clone());
+        let expected = grants.values().any(|p| p.contains(Perm::A));
+        assert_eq!(u.is_admin_anywhere(), expected);
+    }
+
+    #[hegel::test]
+    fn user_to_from_line_roundtrip(tc: TestCase) {
+        let name = tc.draw(name_gen());
+        let pw = tc.draw(gs::text().min_size(1).max_size(32));
+        let grants = tc.draw(grants_gen());
+        let u = User::new(&name, &pw, grants);
+
         let line = u.to_line();
-        let parsed = User::from_line(&line).unwrap();
+        let parsed = User::from_line(&line).expect("from_line on its own to_line must succeed");
         assert_eq!(parsed.name, u.name);
         assert_eq!(parsed.grants, u.grants);
-        assert!(parsed.verify("secret"));
+        assert!(parsed.verify(&pw));
     }
 
-    #[test]
-    fn store_add_get_remove() {
+    #[hegel::test]
+    fn store_add_then_get_returns_user(tc: TestCase) {
+        let name = tc.draw(name_gen());
         let mut s = UserStore::new();
-        s.add(User::new("alice", "p", HashMap::new())).unwrap();
-        assert!(s.get("alice").is_some());
-        assert!(s.add(User::new("alice", "p", HashMap::new())).is_err());
-        s.remove("alice").unwrap();
-        assert!(s.get("alice").is_none());
-        assert!(s.remove("alice").is_err());
+        s.add(User::new(&name, "p", HashMap::new())).unwrap();
+        assert!(s.get(&name).is_some());
+        assert!(s.add(User::new(&name, "p", HashMap::new())).is_err());
     }
 
-    #[test]
-    fn store_verify_returns_user_on_match() {
+    #[hegel::test]
+    fn store_remove_then_get_returns_none(tc: TestCase) {
+        let name = tc.draw(name_gen());
         let mut s = UserStore::new();
-        s.add(User::new("a", "p", HashMap::new())).unwrap();
-        assert!(s.verify("a", "p").is_some());
-        assert!(s.verify("a", "wrong").is_none());
-        assert!(s.verify("nope", "p").is_none());
+        s.add(User::new(&name, "p", HashMap::new())).unwrap();
+        s.remove(&name).unwrap();
+        assert!(s.get(&name).is_none());
+        assert!(s.remove(&name).is_err());
     }
 
-    #[test]
-    fn store_grant_and_revoke_update_persisted_state() {
+    #[hegel::test]
+    fn store_grant_then_revoke_is_identity_on_perms(tc: TestCase) {
+        let name = tc.draw(name_gen());
+        let db = tc.draw(name_gen());
+        let to_add = tc.draw(perm_gen());
+
         let mut s = UserStore::new();
-        s.add(User::new("a", "p", HashMap::new())).unwrap();
-        let perms = s.grant("a", "main", Perm::R | Perm::U).unwrap();
-        assert_eq!(perms, Perm::R | Perm::U);
-        let after = s.revoke("a", "main", Perm::U).unwrap();
-        assert_eq!(after, Perm::R);
-        let final_ = s.revoke("a", "main", Perm::R).unwrap();
-        assert_eq!(final_, Perm::NONE);
-        // Empty grant entries are pruned.
-        assert!(s.grants_for("a").unwrap().is_empty());
+        s.add(User::new(&name, "p", HashMap::new())).unwrap();
+        let before = s.get(&name).unwrap().effective(&db);
+        s.grant(&name, &db, to_add).unwrap();
+        s.revoke(&name, &db, to_add).unwrap();
+        assert_eq!(s.get(&name).unwrap().effective(&db), before);
     }
 
-    #[test]
-    fn store_persists_to_disk_and_reloads() {
+    #[hegel::test]
+    fn store_grant_unions_into_existing_perms(tc: TestCase) {
+        let name = tc.draw(name_gen());
+        let db = tc.draw(name_gen());
+        let p1 = tc.draw(perm_gen());
+        let p2 = tc.draw(perm_gen());
+
+        let mut s = UserStore::new();
+        s.add(User::new(&name, "p", HashMap::new())).unwrap();
+        s.grant(&name, &db, p1).unwrap();
+        let result = s.grant(&name, &db, p2).unwrap();
+        assert_eq!(result, p1 | p2);
+    }
+
+    #[hegel::test]
+    fn store_persists_round_trip(tc: TestCase) {
+        let n = tc.draw(gs::integers::<usize>().min_value(0).max_value(5));
         let dir = tempdir().unwrap();
-        let path = dir.path().join("users");
+        let path = dir.path().join("u");
+
+        let entries: Vec<(String, String, HashMap<String, Perm>)> = (0..n)
+            .map(|i| (format!("user{i}"), format!("pw{i}"), tc.draw(grants_gen())))
+            .collect();
+
         {
             let mut s = UserStore::open(&path).unwrap();
-            s.add(User::new(
-                "admin",
-                "topsecret",
-                make_grants(&[("*", Perm::ALL)]),
-            ))
-            .unwrap();
-            s.add(User::new("reader", "rp", make_grants(&[("main", Perm::R)])))
-                .unwrap();
+            for (name, pw, grants) in &entries {
+                s.add(User::new(name, pw, grants.clone())).unwrap();
+            }
         }
         let s2 = UserStore::open(&path).unwrap();
-        assert_eq!(s2.names(), vec!["admin", "reader"]);
-        assert!(s2.verify("admin", "topsecret").is_some());
-        assert!(s2.verify("reader", "rp").is_some());
-        assert_eq!(s2.get("reader").unwrap().effective("main"), Perm::R);
+        for (name, pw, grants) in &entries {
+            assert!(s2.verify(name, pw).is_some(), "verify after reload {name}");
+            assert_eq!(&s2.get(name).unwrap().grants, grants);
+        }
     }
 
     #[test]

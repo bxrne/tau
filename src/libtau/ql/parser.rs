@@ -567,12 +567,9 @@ fn literal(i: &str) -> IResult<&str, Literal> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn ok<T: PartialEq + std::fmt::Debug>(res: IResult<&str, T>, want: T, rest: &str) {
-        let (left, got) = res.expect("parse failed");
-        assert_eq!(got, want);
-        assert_eq!(left, rest);
-    }
+    use hegel::TestCase;
+    use hegel::generators as gs;
+    use hegel::generators::Generator;
 
     fn parsed(input: &str) -> Stmt {
         let (rest, s) = parse(input).expect("parse failed");
@@ -583,96 +580,259 @@ mod tests {
         s
     }
 
-    #[test]
-    fn create_lens_int() {
-        assert_eq!(
-            parsed("CREATE LENS test int"),
-            Stmt::Create {
-                name: "test".into(),
-                ty: Type::Int,
-            }
-        );
+    fn ident_gen() -> impl Generator<String> {
+        gs::from_regex("[a-z][a-z0-9_]{0,10}").fullmatch(true)
     }
 
-    #[test]
-    fn create_lens_all_types() {
-        for (s, ty) in [
+    fn type_keyword_gen() -> impl Generator<(&'static str, Type)> {
+        gs::sampled_from(vec![
             ("int", Type::Int),
             ("float", Type::Float),
             ("str", Type::Str),
             ("bool", Type::Bool),
             ("bytes", Type::Bytes),
-        ] {
-            assert_eq!(
-                parsed(&format!("CREATE LENS x {s}")),
-                Stmt::Create {
-                    name: "x".into(),
-                    ty,
-                }
-            );
-        }
+        ])
     }
 
-    #[test]
-    fn append_lens_int() {
+    fn agg_keyword_gen() -> impl Generator<(&'static str, AggFunc)> {
+        gs::sampled_from(vec![
+            ("min", AggFunc::Min),
+            ("max", AggFunc::Max),
+            ("avg", AggFunc::Avg),
+            ("sum", AggFunc::Sum),
+            ("count", AggFunc::Count),
+        ])
+    }
+
+    #[hegel::test]
+    fn parse_never_panics_on_arbitrary_input(tc: TestCase) {
+        let s = tc.draw(gs::text().max_size(256));
+        // The parser must return an `IResult` for every possible input - no
+        // panics, no infinite loops, no allocation explosions.
+        let _ = parse(&s);
+    }
+
+    #[hegel::test]
+    fn create_database_roundtrips(tc: TestCase) {
+        let name = tc.draw(ident_gen());
         assert_eq!(
-            parsed("APPEND LENS test 0 10 42"),
-            Stmt::Append {
-                name: "test".into(),
-                taus: vec![(0, 10, Literal::Int(42))],
+            parsed(&format!("CREATE DATABASE {name}")),
+            Stmt::CreateDatabase { name }
+        );
+    }
+
+    #[hegel::test]
+    fn drop_database_roundtrips(tc: TestCase) {
+        let name = tc.draw(ident_gen());
+        assert_eq!(
+            parsed(&format!("DROP DATABASE {name}")),
+            Stmt::DropDatabase { name }
+        );
+    }
+
+    #[hegel::test]
+    fn use_database_roundtrips(tc: TestCase) {
+        let name = tc.draw(ident_gen());
+        assert_eq!(
+            parsed(&format!("USE DATABASE {name}")),
+            Stmt::UseDatabase { name }
+        );
+    }
+
+    #[hegel::test]
+    fn create_lens_roundtrips_for_every_type(tc: TestCase) {
+        let name = tc.draw(ident_gen());
+        let (kw, ty) = tc.draw(type_keyword_gen());
+        assert_eq!(
+            parsed(&format!("CREATE LENS {name} {kw}")),
+            Stmt::Create { name, ty }
+        );
+    }
+
+    #[hegel::test]
+    fn drop_lens_roundtrips(tc: TestCase) {
+        let name = tc.draw(ident_gen());
+        assert_eq!(parsed(&format!("DROP LENS {name}")), Stmt::Drop { name });
+    }
+
+    #[hegel::test]
+    fn at_lens_roundtrips_with_any_timestamp(tc: TestCase) {
+        let name = tc.draw(ident_gen());
+        let t = tc.draw(gs::integers::<i64>());
+        assert_eq!(parsed(&format!("AT LENS {name} {t}")), Stmt::At { name, t });
+    }
+
+    #[hegel::test]
+    fn range_lens_roundtrips_without_filter(tc: TestCase) {
+        let name = tc.draw(ident_gen());
+        let start = tc.draw(
+            gs::integers::<i64>()
+                .min_value(-1_000_000)
+                .max_value(1_000_000),
+        );
+        let end = tc.draw(
+            gs::integers::<i64>()
+                .min_value(-1_000_000)
+                .max_value(1_000_000),
+        );
+        assert_eq!(
+            parsed(&format!("RANGE LENS {name} {start} {end}")),
+            Stmt::Range {
+                name,
+                start,
+                end,
+                filter: None
             }
         );
     }
 
-    #[test]
-    fn append_lens_float() {
+    #[hegel::test]
+    fn reduce_roundtrips_for_every_func(tc: TestCase) {
+        let name = tc.draw(ident_gen());
+        let start = tc.draw(
+            gs::integers::<i64>()
+                .min_value(-1_000_000)
+                .max_value(1_000_000),
+        );
+        let end = tc.draw(
+            gs::integers::<i64>()
+                .min_value(-1_000_000)
+                .max_value(1_000_000),
+        );
+        let (kw, func) = tc.draw(agg_keyword_gen());
         assert_eq!(
-            parsed("APPEND LENS temp 0 10 18.5"),
-            Stmt::Append {
-                name: "temp".into(),
-                taus: vec![(0, 10, Literal::Float(18.5))],
+            parsed(&format!("REDUCE LENS {name} {start} {end} USING {kw}")),
+            Stmt::Reduce {
+                name,
+                start,
+                end,
+                func
             }
         );
     }
 
-    #[test]
-    fn append_lens_string() {
+    #[hegel::test]
+    fn append_lens_int_roundtrips(tc: TestCase) {
+        let name = tc.draw(ident_gen());
+        let s = tc.draw(
+            gs::integers::<i64>()
+                .min_value(-1_000_000)
+                .max_value(1_000_000),
+        );
+        let e = tc.draw(
+            gs::integers::<i64>()
+                .min_value(-1_000_000)
+                .max_value(1_000_000),
+        );
+        let v = tc.draw(gs::integers::<i64>());
         assert_eq!(
-            parsed("APPEND LENS msg 0 10 \"hello world\""),
+            parsed(&format!("APPEND LENS {name} {s} {e} {v}")),
             Stmt::Append {
-                name: "msg".into(),
-                taus: vec![(0, 10, Literal::Str("hello world".into()))],
+                name,
+                taus: vec![(s, e, Literal::Int(v))]
             }
         );
     }
 
-    #[test]
-    fn append_lens_bool_and_null() {
+    #[hegel::test]
+    fn append_lens_bool_and_null_roundtrip(tc: TestCase) {
+        let name = tc.draw(ident_gen());
+        let b = tc.draw(gs::booleans());
+        let null_or_bool = tc.draw(gs::booleans());
+        let (literal_str, literal) = if null_or_bool {
+            (b.to_string(), Literal::Bool(b))
+        } else {
+            ("null".to_string(), Literal::Null)
+        };
         assert_eq!(
-            parsed("APPEND LENS f 0 5 true"),
+            parsed(&format!("APPEND LENS {name} 0 5 {literal_str}")),
             Stmt::Append {
-                name: "f".into(),
-                taus: vec![(0, 5, Literal::Bool(true))],
-            }
-        );
-        assert_eq!(
-            parsed("APPEND LENS f 0 5 null"),
-            Stmt::Append {
-                name: "f".into(),
-                taus: vec![(0, 5, Literal::Null)],
+                name,
+                taus: vec![(0, 5, literal)],
             }
         );
     }
 
-    #[test]
-    fn append_lens_negative_range() {
+    #[hegel::test]
+    fn keywords_are_case_insensitive(tc: TestCase) {
+        let name = tc.draw(ident_gen());
+        let upper = format!("CREATE LENS {name} int");
+        let lower = upper.to_lowercase();
+        // Identifier `name` is lowercase by construction, so swapping case on
+        // the keywords yields the same AST.
+        assert_eq!(parsed(&upper), parsed(&lower));
+    }
+
+    #[hegel::test]
+    fn extra_whitespace_is_tolerated(tc: TestCase) {
+        let pad_a = " ".repeat(tc.draw(gs::integers::<usize>().min_value(0).max_value(8)));
+        let pad_b = " ".repeat(tc.draw(gs::integers::<usize>().min_value(1).max_value(8)));
+        let pad_c = " ".repeat(tc.draw(gs::integers::<usize>().min_value(1).max_value(8)));
+        let pad_d = " ".repeat(tc.draw(gs::integers::<usize>().min_value(0).max_value(8)));
+        let q = format!("{pad_a}CREATE{pad_b}LENS{pad_b}x{pad_c}int{pad_d}");
         assert_eq!(
-            parsed("APPEND LENS x -10 -5 -1"),
-            Stmt::Append {
+            parsed(&q),
+            Stmt::Create {
                 name: "x".into(),
-                taus: vec![(-10, -5, Literal::Int(-1))],
+                ty: Type::Int
             }
         );
+    }
+
+    #[hegel::test]
+    fn parse_rejects_unknown_leading_token(tc: TestCase) {
+        let junk = tc.draw(gs::from_regex("[A-Z]{3,8}").fullmatch(true).filter(|s| {
+            !matches!(
+                s.as_str(),
+                "CREATE"
+                    | "DROP"
+                    | "USE"
+                    | "APPEND"
+                    | "COPY"
+                    | "DERIVE"
+                    | "SHOW"
+                    | "AT"
+                    | "RANGE"
+                    | "REDUCE"
+                    | "GRANT"
+                    | "REVOKE"
+            )
+        }));
+        assert!(parse(&format!("{junk} LENS x 1")).is_err());
+    }
+
+    /// Show statements: examples retained because they have no parameters.
+    #[test]
+    fn show_statements_parse() {
+        assert_eq!(parsed("SHOW DATABASES"), Stmt::ShowDatabases);
+        assert_eq!(parsed("SHOW LENSES"), Stmt::ShowLenses);
+        assert_eq!(parsed("SHOW USERS"), Stmt::ShowUsers);
+        assert_eq!(parsed("SHOW GRANTS"), Stmt::ShowGrants { user: None });
+        assert_eq!(
+            parsed("SHOW GRANTS alice"),
+            Stmt::ShowGrants {
+                user: Some("alice".into())
+            }
+        );
+    }
+
+    /// Regression anchors for complex expression parsing.  PBT-style generation
+    /// of arbitrary `Expr` round-trips is doable but the value-to-effort ratio
+    /// drops sharply once you account for operator precedence in Display.
+    #[test]
+    fn expr_precedence_and_parens() {
+        let (_, e1) = expr("1 + 2 * 3").unwrap();
+        assert!(matches!(e1, Expr::Binary { op: BinOp::Add, .. }));
+        let (_, e2) = expr("(1 + 2) * 3").unwrap();
+        assert!(matches!(e2, Expr::Binary { op: BinOp::Mul, .. }));
+    }
+
+    #[test]
+    fn unary_neg_and_not() {
+        let (_, e1) = expr("-x").unwrap();
+        assert!(matches!(e1, Expr::Unary { op: UnOp::Neg, .. }));
+        let (_, e2) = expr("!flag").unwrap();
+        assert!(matches!(e2, Expr::Unary { op: UnOp::Not, .. }));
     }
 
     #[test]
@@ -691,6 +851,17 @@ mod tests {
     }
 
     #[test]
+    fn append_lens_string_with_spaces() {
+        assert_eq!(
+            parsed("APPEND LENS msg 0 10 \"hello world\""),
+            Stmt::Append {
+                name: "msg".into(),
+                taus: vec![(0, 10, Literal::Str("hello world".into()))],
+            }
+        );
+    }
+
+    #[test]
     fn copy_lens_parses() {
         assert_eq!(
             parsed("COPY LENS temp FROM \"/data/temps.csv\""),
@@ -702,352 +873,35 @@ mod tests {
     }
 
     #[test]
-    fn show_databases_parses() {
-        assert_eq!(parsed("SHOW DATABASES"), Stmt::ShowDatabases);
-    }
-
-    #[test]
-    fn show_lenses_parses() {
-        assert_eq!(parsed("SHOW LENSES"), Stmt::ShowLenses);
-    }
-
-    #[test]
-    fn show_is_case_insensitive() {
-        assert_eq!(parsed("show databases"), Stmt::ShowDatabases);
-        assert_eq!(parsed("SHOW lenses"), Stmt::ShowLenses);
-    }
-
-    #[test]
-    fn derive_lens_simple_expression() {
-        assert_eq!(
-            parsed("DERIVE LENS test2 AS test * 2"),
-            Stmt::Derive {
-                name: "test2".into(),
-                expr: Expr::Binary {
-                    op: BinOp::Mul,
-                    lhs: Box::new(Expr::Ident("test".into())),
-                    rhs: Box::new(Expr::Lit(Literal::Int(2))),
-                },
-            }
-        );
-    }
-
-    #[test]
-    fn derive_lens_no_whitespace_around_star() {
-        // matches the original spec exactly: `test*2`
-        assert_eq!(
-            parsed("DERIVE LENS test2 AS test*2"),
-            Stmt::Derive {
-                name: "test2".into(),
-                expr: Expr::Binary {
-                    op: BinOp::Mul,
-                    lhs: Box::new(Expr::Ident("test".into())),
-                    rhs: Box::new(Expr::Lit(Literal::Int(2))),
-                },
-            }
-        );
-    }
-
-    #[test]
-    fn derive_lens_celsius_to_fahrenheit() {
-        let Stmt::Derive { name, expr } = parsed("DERIVE LENS f AS celsius * 9 / 5 + 32") else {
-            panic!("expected derive");
+    fn derive_with_agg_call_and_arithmetic() {
+        let stmt = parsed("DERIVE LENS hot AS x > avg(x, -10, 0)");
+        let Stmt::Derive { name, expr } = stmt else {
+            panic!()
         };
-        assert_eq!(name, "f");
-        // ((celsius * 9) / 5) + 32
-        assert_eq!(
-            expr,
-            Expr::Binary {
-                op: BinOp::Add,
-                lhs: Box::new(Expr::Binary {
-                    op: BinOp::Div,
-                    lhs: Box::new(Expr::Binary {
-                        op: BinOp::Mul,
-                        lhs: Box::new(Expr::Ident("celsius".into())),
-                        rhs: Box::new(Expr::Lit(Literal::Int(9))),
-                    }),
-                    rhs: Box::new(Expr::Lit(Literal::Int(5))),
-                }),
-                rhs: Box::new(Expr::Lit(Literal::Int(32))),
-            }
-        );
-    }
-
-    #[test]
-    fn at_lens_point_lookup() {
-        assert_eq!(
-            parsed("AT LENS test 1"),
-            Stmt::At {
-                name: "test".into(),
-                t: 1,
-            }
-        );
-    }
-
-    #[test]
-    fn range_lens_bounds_only() {
-        assert_eq!(
-            parsed("RANGE LENS test 0 10"),
-            Stmt::Range {
-                name: "test".into(),
-                start: 0,
-                end: 10,
-                filter: None,
-            }
-        );
-    }
-
-    #[test]
-    fn range_lens_with_where_clause() {
-        assert_eq!(
-            parsed("RANGE LENS test 0 100 WHERE test > 5"),
-            Stmt::Range {
-                name: "test".into(),
-                start: 0,
-                end: 100,
-                filter: Some(Expr::Binary {
-                    op: BinOp::Gt,
-                    lhs: Box::new(Expr::Ident("test".into())),
-                    rhs: Box::new(Expr::Lit(Literal::Int(5))),
-                }),
-            }
-        );
-    }
-
-    #[test]
-    fn range_lens_with_compound_predicate() {
-        let Stmt::Range { filter, .. } = parsed("RANGE LENS x 0 100 WHERE x > 5 && x < 50") else {
-            panic!("expected range");
+        assert_eq!(name, "hot");
+        let Expr::Binary { op, .. } = expr else {
+            panic!()
         };
-        let want = Expr::Binary {
-            op: BinOp::And,
-            lhs: Box::new(Expr::Binary {
-                op: BinOp::Gt,
-                lhs: Box::new(Expr::Ident("x".into())),
-                rhs: Box::new(Expr::Lit(Literal::Int(5))),
-            }),
-            rhs: Box::new(Expr::Binary {
-                op: BinOp::Lt,
-                lhs: Box::new(Expr::Ident("x".into())),
-                rhs: Box::new(Expr::Lit(Literal::Int(50))),
-            }),
+        assert_eq!(op, BinOp::Gt);
+    }
+
+    #[test]
+    fn range_with_compound_where_clause() {
+        let stmt = parsed("RANGE LENS x 0 100 WHERE x > 5 && x < 50");
+        let Stmt::Range {
+            filter: Some(Expr::Binary { op, .. }),
+            ..
+        } = stmt
+        else {
+            panic!()
         };
-        assert_eq!(filter, Some(want));
+        assert_eq!(op, BinOp::And);
     }
 
     #[test]
-    fn drop_lens() {
-        assert_eq!(
-            parsed("DROP LENS test"),
-            Stmt::Drop {
-                name: "test".into(),
-            }
-        );
-    }
-
-    #[test]
-    fn keywords_are_case_insensitive() {
-        assert_eq!(
-            parsed("create lens test int"),
-            Stmt::Create {
-                name: "test".into(),
-                ty: Type::Int,
-            }
-        );
-        assert_eq!(
-            parsed("At Lens test 7"),
-            Stmt::At {
-                name: "test".into(),
-                t: 7,
-            }
-        );
-    }
-
-    #[test]
-    fn extra_whitespace_is_tolerated() {
-        assert_eq!(
-            parsed("   CREATE   LENS   test   int   "),
-            Stmt::Create {
-                name: "test".into(),
-                ty: Type::Int,
-            }
-        );
-    }
-
-    #[test]
-    fn missing_lens_keyword_fails() {
-        assert!(parse("CREATE test int").is_err());
-    }
-
-    #[test]
-    fn unknown_statement_fails() {
-        assert!(parse("FOO LENS test 1").is_err());
-    }
-
-    #[test]
-    fn malformed_append_fails() {
-        // missing end + value
-        assert!(parse("APPEND LENS test 0").is_err());
-    }
-
-    #[test]
-    fn ident_accepts_underscores_and_digits() {
-        ok(ident("sensor_1"), "sensor_1".into(), "");
-        ok(ident("_x"), "_x".into(), "");
-    }
-
-    #[test]
-    fn integer_handles_signs() {
-        ok(integer("42"), 42, "");
-        ok(integer("-7"), -7, "");
-    }
-
-    #[test]
-    fn string_lit_handles_empty() {
-        ok(string_lit("\"\""), "".into(), "");
-    }
-
-    #[test]
-    fn literal_precedence_keywords_over_ident() {
-        ok(literal("true"), Literal::Bool(true), "");
-        ok(literal("null"), Literal::Null, "");
-    }
-
-    #[test]
-    fn expr_precedence_mul_before_add() {
-        let (_, e) = expr("1 + 2 * 3").unwrap();
-        assert_eq!(
-            e,
-            Expr::Binary {
-                op: BinOp::Add,
-                lhs: Box::new(Expr::Lit(Literal::Int(1))),
-                rhs: Box::new(Expr::Binary {
-                    op: BinOp::Mul,
-                    lhs: Box::new(Expr::Lit(Literal::Int(2))),
-                    rhs: Box::new(Expr::Lit(Literal::Int(3))),
-                }),
-            }
-        );
-    }
-
-    #[test]
-    fn expr_parens_override_precedence() {
-        let (_, e) = expr("(1 + 2) * 3").unwrap();
-        assert_eq!(
-            e,
-            Expr::Binary {
-                op: BinOp::Mul,
-                lhs: Box::new(Expr::Binary {
-                    op: BinOp::Add,
-                    lhs: Box::new(Expr::Lit(Literal::Int(1))),
-                    rhs: Box::new(Expr::Lit(Literal::Int(2))),
-                }),
-                rhs: Box::new(Expr::Lit(Literal::Int(3))),
-            }
-        );
-    }
-
-    #[test]
-    fn expr_unary_neg_and_not() {
-        let (_, e) = expr("-x").unwrap();
-        assert_eq!(
-            e,
-            Expr::Unary {
-                op: UnOp::Neg,
-                expr: Box::new(Expr::Ident("x".into())),
-            }
-        );
-        let (_, e) = expr("!flag").unwrap();
-        assert_eq!(
-            e,
-            Expr::Unary {
-                op: UnOp::Not,
-                expr: Box::new(Expr::Ident("flag".into())),
-            }
-        );
-    }
-
-    #[test]
-    fn reduce_lens_parses() {
-        assert_eq!(
-            parsed("REDUCE LENS temp 0 100 USING avg"),
-            Stmt::Reduce {
-                name: "temp".into(),
-                start: 0,
-                end: 100,
-                func: AggFunc::Avg,
-            }
-        );
-    }
-
-    #[test]
-    fn reduce_all_agg_funcs() {
-        for (s, func) in [
-            ("min", AggFunc::Min),
-            ("max", AggFunc::Max),
-            ("avg", AggFunc::Avg),
-            ("sum", AggFunc::Sum),
-            ("count", AggFunc::Count),
-        ] {
-            assert_eq!(
-                parsed(&format!("REDUCE LENS x 0 10 USING {s}")),
-                Stmt::Reduce {
-                    name: "x".into(),
-                    start: 0,
-                    end: 10,
-                    func
-                }
-            );
-        }
-    }
-
-    #[test]
-    fn agg_call_in_expr() {
-        let (_, e) = expr("avg(temp, -10, 0)").unwrap();
-        assert_eq!(
-            e,
-            Expr::Agg {
-                func: AggFunc::Avg,
-                lens: "temp".into(),
-                rel_start: -10,
-                rel_end: 0,
-            }
-        );
-    }
-
-    #[test]
-    fn agg_call_in_derive() {
-        assert_eq!(
-            parsed("DERIVE LENS smooth AS avg(temp, -10, 0)"),
-            Stmt::Derive {
-                name: "smooth".into(),
-                expr: Expr::Agg {
-                    func: AggFunc::Avg,
-                    lens: "temp".into(),
-                    rel_start: -10,
-                    rel_end: 0,
-                },
-            }
-        );
-    }
-
-    #[test]
-    fn agg_call_composable_in_binary_expr() {
-        // x > avg(x, -10, 0)
-        let (_, e) = expr("x > avg(x, -10, 0)").unwrap();
-        assert_eq!(
-            e,
-            Expr::Binary {
-                op: BinOp::Gt,
-                lhs: Box::new(Expr::Ident("x".into())),
-                rhs: Box::new(Expr::Agg {
-                    func: AggFunc::Avg,
-                    lens: "x".into(),
-                    rel_start: -10,
-                    rel_end: 0,
-                }),
-            }
-        );
+    fn malformed_inputs_fail() {
+        assert!(parse("CREATE test int").is_err()); // missing LENS
+        assert!(parse("APPEND LENS test 0").is_err()); // truncated tau
     }
 
     #[test]

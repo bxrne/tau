@@ -34,6 +34,8 @@ rcgen = "0.13"
 rustyline = { version = "18.0", default-features = false, features = ["with-file-history"] }
 
 [dev-dependencies]
+hegeltest = "0.14.12"
+hegeltest-macros = "0.14.12"
 tempfile = "3.27.0"
 
 # Single-codegen-unit + fat-LTO + abort-on-panic profile for the bench binary.

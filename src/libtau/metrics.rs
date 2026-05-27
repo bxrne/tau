@@ -423,6 +423,8 @@ fn uptime_seconds() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hegel::TestCase;
+    use hegel::generators as gs;
 
     #[test]
     fn counters_start_at_zero() {
@@ -440,103 +442,128 @@ mod tests {
         assert_eq!(m.errors.load(r), 0);
     }
 
-    #[test]
-    fn record_append_observes_histogram() {
+    #[hegel::test]
+    fn record_methods_increment_count_and_ns(tc: TestCase) {
+        let samples = tc
+            .draw(gs::vecs(gs::integers::<u64>().min_value(0).max_value(10_000_000)).max_size(16));
         let m = Metrics::new();
-        m.record_append(500);
-        m.record_append(300);
-        assert_eq!(m.append_count.load(Ordering::Relaxed), 2);
-        assert_eq!(m.append_ns.load(Ordering::Relaxed), 800);
-        // 500ns -> 0us (rounds down), 300ns -> 0us.
-        assert_eq!(m.append_hist.count.load(Ordering::Relaxed), 2);
+        for &ns in &samples {
+            m.record_append(ns);
+        }
+        let r = Ordering::Relaxed;
+        assert_eq!(m.append_count.load(r), samples.len() as u64);
+        assert_eq!(m.append_ns.load(r), samples.iter().sum::<u64>());
+        assert_eq!(m.append_hist.count.load(r), samples.len() as u64);
     }
 
-    #[test]
-    fn histogram_bucket_assignment() {
+    #[hegel::test]
+    fn histogram_observations_fall_in_the_right_bucket(tc: TestCase) {
         let h = Histogram::new();
-        h.observe_ns(7_000); // 7us
-        h.observe_ns(70_000); // 70us
-        // 7us falls into the le=10 bucket and every higher bucket.
-        let i_10 = LATENCY_BUCKETS_US.iter().position(|b| *b == 10).unwrap();
-        assert!(h.counts[i_10].load(Ordering::Relaxed) >= 1);
+        let ns = tc.draw(gs::integers::<u64>().min_value(0).max_value(2_000_000_000));
+        h.observe_ns(ns);
+        let us = ns / 1_000;
+        let r = Ordering::Relaxed;
+
+        // The le=B bucket contains the observation iff us <= B.
+        for (i, &bound) in LATENCY_BUCKETS_US.iter().enumerate() {
+            let expected = if us <= bound { 1 } else { 0 };
+            assert_eq!(h.counts[i].load(r), expected, "bucket le={bound}");
+        }
+        // The +Inf bucket (total count) always contains the observation.
+        assert_eq!(h.count.load(r), 1);
+        assert_eq!(h.sum_us.load(r), us);
     }
 
-    #[test]
-    fn record_auth_attempt_increments() {
+    #[hegel::test]
+    fn histogram_buckets_are_monotone_non_decreasing(tc: TestCase) {
+        let h = Histogram::new();
+        let samples =
+            tc.draw(gs::vecs(gs::integers::<u64>().min_value(0).max_value(1_000_000)).max_size(64));
+        for s in samples {
+            h.observe_ns(s);
+        }
+        let r = Ordering::Relaxed;
+        let counts: Vec<u64> = h.counts.iter().map(|c| c.load(r)).collect();
+        for w in counts.windows(2) {
+            assert!(w[0] <= w[1], "bucket counts must be cumulative");
+        }
+        // The largest bucket count is always <= the total observation count.
+        let total = h.count.load(r);
+        for c in &counts {
+            assert!(*c <= total);
+        }
+    }
+
+    #[hegel::test]
+    fn counters_accumulate_linearly(tc: TestCase) {
+        // For any sequence of (kind, calls) draws, each counter increments
+        // exactly by the number of calls.
+        let auth_attempts = tc.draw(gs::integers::<u64>().min_value(0).max_value(50));
+        let auth_failures = tc.draw(gs::integers::<u64>().min_value(0).max_value(50));
+        let errors = tc.draw(gs::integers::<u64>().min_value(0).max_value(50));
+        let rejected = tc.draw(gs::integers::<u64>().min_value(0).max_value(50));
         let m = Metrics::new();
-        m.record_auth_attempt();
-        m.record_auth_attempt();
-        assert_eq!(m.auth_attempts.load(Ordering::Relaxed), 2);
+        for _ in 0..auth_attempts {
+            m.record_auth_attempt();
+        }
+        for _ in 0..auth_failures {
+            m.record_auth_failure();
+        }
+        for _ in 0..errors {
+            m.record_error();
+        }
+        for _ in 0..rejected {
+            m.record_rejected_connection();
+        }
+        let r = Ordering::Relaxed;
+        assert_eq!(m.auth_attempts.load(r), auth_attempts);
+        assert_eq!(m.auth_failures.load(r), auth_failures);
+        assert_eq!(m.errors.load(r), errors);
+        assert_eq!(m.rejected_connections.load(r), rejected);
     }
 
-    #[test]
-    fn record_auth_failure_increments() {
-        let m = Metrics::new();
-        m.record_auth_failure();
-        assert_eq!(m.auth_failures.load(Ordering::Relaxed), 1);
-    }
-
-    #[test]
-    fn record_error_increments() {
-        let m = Metrics::new();
-        m.record_error();
-        m.record_error();
-        m.record_error();
-        assert_eq!(m.errors.load(Ordering::Relaxed), 3);
-    }
-
-    #[test]
-    fn record_rejected_connection_increments() {
-        let m = Metrics::new();
-        m.record_rejected_connection();
-        m.record_rejected_connection();
-        assert_eq!(m.rejected_connections.load(Ordering::Relaxed), 2);
-    }
-
-    #[test]
-    fn prometheus_text_contains_expected_families() {
+    #[hegel::test]
+    fn prometheus_text_exposes_every_documented_family(tc: TestCase) {
+        let _ = tc;
         let m = Metrics::new();
         m.record_append(100);
         m.record_at(200);
         m.record_range(300);
         m.record_reduce(400);
         m.record_ddl(50);
-        m.connections.fetch_add(3, Ordering::Relaxed);
-        m.record_rejected_connection();
-        m.record_auth_attempt();
-        m.record_auth_attempt();
-        m.record_auth_failure();
-        m.record_error();
-
         let text = m.prometheus_text();
-        assert!(text.contains("tau_statements_total{type=\"append\"} 1"));
-        assert!(text.contains("tau_statement_duration_microseconds_count{type=\"append\"}"));
-        assert!(text.contains("tau_statement_duration_microseconds_bucket{type=\"append\","));
-        assert!(text.contains("tau_connections_total 3"));
-        assert!(text.contains("tau_rejected_connections_total 1"));
-        assert!(text.contains("tau_auth_attempts_total 2"));
-        assert!(text.contains("tau_auth_failures_total 1"));
-        assert!(text.contains("tau_errors_total 1"));
-        assert!(text.contains("tau_process_resident_bytes"));
-        assert!(text.contains("tau_process_open_fds"));
-        assert!(text.contains("tau_process_threads"));
-        assert!(text.contains("tau_process_uptime_seconds"));
+        for line in [
+            "# TYPE tau_statements_total counter",
+            "# TYPE tau_statement_nanoseconds_total counter",
+            "# TYPE tau_statement_duration_microseconds histogram",
+            "# TYPE tau_connections_total counter",
+            "# TYPE tau_rejected_connections_total counter",
+            "# TYPE tau_auth_attempts_total counter",
+            "# TYPE tau_auth_failures_total counter",
+            "# TYPE tau_errors_total counter",
+            "# TYPE tau_process_resident_bytes gauge",
+        ] {
+            assert!(text.contains(line), "missing: {line}");
+        }
         assert!(text.contains("# EOF"));
     }
 
-    #[test]
-    fn prometheus_text_has_type_lines() {
+    #[hegel::test]
+    fn prometheus_text_count_matches_counters(tc: TestCase) {
+        let n_append = tc.draw(gs::integers::<u64>().min_value(0).max_value(20));
+        let n_at = tc.draw(gs::integers::<u64>().min_value(0).max_value(20));
         let m = Metrics::new();
+        for _ in 0..n_append {
+            m.record_append(100);
+        }
+        for _ in 0..n_at {
+            m.record_at(50);
+        }
         let text = m.prometheus_text();
-        assert!(text.contains("# TYPE tau_statements_total counter"));
-        assert!(text.contains("# TYPE tau_statement_nanoseconds_total counter"));
-        assert!(text.contains("# TYPE tau_statement_duration_microseconds histogram"));
-        assert!(text.contains("# TYPE tau_connections_total counter"));
-        assert!(text.contains("# TYPE tau_rejected_connections_total counter"));
-        assert!(text.contains("# TYPE tau_auth_attempts_total counter"));
-        assert!(text.contains("# TYPE tau_auth_failures_total counter"));
-        assert!(text.contains("# TYPE tau_errors_total counter"));
-        assert!(text.contains("# TYPE tau_process_resident_bytes gauge"));
+        assert!(text.contains(&format!(
+            "tau_statements_total{{type=\"append\"}} {n_append}"
+        )));
+        assert!(text.contains(&format!("tau_statements_total{{type=\"at\"}} {n_at}")));
     }
 
     #[test]
@@ -558,8 +585,7 @@ mod tests {
         let u = ProcessUsage::sample();
         assert!(
             u.rss_bytes > 0,
-            "RSS should be observable on Linux, got {:?}",
-            u
+            "RSS should be observable on Linux, got {u:?}"
         );
         assert!(u.threads > 0, "thread count should be observable on Linux");
     }

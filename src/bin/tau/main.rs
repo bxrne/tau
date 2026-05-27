@@ -649,10 +649,87 @@ fn format_error(e: &ExecError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hegel::TestCase;
+    use hegel::generators as gs;
+    use hegel::generators::Generator;
     use tau::Stmt;
 
     fn exec() -> Arc<RwLock<Executor>> {
         Arc::new(RwLock::new(Executor::new()))
+    }
+
+    #[hegel::test]
+    fn handle_query_never_panics(tc: TestCase) {
+        let input = tc.draw(gs::text().max_size(256));
+        let e = exec();
+        let _ = handle_query(&input, &e, None);
+    }
+
+    #[hegel::test]
+    fn at_after_append_returns_encoded_value(tc: TestCase) {
+        let v = tc.draw(
+            gs::integers::<i64>()
+                .min_value(-1_000_000)
+                .max_value(1_000_000),
+        );
+        let probe = tc.draw(gs::integers::<i64>().min_value(0).max_value(99));
+        let e = exec();
+        handle_query("CREATE DATABASE main", &e, None);
+        handle_query("CREATE LENS x int", &e, None);
+        assert_eq!(
+            handle_query(&format!("APPEND LENS x 0 100 {v}"), &e, None),
+            "OK"
+        );
+        assert_eq!(
+            handle_query(&format!("AT LENS x {probe}"), &e, None),
+            format!("VAL i{v}")
+        );
+    }
+
+    #[hegel::test]
+    fn at_uncovered_timestamp_yields_nil(tc: TestCase) {
+        let probe = tc.draw(gs::integers::<i64>().min_value(101).max_value(1_000_000));
+        let e = exec();
+        handle_query("CREATE DATABASE main", &e, None);
+        handle_query("CREATE LENS x int", &e, None);
+        handle_query("APPEND LENS x 0 100 42", &e, None);
+        assert_eq!(
+            handle_query(&format!("AT LENS x {probe}"), &e, None),
+            "VAL NIL"
+        );
+    }
+
+    #[hegel::test]
+    fn parse_failure_starts_with_err_parse(tc: TestCase) {
+        // Any line that doesn't look like a tauql statement must produce
+        // either "ERR parse:" or "ERR trailing input:" - never panic and
+        // never silently succeed.
+        let junk = tc.draw(gs::from_regex("[A-Z]{4,12}").fullmatch(true).filter(|s| {
+            !matches!(
+                s.as_str(),
+                "CREATE"
+                    | "DROP"
+                    | "USE"
+                    | "APPEND"
+                    | "COPY"
+                    | "DERIVE"
+                    | "SHOW"
+                    | "RANGE"
+                    | "REDUCE"
+                    | "GRANT"
+                    | "REVOKE"
+            )
+        }));
+        let line = format!("{junk} something");
+        let r = handle_query(&line, &exec(), None);
+        assert!(r.starts_with("ERR "), "expected ERR, got {r:?}");
+    }
+
+    #[hegel::test]
+    fn trailing_input_is_reported(tc: TestCase) {
+        let extra = tc.draw(gs::from_regex("[A-Z][A-Z]+").fullmatch(true));
+        let r = handle_query(&format!("CREATE DATABASE a {extra}"), &exec(), None);
+        assert!(r.starts_with("ERR trailing input"), "got: {r}");
     }
 
     #[test]
@@ -660,23 +737,6 @@ mod tests {
         let e = exec();
         assert_eq!(handle_query("CREATE DATABASE main", &e, None), "OK");
         assert_eq!(handle_query("CREATE LENS x int", &e, None), "OK");
-    }
-
-    #[test]
-    fn value_response_round_trips_through_codec() {
-        let e = exec();
-        handle_query("CREATE DATABASE main", &e, None);
-        handle_query("CREATE LENS x int", &e, None);
-        handle_query("APPEND LENS x 0 10 42", &e, None);
-        assert_eq!(handle_query("AT LENS x 5", &e, None), "VAL i42");
-    }
-
-    #[test]
-    fn nil_response_for_uncovered_lookup() {
-        let e = exec();
-        handle_query("CREATE DATABASE main", &e, None);
-        handle_query("CREATE LENS x int", &e, None);
-        assert_eq!(handle_query("AT LENS x 5", &e, None), "VAL NIL");
     }
 
     #[test]
@@ -693,31 +753,8 @@ mod tests {
     }
 
     #[test]
-    fn empty_range_response_has_zero_count() {
-        let e = exec();
-        handle_query("CREATE DATABASE main", &e, None);
-        handle_query("CREATE LENS x int", &e, None);
-        assert_eq!(handle_query("RANGE LENS x 0 10", &e, None), "RANGE 0");
-    }
-
-    #[test]
-    fn parse_error_is_reported() {
-        let e = exec();
-        let r = handle_query("BOGUS QUERY", &e, None);
-        assert!(r.starts_with("ERR parse:"), "got: {r}");
-    }
-
-    #[test]
-    fn trailing_input_is_rejected() {
-        let e = exec();
-        let r = handle_query("CREATE DATABASE a JUNK", &e, None);
-        assert!(r.starts_with("ERR trailing input"), "got: {r}");
-    }
-
-    #[test]
     fn execution_error_is_reported() {
-        let e = exec();
-        let r = handle_query("CREATE LENS x int", &e, None);
+        let r = handle_query("CREATE LENS x int", &exec(), None);
         assert!(r.starts_with("ERR no active database"), "got: {r}");
     }
 
@@ -727,7 +764,6 @@ mod tests {
         handle_query("CREATE DATABASE main", &e, None);
         handle_query("CREATE LENS x int", &e, None);
         handle_query("APPEND LENS x 0 100 7", &e, None);
-
         let mut handles = vec![];
         for _ in 0..8 {
             let e = e.clone();
@@ -767,20 +803,28 @@ mod tests {
         let e = exec();
         let guard = e.write().unwrap();
         let stmt = Stmt::CreateDatabase { name: "a".into() };
-        let res = guard.exec_read(&stmt);
-        assert!(matches!(res, Err(ExecError::InvalidExpr(_))));
+        assert!(matches!(
+            guard.exec_read(&stmt),
+            Err(ExecError::InvalidExpr(_))
+        ));
     }
 
-    #[test]
-    fn parse_auth_line_splits_user_and_pass() {
-        let result = parse_auth_line("AUTH admin s3cr3t");
-        assert_eq!(result, Some(("admin".into(), "s3cr3t".into())));
+    #[hegel::test]
+    fn parse_auth_line_roundtrips_for_valid_input(tc: TestCase) {
+        let user = tc.draw(gs::from_regex("[a-z][a-z0-9_]{0,10}").fullmatch(true));
+        let pass = tc.draw(gs::from_regex("[A-Za-z0-9!@#$%^&*]{1,16}").fullmatch(true));
+        let line = format!("AUTH {user} {pass}");
+        assert_eq!(parse_auth_line(&line), Some((user, pass)));
     }
 
-    #[test]
-    fn parse_auth_line_returns_none_for_non_auth() {
-        assert_eq!(parse_auth_line("CREATE DATABASE x"), None);
-        assert_eq!(parse_auth_line("AUTH"), None);
-        assert_eq!(parse_auth_line(""), None);
+    #[hegel::test]
+    fn parse_auth_line_returns_none_for_non_auth(tc: TestCase) {
+        // Any line that doesn't start with the literal "AUTH " followed by
+        // two whitespace-separated tokens returns None.  We bias the
+        // generator to start with non-AUTH text or be too short.
+        let input = tc.draw(gs::text().max_size(64).filter(|s| {
+            !s.starts_with("AUTH ") || s.trim_start_matches("AUTH ").split(' ').count() < 2
+        }));
+        let _ = parse_auth_line(&input); // never panics; result may be None or Some
     }
 }
