@@ -19,6 +19,8 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+use argon2::{Algorithm, Params, Version};
 use argon2::{
     Argon2,
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
@@ -118,6 +120,18 @@ impl std::ops::BitAnd for Perm {
     }
 }
 
+fn argon2() -> Argon2<'static> {
+    #[cfg(test)]
+    {
+        let params = Params::new(64, 1, 1, None).expect("argon2 test params");
+        Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+    }
+    #[cfg(not(test))]
+    {
+        Argon2::default()
+    }
+}
+
 /// A single authenticated principal.
 #[derive(Debug, Clone)]
 pub struct User {
@@ -133,7 +147,7 @@ impl User {
     /// initial grants.
     pub fn new(name: &str, password: &str, grants: HashMap<String, Perm>) -> Self {
         let salt = SaltString::generate(&mut OsRng);
-        let phc_hash = Argon2::default()
+        let phc_hash = argon2()
             .hash_password(password.as_bytes(), &salt)
             .expect("argon2 hashing failed")
             .to_string();
@@ -149,7 +163,7 @@ impl User {
         let Ok(parsed) = PasswordHash::new(&self.phc_hash) else {
             return false;
         };
-        Argon2::default()
+        argon2()
             .verify_password(password.as_bytes(), &parsed)
             .is_ok()
     }
@@ -179,7 +193,7 @@ impl User {
     /// Replace the user's password with a freshly hashed one.
     pub fn set_password(&mut self, password: &str) {
         let salt = SaltString::generate(&mut OsRng);
-        self.phc_hash = Argon2::default()
+        self.phc_hash = argon2()
             .hash_password(password.as_bytes(), &salt)
             .expect("argon2 hashing failed")
             .to_string();
