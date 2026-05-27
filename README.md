@@ -204,18 +204,20 @@ Two paths, picked by where the file lives:
 ```bash
 # Server-side: the file is already on the server's filesystem (embedded mode,
 # Docker volume, etc.).  Runs as a normal tauql statement.
-COPY LENS temp FROM "/data/temperature.csv"
+COPY LENS cpu FROM "/data/cpu-load.csv"
 
 # Client-side: the file lives on your machine.  Use `tauctl`'s `load`
 # command, which reads the file locally and ships it to the active
 # connection as batched APPEND statements.  No server-side path access
 # required, works through TLS and auth.
-τ: load temp examples/data/temperature.csv
+τ: load cpu examples/data/cpu-load.csv
 ```
 
-Sample data lives in [`examples/data/`](examples/data/) - a couple of small
-CSVs (`temperature.csv`, `throughput.csv`) sized for documentation and
-demos, not benchmarks.
+[`examples/`](examples/README.md) walks through three committed sample
+datasets (CPU load, barometric pressure, request counts), the canonical
+queries against them (point lookups, range scans with `WHERE`, time-weighted
+reductions, rolling-average derived lenses), and **measured latency / memory
+numbers** captured from a real server run.
 
 Wire format: one statement per line in, one response per line out.
 
