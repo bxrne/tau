@@ -424,11 +424,13 @@ impl Executor {
             Stmt::Grant { database, .. } | Stmt::Revoke { database, .. } => {
                 require_admin_or_a_on(database)
             }
-            Stmt::ShowGrants { user: target } => match target {
-                None => require_global_admin(),
-                Some(t) if t == &user.name => Ok(()),
-                Some(_) => require_global_admin(),
-            },
+            Stmt::ShowGrants { user: target } => {
+                if target.as_deref().is_some_and(|t| t == user.name) {
+                    Ok(())
+                } else {
+                    require_global_admin()
+                }
+            }
         }
     }
 
@@ -1035,6 +1037,20 @@ fn collect_range_bounds(
     Ok((bounds, layers_snap))
 }
 
+/// Resolve the value of `name` at time `t`, using a layer snapshot when available.
+fn resolve_value_at(
+    state: &DbState,
+    name: &str,
+    layers_snap: Option<&[Layer<Value>]>,
+    t: Timestamp,
+) -> Result<Option<Value>, ExecError> {
+    Ok(if let Some(ls) = layers_snap {
+        at_layers(ls, t)
+    } else {
+        eval_lens(state, name, t)?
+    })
+}
+
 /// Build the output segments for a range scan from pre-computed `bounds`,
 /// optionally snapshotted `layers`, and an optional `filter` expression.
 fn build_range_segments(
@@ -1048,16 +1064,9 @@ fn build_range_segments(
         Vec::with_capacity(bounds.len().saturating_sub(1));
     for w in bounds.windows(2) {
         let (s, e) = (w[0], w[1]);
-        let v = if let Some(ls) = layers_snap {
-            match at_layers(ls, s) {
-                Some(v) => v,
-                None => continue,
-            }
-        } else {
-            match eval_lens(state, name, s)? {
-                Some(v) => v,
-                None => continue,
-            }
+        let v = match resolve_value_at(state, name, layers_snap, s)? {
+            Some(v) => v,
+            None => continue,
         };
         if let Some(f) = filter {
             match eval_expr(state, f, s)? {

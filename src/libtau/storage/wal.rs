@@ -141,20 +141,19 @@ impl<V: Codec> WalEntry<V> {
     }
 }
 
-/// Decrypt a data WAL entry (`E:<base64>` line content after stripping the `E:` prefix).
-/// Logs specific warnings for each failure mode and returns `None` on any error.
-fn decrypt_wal_data_entry(rest: &str, key: &Option<[u8; 32]>) -> Option<String> {
+/// Decrypt a WAL entry (data or schema). `label` prefixes all warning messages.
+fn decrypt_wal_entry(rest: &str, key: &Option<[u8; 32]>, label: &str) -> Option<String> {
     let key = match key {
         Some(k) => k,
         None => {
-            warn!("encrypted WAL entry found but no key configured, skipping");
+            warn!("{label} found but no key configured, skipping");
             return None;
         }
     };
     let blob = match B64.decode(rest) {
         Ok(b) => b,
         Err(_) => {
-            warn!("WAL entry base64 decode failed, skipping");
+            warn!("{label} base64 decode failed, skipping");
             return None;
         }
     };
@@ -162,43 +161,12 @@ fn decrypt_wal_data_entry(rest: &str, key: &Option<[u8; 32]>) -> Option<String> 
         Ok(bytes) => match String::from_utf8(bytes) {
             Ok(s) => Some(s),
             Err(_) => {
-                warn!("WAL entry decrypted but not valid UTF-8, skipping");
+                warn!("{label} decrypted but not valid UTF-8, skipping");
                 None
             }
         },
         Err(_) => {
-            warn!("WAL entry decryption failed, skipping");
-            None
-        }
-    }
-}
-
-/// Decrypt a schema WAL entry (`SE:<base64>` after stripping the `SE:` prefix).
-fn decrypt_wal_schema_entry(rest: &str, key: &Option<[u8; 32]>) -> Option<String> {
-    let key = match key {
-        Some(k) => k,
-        None => {
-            warn!("encrypted schema WAL entry found but no key configured, skipping");
-            return None;
-        }
-    };
-    let blob = match B64.decode(rest) {
-        Ok(b) => b,
-        Err(_) => {
-            warn!("schema WAL entry base64 decode failed, skipping");
-            return None;
-        }
-    };
-    match crypto::decrypt(key, &blob) {
-        Ok(bytes) => match String::from_utf8(bytes) {
-            Ok(s) => Some(s),
-            Err(_) => {
-                warn!("schema WAL entry decrypted but not valid UTF-8, skipping");
-                None
-            }
-        },
-        Err(_) => {
-            warn!("schema WAL entry decryption failed, skipping");
+            warn!("{label} decryption failed, skipping");
             None
         }
     }
@@ -367,7 +335,7 @@ impl Wal {
             }
 
             let plaintext: String = if let Some(rest) = line.strip_prefix("E:") {
-                match decrypt_wal_data_entry(rest, &self.key) {
+                match decrypt_wal_entry(rest, &self.key, "encrypted WAL entry") {
                     Some(s) => s,
                     None => {
                         skipped += 1;
@@ -464,7 +432,7 @@ impl Wal {
             let trimmed = line.trim();
 
             let inner: String = if let Some(rest) = trimmed.strip_prefix("SE:") {
-                match decrypt_wal_schema_entry(rest, &self.key) {
+                match decrypt_wal_entry(rest, &self.key, "encrypted schema WAL entry") {
                     Some(s) => s,
                     None => continue,
                 }

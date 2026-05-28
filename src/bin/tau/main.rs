@@ -494,6 +494,10 @@ fn handle_auth_attempt<S: Read + Write>(
     }
 }
 
+fn is_quit_cmd(s: &str) -> bool {
+    s.eq_ignore_ascii_case("QUIT") || s.eq_ignore_ascii_case("EXIT")
+}
+
 /// Drive a single client connection over any `Read + Write` stream.
 ///
 /// Enforces authentication (when `auth_enabled`) as the very first exchange,
@@ -528,7 +532,7 @@ fn run_query_loop<S: Read + Write>(
             continue;
         }
 
-        if trimmed.eq_ignore_ascii_case("QUIT") || trimmed.eq_ignore_ascii_case("EXIT") {
+        if is_quit_cmd(trimmed) {
             info!(%peer, user = ?authenticated_user, "client quit");
             reader.get_mut().write_all(b"OK BYE\n")?;
             reader.get_mut().flush()?;
