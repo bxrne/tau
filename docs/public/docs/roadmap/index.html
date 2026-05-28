@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+    <title>Roadmap - Adam Byrne</title>
+    
+    
+    <meta http-equiv="content-type" content="text/html; charset=utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1"><meta name="description" content="A time-series database built on immutable, layered temporal intervals. Roadmap "/>
+    <meta property="og:title" content="tau -&nbsp;Roadmap" />
+    <meta property="og:type" content="website"/><meta property="og:url" content="https:&#x2F;&#x2F;tau.bxrne.com&#x2F;docs&#x2F;roadmap&#x2F;"/><meta property="og:description" content="A time-series database built on immutable, layered temporal intervals."/>
+    <link rel="preload" href="https://tau.bxrne.com/assets/fonts/FiraCode-Regular.woff2" as="font" type="font/woff2" crossorigin="anonymous">
+    <link rel="preload" href="https://tau.bxrne.com/assets/fonts/FiraCode-Bold.woff2" as="font" type="font/woff2" crossorigin="anonymous">
+
+    <link rel="stylesheet" href="https://tau.bxrne.com/style.css?h=97e262212a0704163528">
+    <link rel="stylesheet" href=" https://tau.bxrne.com/color/orange.css?h=a5a5d7faf9d4bc3e0b18">
+    
+</head>
+    <body>
+        <div class="container">
+<header class="header">
+    <div class="header__inner">
+        <div class="header__logo">
+            <a href="https:&#x2F;&#x2F;tau.bxrne.com">
+    <div class="logo">
+        tau
+    </div>
+</a>
+        </div>
+        <div class="menu-trigger">menu</div>
+    </div>
+    
+    <nav class="menu">
+        <ul class="menu__inner menu__inner--desktop">
+            
+            
+                    <li>
+                        <a href="
+    
+        https://tau.bxrne.com/docs
+    
+">Docs</a>
+                    </li>
+                
+                    <li>
+                        <a href="
+    
+        https://tau.bxrne.com/posts
+    
+">Blog</a>
+                    </li>
+                
+            </ul>
+
+        <ul class="menu__inner menu__inner--mobile">
+            
+        <li>
+            <a href="
+    
+        https://tau.bxrne.com/docs
+    
+">Docs</a>
+        </li>
+        <li>
+            <a href="
+    
+        https://tau.bxrne.com/posts
+    
+">Blog</a>
+        </li>
+        </ul>
+    </nav>
+
+    </header>
+<div class="content"><article class="post">
+        <header>
+            <h1 class="post-title">
+                <a href="https:&#x2F;&#x2F;tau.bxrne.com&#x2F;docs&#x2F;roadmap&#x2F;">Roadmap</a>
+            </h1>
+            
+    <div class="post-meta">
+        <span class="post-date">2026.05.28
+                </span>
+
+        <span class="post-author"></span>
+
+        
+
+    
+    </div>
+
+            
+    
+
+
+<div class="toc" id="nav-container">
+	<p class="toc-head">Table of Contents</p>
+		<div id="nav-content" >
+		<ul>
+		
+			<li>
+				<a href="https://tau.bxrne.com/docs/roadmap/#roadmap">Roadmap</a>
+				
+					<ul>
+						
+							<li>
+								<a href="https://tau.bxrne.com/docs/roadmap/#v0-1-0-current">v0.1.0 (current)</a>
+							</li>
+							
+						
+							<li>
+								<a href="https://tau.bxrne.com/docs/roadmap/#v1-0-criteria">v1.0 criteria</a>
+							</li>
+							
+						
+							<li>
+								<a href="https://tau.bxrne.com/docs/roadmap/#backlog">Backlog</a>
+							</li>
+							
+						
+					</ul>
+				
+			</li>
+		
+		</ul>
+		</div>
+</div>
+
+</header><h1 id="roadmap">Roadmap</h1>
+<p>The goal is to reach <strong>v1.0</strong>: a system trusted enough for production time-series workloads, correct under adversity, observable, and documented well enough that a new operator can run it without asking for help.</p>
+<p>Current work ships as <strong>v0.1.0</strong>. The v0.x line is where the engine matures; features are complete but the operational story, correctness guarantees, and client ecosystem are still being hardened.</p>
+<hr />
+<h2 id="v0-1-0-current">v0.1.0 (current)</h2>
+<p>The core engine and server are feature-complete.</p>
+<p><strong>Engine</strong></p>
+<ul>
+<li>Immutable, layered temporal intervals; newest-layer-wins semantics</li>
+<li>O(log n) point lookup; sweep-line compaction</li>
+<li>Derived lenses with lazy evaluation and cycle detection</li>
+<li><code>Arc</code>-backed cheap layer clones</li>
+</ul>
+<p><strong>Storage</strong></p>
+<ul>
+<li>In-memory and binary disk backends</li>
+<li>AES-256-GCM encryption at rest; per-entry CRC32 integrity</li>
+<li>Write-ahead log with fsync durability and WAL replay on startup</li>
+<li>Schema DDL (<code>CREATE LENS</code> / <code>DERIVE LENS</code>) persisted and replayed</li>
+<li>WAL checkpoint after compaction</li>
+</ul>
+<p><strong>Query language (TauQL)</strong></p>
+<ul>
+<li><code>CREATE / DROP / USE DATABASE</code>; <code>SHOW DATABASES / LENSES</code></li>
+<li><code>CREATE / DROP LENS</code> with static types</li>
+<li><code>APPEND LENS</code>; <code>COPY LENS FROM</code> for server-side CSV ingest</li>
+<li><code>DERIVE LENS AS &lt;expr&gt;</code>: lazy computed lenses</li>
+<li><code>AT</code>, <code>RANGE [WHERE &lt;expr&gt;]</code>, <code>REDUCE USING (min|max|avg|sum|count)</code></li>
+<li>Rolling window aggregations in expressions</li>
+<li>Full expression grammar: arithmetic, comparison, logical, unary</li>
+</ul>
+<p><strong>Server</strong></p>
+<ul>
+<li>Line-oriented TCP protocol with shared/exclusive locking</li>
+<li>TLS (PEM cert/key or ephemeral self-signed)</li>
+<li>Argon2id authentication; per-database CRUDA grants; wildcard grants</li>
+<li><code>CREATE / DROP USER</code>, <code>GRANT / REVOKE</code>, <code>SHOW USERS / GRANTS</code></li>
+<li>Connection limit and per-connection idle timeout</li>
+<li><code>GET /healthz</code> liveness probe</li>
+</ul>
+<p><strong>Observability</strong></p>
+<ul>
+<li>Prometheus metrics via <code>--metrics-port</code></li>
+<li>Structured <code>tracing</code> logs; per-query elapsed time</li>
+</ul>
+<p><strong>Tooling</strong></p>
+<ul>
+<li><code>tauctl</code> REPL with TLS, auth, named connection pool, history, client-side CSV load</li>
+<li>Docker image and <code>docker-compose</code> stack with Prometheus and Grafana</li>
+<li>Deterministic simulation tester (<code>dst</code>) covering all transport, auth, and WAL combinations</li>
+</ul>
+<hr />
+<h2 id="v1-0-criteria">v1.0 criteria</h2>
+<p>v1.0 is not a feature list. It is a quality bar.</p>
+<p><strong>Correctness</strong></p>
+<ul>
+<li>The DST runs without finding an invariant violation for any seed across the full operation space: compaction, WAL replay, derived lenses, and authorization all interact correctly under simulated stress.</li>
+<li>Fuzz targets exist for the parser and WAL deserialiser and have run for at least 24 hours without crashes.</li>
+<li>Property-based tests cover <code>compact_layers</code> end-to-end: any layer sequence produces identical query results before and after.</li>
+</ul>
+<p><strong>Operability</strong></p>
+<ul>
+<li>A new operator can deploy, configure, and monitor a Tau instance using only written documentation; no tribal knowledge required.</li>
+<li>A protocol specification describes the full wire format, all response codes, and the authentication handshake.</li>
+<li>An operational guide covers WAL sizing, compaction tuning, and encryption key rotation.</li>
+<li>Graceful shutdown drains in-flight connections on <code>SIGTERM</code>/<code>SIGINT</code>.</li>
+<li>A TOML/YAML config file replaces long flag lists.</li>
+</ul>
+<p><strong>Reliability</strong></p>
+<ul>
+<li>Online backup and restore tooling exists and is tested.</li>
+<li>WAL truncation mid-entry replays cleanly with no panic and no silent data loss.</li>
+</ul>
+<p><strong>Client story</strong></p>
+<ul>
+<li>A typed async Rust client crate handles connection management, auth, and response parsing.</li>
+<li>At least one thin client (Python or Go) exists for integration-test ergonomics.</li>
+</ul>
+<hr />
+<h2 id="backlog">Backlog</h2>
+<ul>
+<li>Named timestamp aliases: ISO-8601 or human-readable offsets</li>
+<li><code>systemd</code> unit file for local deployments</li>
+<li><code>man</code> page for the server binary</li>
+<li>Online schema evolution (rename lens, change type with migration)</li>
+</ul>
+
+
+        
+    
+
+        
+        
+    </article></div>
+    <div class="pagination">
+        <div class="pagination__buttons">
+            </div>
+    </div>
+<footer class="footer">
+                    <div class="footer__inner"><div class="copyright copyright--user">Copyright Adam Byrne (https://github.com/bxrne/tau)</div>
+    <script type="text/javascript" src="https://tau.bxrne.com/assets/js/main.js"></script>
+</div>
+                    
+
+                </footer></div>
+    </body>
+</html>
