@@ -344,7 +344,7 @@ Bench options:
 | `--out PATH` | none | Write CSV results to path |
 | `--label NAME` | run | Tag attached to every CSV row |
 
-See [`ROADMAP.md`](ROADMAP.md) for background on the bench design and past optimization work.
+See [`TEST.md`](TEST.md) for how `bench` and the `dst` deterministic simulation tester relate to each other.
 
 ## Container usage
 
@@ -447,9 +447,19 @@ The runtime base image is `scratch` with no shell, `curl` or `wget`, so docker's
 - [ ] Tune `--max-connections` and `--idle-timeout-secs`
 - [ ] Back up the `tau_data` volume on a schedule (it contains the WAL and `users.json`)
 
+## Testing
+
+Three complementary layers -- see [`TEST.md`](TEST.md) for the full design.
+
+| Layer | What it catches | How to run |
+|-------|----------------|------------|
+| Unit tests | Regressions on known-shape behaviour | `cargo test --release` |
+| Hegel PBT | Invariant violations across random inputs | `cargo test --release` |
+| DST (`dst` binary) | Emergent correctness bugs across simulated centuries of operation | `cargo run --release --bin dst` |
+
 ## Roadmap
 
-See [`ROADMAP.md`](ROADMAP.md) for what's done and what remains. End-to-end integration tests and the operational tooling suite are the major remaining items.
+See [`ROADMAP.md`](ROADMAP.md) for what shipped in v1 and what is planned next.
 
 ## License
 
@@ -468,4 +478,4 @@ Tau is distributed under the [PolyForm Noncommercial License 1.0.0](LICENSE).
 - Hosting Tau as a managed service that you sell access to.
 - Internal use by a for-profit company for production workloads.
 
-If you need a commercial licence, open an issue or get in touch via the email associated with the repository owner. The default position is "no" unless we explicitly agree otherwise in writing.
+If you need a commercial licence, open an issue or get in touch via the email associated with the repository owner. The default position is "no" unless agreed otherwise in writing.
