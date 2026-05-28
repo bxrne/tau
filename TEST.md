@@ -152,7 +152,7 @@ cargo run --release --bin dst -- --duration 300
 cargo run --release --bin dst -- --readers 32
 
 # Print the op sequence as it executes (useful for debugging a failure)
-cargo run --release --bin dst -- --seed 42 --verbose
+cargo run --release --bin dst -- --seed 42 --log-level trace
 ```
 
 On failure the DST prints:
