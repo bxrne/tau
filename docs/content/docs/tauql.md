@@ -1,6 +1,6 @@
 +++
 title = "TauQL Language Reference"
-date = 2024-01-02
+date = 2026-05-28
 template = "page.html"
 +++
 
@@ -128,7 +128,7 @@ Requires `C` permission on the active database.
 
 ### `APPEND LENS <name> <s> <e> <v> [, <s> <e> <v> ...]`
 
-Appends one or more temporal intervals to a lens. Multiple intervals in a single `APPEND` form one atomic layer — they either all succeed or all fail.
+Appends one or more temporal intervals to a lens. Multiple intervals in a single `APPEND` form one atomic layer: they either all succeed or all fail.
 
 ```
 APPEND LENS temperature 0 3600 18.5
@@ -324,7 +324,7 @@ Precedence from low (evaluated last) to high (evaluated first):
 - **Literals:** integers (`42`, `-5`), floats (`3.14`, `-0.5`), booleans (`true`, `false`), strings (`"hello"`), null (`null`)
 - **Identifiers:** reference another lens by name, e.g. `cpu`, `temperature`
 - **Parentheses:** `(expr)` for explicit grouping
-- **Aggregation calls:** `func(lens, rel_start, rel_end)` — see below
+- **Aggregation calls:** `func(lens, rel_start, rel_end)` (see Aggregations below)
 
 ### Aggregation expressions
 

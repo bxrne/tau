@@ -78,7 +78,7 @@
             </h1>
             
     <div class="post-meta">
-        <span class="post-date">2024.01.05
+        <span class="post-date">2026.05.28
                 </span>
 
         <span class="post-author"></span>
@@ -265,13 +265,13 @@ VAL i2095                  ← peak minute (the burst)
 <pre><code>τ: RANGE LENS cpu 35000 37000
 RANGE 34; 35000:35040:i40; 35040:35100:i38; ...; 36960:37000:i47
 </code></pre>
-<p>34 segments because every minute boundary inside the window is a change point. Adjacent segments with identical values are merged automatically — a long flat run produces a single segment.</p>
+<p>34 segments because every minute boundary inside the window is a change point. Adjacent segments with identical values are merged automatically; a long flat run produces a single segment.</p>
 <hr />
 <h2 id="range-with-where-filter">Range with <code>WHERE</code> filter</h2>
 <pre><code>τ: RANGE LENS cpu 0 86400 WHERE cpu &gt; 75
 RANGE 78; 44340:44400:i76; 44640:44700:i76; ...; 53880:53940:i78
 </code></pre>
-<p>78 segments, all in the mid-day window when the spike pushed CPU above 75%. The filter is a plain expression — any operator (<code>&lt; &lt;= == != &gt;= &gt;</code>, <code>&amp;&amp; ||</code>, arithmetic) works.</p>
+<p>78 segments, all in the mid-day window when the spike pushed CPU above 75%. The filter is a plain expression; any operator (<code>&lt; &lt;= == != &gt;= &gt;</code>, <code>&amp;&amp; ||</code>, arithmetic) works.</p>
 <hr />
 <h2 id="derived-lenses">Derived lenses</h2>
 <p>A derived lens is a lazy expression over other lenses. Nothing is materialised: every query re-evaluates the expression on the current data.</p>
@@ -308,7 +308,7 @@ OK
 τ: AT LENS cpu_hot 43200
 VAL b1              ← instantaneous reading is above the 30-minute rolling mean
 </code></pre>
-<p>This is the canonical "is the signal above its own rolling baseline" pattern. Because adjacent same-value segments are merged, you get one segment per state-change rather than one per minute — ideal for alerting.</p>
+<p>This is the canonical "is the signal above its own rolling baseline" pattern. Because adjacent same-value segments are merged, you get one segment per state-change rather than one per minute; ideal for alerting.</p>
 <hr />
 <h2 id="reset">Reset</h2>
 <pre><code data-lang="bash"># wipe demo state and start fresh

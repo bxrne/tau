@@ -78,7 +78,7 @@
             </h1>
             
     <div class="post-meta">
-        <span class="post-date">2024.01.06
+        <span class="post-date">2026.05.28
                 </span>
 
         <span class="post-author"></span>
@@ -256,7 +256,7 @@
 </div>
 
 </header><h1 id="architecture">Architecture</h1>
-<p>Tau is a time-series database for recording how values change over time. It is not a general-purpose relational store — no rows, no tables, no indexes. Only temporal intervals, a query language built around them, and a storage model that makes correction cheap.</p>
+<p>Tau is a time-series database for recording how values change over time. It is not a general-purpose relational store: no rows, no tables, no indexes. Only temporal intervals, a query language built around them, and a storage model that makes correction cheap.</p>
 <p>This document describes <em>why</em> Tau is built the way it is, not just how it works. Decisions that might look odd from the outside have reasons. Knowing the reasons lets you contribute without fighting the grain of the design.</p>
 <hr />
 <h2 id="the-problem">The Problem</h2>
@@ -277,14 +277,14 @@
 </code></pre>
 <p>The half-open interval is intentional. Adjacent intervals tile cleanly: <code>[0, 10)</code> and <code>[10, 20)</code> cover <code>[0, 20)</code> with no overlap and no gap. Equality on the boundary belongs unambiguously to the later interval.</p>
 <p><code>Tau::new</code> asserts <code>start &lt; end</code>. There are no zero-width taus.</p>
-<p>Timestamps are <code>i64</code> — nanoseconds, milliseconds, or any other unit the caller agrees on. Tau treats them as opaque ordered integers.</p>
+<p>Timestamps are <code>i64</code> (nanoseconds, milliseconds, or any other unit the caller agrees on). Tau treats them as opaque ordered integers.</p>
 <h3 id="layer-v"><code>Layer&lt;V&gt;</code></h3>
 <p>A batch of taus that arrived together: a sorted, non-overlapping <code>Arc&lt;[Tau&lt;V&gt;]&gt;</code>.</p>
 <pre><code>Layer { id: u64, min_start: i64, max_end: i64, taus: Arc&lt;[Tau&lt;V&gt;]&gt; }
 </code></pre>
 <p>Layers are immutable once created. Cloning a layer is an atomic reference-count bump.</p>
 <p><code>min_start</code> and <code>max_end</code> are skip-check bounds. A point query for timestamp <code>t</code> can skip an entire layer with two comparisons (<code>t &lt; min_start || t &gt;= max_end</code>) before touching the data.</p>
-<p>Within the slice, a binary search — <code>partition_point</code> on <code>tau.end &lt;= t</code> — locates the candidate in O(log n).</p>
+<p>Within the slice, a binary search (<code>partition_point</code> on <code>tau.end &lt;= t</code>) locates the candidate in O(log n).</p>
 <h3 id="lens-v"><code>Lens&lt;V&gt;</code></h3>
 <p>A named temporal function: either a <code>Base</code> lens backed by a store, or a <code>Derived</code> lens backed by a lazy closure.</p>
 <pre><code>Lens::Base          -- delegates to the store layer stack
@@ -295,8 +295,8 @@ Lens::Derived(f)    -- f: Arc&lt;dyn Fn(Timestamp) -&gt; Option&lt;V&gt;&gt;
 <hr />
 <h2 id="storage">Storage</h2>
 <h3 id="backends">Backends</h3>
-<p><strong><code>InMemory</code></strong> — a <code>HashMap&lt;name, Vec&lt;Layer&lt;V&gt;&gt;&gt;</code> with no I/O. Used for tests and ephemeral workloads.</p>
-<p><strong><code>Disk</code></strong> — a binary file:</p>
+<p><strong><code>InMemory</code></strong>: a <code>HashMap&lt;name, Vec&lt;Layer&lt;V&gt;&gt;&gt;</code> with no I/O. Used for tests and ephemeral workloads.</p>
+<p><strong><code>Disk</code></strong>: a binary file:</p>
 <pre><code>magic (3 bytes)  &quot;TAU&quot; (plaintext) or &quot;TAUE&quot; (encrypted)
 [entries...]
   length (u32 LE)
@@ -304,7 +304,7 @@ Lens::Derived(f)    -- f: Arc&lt;dyn Fn(Timestamp) -&gt; Option&lt;V&gt;&gt;
   payload bytes
 </code></pre>
 <p>On open, the file is read entry by entry, integrity-checked, and replayed into the in-memory layer stack. The file handle stays open in append mode.</p>
-<p>Encryption is AES-256-GCM with a random 12-byte nonce per entry. The key is never stored — it must be supplied via <code>TAU_ENCRYPTION_KEY</code> at startup. The <code>TAUE</code> magic prevents accidentally opening an encrypted file without a key.</p>
+<p>Encryption is AES-256-GCM with a random 12-byte nonce per entry. The key is never stored; it must be supplied via <code>TAU_ENCRYPTION_KEY</code> at startup. The <code>TAUE</code> magic prevents accidentally opening an encrypted file without a key.</p>
 <h3 id="write-ahead-log">Write-Ahead Log</h3>
 <p>The WAL sits between the caller and the store. Every mutation writes to the WAL first, fsyncs, then writes to the store. On startup the WAL is replayed before the store is opened.</p>
 <p>WAL entries are line-oriented text:</p>
@@ -331,7 +331,7 @@ SE:&lt;crc32hex&gt; &lt;base64-encrypted&gt;   -- encrypted schema DDL
 <p><code>Database&lt;V&gt;</code> owns a <code>Store&lt;V&gt;</code> behind <code>RwLock</code> and an optional <code>Wal</code> behind <code>Mutex</code>. Append order is always:</p>
 <pre><code>WAL.write(entry) → WAL.fsync() → Store.append(layer)
 </code></pre>
-<p>A WAL fsync failure leaves the in-memory store unchanged — the entry is not committed. No partial-write window is visible to readers.</p>
+<p>A WAL fsync failure leaves the in-memory store unchanged; the entry is not committed. No partial-write window is visible to readers.</p>
 <h3 id="executor"><code>Executor</code></h3>
 <p><code>Executor</code> is the top-level query processor. It owns a <code>HashMap&lt;String, DbState&gt;</code> of named databases, an active-database pointer, and a <code>UserStore</code>.</p>
 <p>Each <code>DbState</code> carries:</p>
@@ -342,12 +342,12 @@ SE:&lt;crc32hex&gt; &lt;base64-encrypted&gt;   -- encrypted schema DDL
 <li>A monotonic <code>next_layer_id</code> counter</li>
 </ul>
 <p><strong>Two entry-point pairs:</strong></p>
-<p><code>exec</code> / <code>exec_read</code> — unrestricted. Used by library consumers, tests, and schema replay (<code>in_replay = true</code> prevents DDL from being re-appended).</p>
-<p><code>exec_as(stmt, caller)</code> / <code>exec_read_as(stmt, caller)</code> — looks up <code>caller</code> in <code>self.users</code>, calls <code>check_permission</code>, then delegates. Used by the TCP server for every authenticated session. <code>SHOW DATABASES</code> is post-filtered to only databases the caller holds any grant on.</p>
+<p><code>exec</code> / <code>exec_read</code>: unrestricted. Used by library consumers, tests, and schema replay (<code>in_replay = true</code> prevents DDL from being re-appended).</p>
+<p><code>exec_as(stmt, caller)</code> / <code>exec_read_as(stmt, caller)</code>: looks up <code>caller</code> in <code>self.users</code>, calls <code>check_permission</code>, then delegates. Used by the TCP server for every authenticated session. <code>SHOW DATABASES</code> is post-filtered to only databases the caller holds any grant on.</p>
 <p>The split is intentional: embedding Tau as a library bypasses auth entirely. Auth is a server concern, not an engine concern.</p>
 <hr />
 <h2 id="query-language">Query Language</h2>
-<p>TauQL is a line-oriented command language: one statement in, one response line out. The grammar is minimal — no implicit join, no subquery, no transaction syntax.</p>
+<p>TauQL is a line-oriented command language: one statement in, one response line out. The grammar is minimal: no implicit join, no subquery, no transaction syntax.</p>
 <p>The parser is a <code>nom</code> combinator in <code>libtau::ql::parser</code>. Adding a new statement requires changes to four files: <code>ast.rs</code> (new variant + <code>Display</code>), <code>parser.rs</code> (production + <code>alt</code> entry), <code>executor.rs</code> (handler + <code>check_permission</code> arm), and <code>bin/tau/main.rs</code> (output formatter).</p>
 <p>Operator precedence from low to high: <code>||</code>, <code>&amp;&amp;</code>, comparison, additive, multiplicative, unary, primary.</p>
 <hr />
