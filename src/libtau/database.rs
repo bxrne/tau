@@ -159,6 +159,16 @@ where
         }
     }
 
+    /// Remove all stored layers for `lens`.
+    ///
+    /// Called by the executor when `DROP LENS` is processed so that a
+    /// subsequent `CREATE LENS` with the same name starts from a clean state.
+    pub fn drop_lens(&self, lens: &str) {
+        if let Ok(mut store) = self.store.write() {
+            store.drop_lens(lens);
+        }
+    }
+
     /// Write a schema DDL statement (e.g. `CREATE LENS temp int`) to the WAL.
     ///
     /// No-op when no WAL is configured.

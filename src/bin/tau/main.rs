@@ -152,8 +152,13 @@ fn build_executor(config: &Config, enc_key: Option<[u8; 32]>) -> io::Result<Arc<
             enc_key,
         )?)))
     } else {
-        info!(compact_threshold = config.compact_threshold, "starting in-memory (no WAL)");
-        Ok(Arc::new(RwLock::new(Executor::with_threshold(config.compact_threshold))))
+        info!(
+            compact_threshold = config.compact_threshold,
+            "starting in-memory (no WAL)"
+        );
+        Ok(Arc::new(RwLock::new(Executor::with_threshold(
+            config.compact_threshold,
+        ))))
     }
 }
 
@@ -167,7 +172,9 @@ fn setup_auth(config: &Config, executor: &Arc<RwLock<Executor>>) -> io::Result<(
     {
         let mut grants = HashMap::new();
         grants.insert("*".to_string(), Perm::ALL);
-        store.add(User::new(u, p, grants)).map_err(io::Error::other)?;
+        store
+            .add(User::new(u, p, grants))
+            .map_err(io::Error::other)?;
         info!(user = %u, "bootstrapped global admin");
     }
     if store.names().is_empty() {
@@ -478,7 +485,9 @@ fn handle_auth_attempt<S: Read + Write>(
             metrics.record_auth_failure();
             metrics.record_error();
             warn!(%peer, "first message was not AUTH");
-            reader.get_mut().write_all(b"ERR authentication required\n")?;
+            reader
+                .get_mut()
+                .write_all(b"ERR authentication required\n")?;
             reader.get_mut().flush()?;
             Ok(None)
         }
@@ -512,8 +521,7 @@ fn run_query_loop<S: Read + Write>(
         }
 
         if auth_enabled && authenticated_user.is_none() {
-            authenticated_user =
-                handle_auth_attempt(reader, peer, exec, &metrics, trimmed)?;
+            authenticated_user = handle_auth_attempt(reader, peer, exec, &metrics, trimmed)?;
             if authenticated_user.is_none() {
                 break;
             }

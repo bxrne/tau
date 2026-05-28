@@ -95,11 +95,7 @@ fn strip_tls_token<'a>(args: &'a [&'a str]) -> (bool, &'a [&'a str]) {
 }
 
 /// Send an `AUTH user pass` message on `conn` and return an error if it fails.
-fn send_auth(
-    conn: &mut crate::tcpmgr::Connection,
-    user: &str,
-    pass: &str,
-) -> Result<(), String> {
+fn send_auth(conn: &mut crate::tcpmgr::Connection, user: &str, pass: &str) -> Result<(), String> {
     let resp = conn
         .send(&format!("AUTH {} {}", user, pass))
         .map_err(|e| e.to_string())?;
@@ -221,11 +217,7 @@ pub fn use_command() -> Command {
 
 /// Parse one CSV data line (`start,end,value`) into a tau triple string.
 /// Returns `None` for blank lines or `#` comments; returns `Err` for malformed lines.
-fn parse_csv_line(
-    raw: &str,
-    path: &str,
-    lineno: usize,
-) -> Result<Option<String>, String> {
+fn parse_csv_line(raw: &str, path: &str, lineno: usize) -> Result<Option<String>, String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() || trimmed.starts_with('#') {
         return Ok(None);

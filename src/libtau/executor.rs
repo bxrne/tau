@@ -693,8 +693,7 @@ impl Executor {
         if !state.base_types.contains_key(name) && !state.derived.contains_key(name) {
             return Err(ExecError::UnknownLens(name.into()));
         }
-        let (bounds, layers_snap) =
-            collect_range_bounds(state, name, start, end, filter)?;
+        let (bounds, layers_snap) = collect_range_bounds(state, name, start, end, filter)?;
         let out = build_range_segments(state, name, &bounds, layers_snap.as_deref(), filter)?;
         Ok(Output::Range(out))
     }
@@ -735,8 +734,20 @@ impl Executor {
     }
 
     fn drop_lens(&mut self, name: &str) -> Result<Output, ExecError> {
+        let in_replay = self.in_replay;
         let state = self.active_mut()?;
-        if state.base_types.remove(name).is_some() || state.derived.remove(name).is_some() {
+        let in_types = state.base_types.remove(name).is_some();
+        let in_derived = state.derived.remove(name).is_some();
+        if in_types || in_derived {
+            // Clear storage so a subsequent CREATE LENS with the same name
+            // starts empty rather than inheriting stale layers.
+            state.db.drop_lens(name);
+            if !in_replay {
+                state
+                    .db
+                    .append_schema(&format!("DROP LENS {name}"))
+                    .map_err(|e| ExecError::Io(e.to_string()))?;
+            }
             Ok(Output::Empty)
         } else {
             Err(ExecError::UnknownLens(name.into()))
@@ -994,13 +1005,15 @@ fn values_equal(a: &Value, b: &Value) -> Result<bool, ExecError> {
 /// Collect sorted, deduped boundary points for a range scan of `name` over `[start, end)`,
 /// including any filter expression boundaries. Returns the bounds and an optional layer
 /// snapshot (Some for base lenses, None for derived).
+type RangeBoundsResult = Result<(Vec<Timestamp>, Option<Vec<Layer<Value>>>), ExecError>;
+
 fn collect_range_bounds(
     state: &DbState,
     name: &str,
     start: Timestamp,
     end: Timestamp,
     filter: Option<&Expr>,
-) -> Result<(Vec<Timestamp>, Option<Vec<Layer<Value>>>), ExecError> {
+) -> RangeBoundsResult {
     let mut bounds = Vec::with_capacity(64);
     bounds.push(start);
     bounds.push(end);
@@ -1278,8 +1291,7 @@ fn eval_agg(
             .unwrap(),
         AggFunc::Sum => agg_sum(&segments)?,
         AggFunc::Avg => return agg_avg(&segments),
-    })
-    )
+    }))
 }
 
 fn numeric_min_max(a: Value, b: Value, want_max: bool) -> Result<Value, ExecError> {

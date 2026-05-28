@@ -181,7 +181,10 @@ fn open_disk_reader(
         Ok(Box::new(Cursor::new(plaintext)))
     } else {
         // Push the 4 bytes already read back via a chain reader.
-        Ok(Box::new(Read::chain(Cursor::new(magic4.to_vec()), file_reader)))
+        Ok(Box::new(Read::chain(
+            Cursor::new(magic4.to_vec()),
+            file_reader,
+        )))
     }
 }
 
@@ -195,7 +198,10 @@ fn verify_disk_header<R: Read>(reader: &mut R) -> io::Result<()> {
     if magic != MAGIC {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("invalid magic: expected TAU, got {:?}", String::from_utf8_lossy(magic)),
+            format!(
+                "invalid magic: expected TAU, got {:?}",
+                String::from_utf8_lossy(magic)
+            ),
         ));
     }
     if version != VERSION {
@@ -208,7 +214,10 @@ fn verify_disk_header<R: Read>(reader: &mut R) -> io::Result<()> {
     if stored_checksum != computed {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("header checksum mismatch: expected {}, got {}", stored_checksum, computed),
+            format!(
+                "header checksum mismatch: expected {}, got {}",
+                stored_checksum, computed
+            ),
         ));
     }
     Ok(())
@@ -422,6 +431,12 @@ impl<V: Clone + PartialEq + Codec + Send + Sync + 'static> Store<V> for Disk<V> 
         }
 
         Ok(did_compact)
+    }
+
+    fn drop_lens(&mut self, lens: &str) {
+        // Clears the in-memory cache; on-disk entries remain until the next
+        // checkpoint/compaction rewrite but are inaccessible through queries.
+        self.lenses.remove(lens);
     }
 
     fn layers(&self, lens: &str) -> Option<&Vec<Layer<V>>> {

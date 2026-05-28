@@ -20,17 +20,17 @@ Unencrypted `Disk` stores hold an open append-mode file handle; writes are O(ent
 
 ### `Wal`
 
-An append-only flat file where each line is one serialised layer append. The format is human-readable in the unencrypted case:
+An append-only flat text file. Each line is one of three entry types:
 
-```
-<crc32> <layer_id> <lens_name> <start>:<end>:<value> ...
-```
+- Data entry: `<crc32hex> <base64-payload>` - a binary-encoded layer, base64-wrapped with a CRC32 integrity check.
+- Schema entry: `S:<crc32hex> <stmt_text>` - a raw `CREATE LENS` or `DERIVE LENS` or `DROP LENS` statement, replayed to reconstruct the schema on startup.
+- Encrypted schema entry: `SE:<crc32hex> <base64-encrypted-DDL>` - AES-256-GCM encrypted schema line.
 
-Encrypted entries are prefixed with `E:` and base64-encoded. On startup, `Wal::replay` reads the file top-to-bottom and pushes each entry back into a fresh store - this is how durability is achieved. The WAL itself is the authoritative record; the in-memory state is a derived view of it.
+On startup, `Wal::replay` reads data entries top-to-bottom and pushes each layer back into a fresh store. Schema lines are returned separately and replayed through the executor after data replay. The WAL is the authoritative durability record; the in-memory state is a derived view of it.
 
-Every call to `Wal::append` issues an `fsync` (via `sync_data`) before returning. This is intentionally synchronous and conservative - it means write latency is bounded below by disk sync latency, but crash recovery guarantees are strong.
+Every call to `Wal::append` issues an `fsync` (via `sync_data`) before returning. This is intentionally synchronous and conservative - write latency is bounded below by disk sync latency, but crash recovery guarantees are strong.
 
-After auto-compaction fires, `Database::checkpoint` rewrites the WAL atomically (write to `.tmp`, fsync, rename) to contain only the live post-compaction layers plus any schema lines. WAL growth is therefore bounded to the current live data set.
+After auto-compaction fires, `Database::checkpoint` rewrites the WAL atomically (write to `.tmp`, fsync, rename) to contain only the live post-compaction layers plus any schema lines. WAL growth is bounded to the current live data set.
 
 ## Compaction
 

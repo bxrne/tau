@@ -64,7 +64,7 @@ curl http://127.0.0.1:9090/metrics
 curl http://127.0.0.1:9090/healthz
 ```
 
-The exposition includes per-statement-type counters, latency histograms in microseconds (`tau_statement_duration_microseconds_bucket{type=...,le=...}`), the per-type cumulative nanosecond counters used by the bench harness, security counters (auth attempts/failures, rejected connections, errors), and process gauges (`tau_process_resident_bytes`, `tau_process_virtual_bytes`, `tau_process_open_fds`, `tau_process_threads`, `tau_process_uptime_seconds`). All counters use `Relaxed` atomics; they are best-effort observability data, not synchronisation barriers.
+The exposition includes per-statement-type counters, latency histograms in microseconds (`tau_statement_duration_microseconds_bucket{type=...,le=...}`), the per-type cumulative nanosecond counters used by the dst harness, security counters (auth attempts/failures, rejected connections, errors), and process gauges (`tau_process_resident_bytes`, `tau_process_virtual_bytes`, `tau_process_open_fds`, `tau_process_threads`, `tau_process_uptime_seconds`). All counters use `Relaxed` atomics; they are best-effort observability data, not synchronisation barriers.
 
 ## Concurrency model
 

@@ -153,6 +153,13 @@ where
     /// Expose the raw layer stack (e.g. for inspection / snapshotting).
     fn layers(&self, lens: &str) -> Option<&Vec<Layer<V>>>;
 
+    /// Remove all layers for `lens`, as if the lens never existed.
+    ///
+    /// Called by the executor when `DROP LENS` is executed so that recreating
+    /// the same lens name starts from a clean state.  Default is a no-op;
+    /// implementors should override to actually free the storage.
+    fn drop_lens(&mut self, _lens: &str) {}
+
     /// Names of all lenses that have at least one layer.  Used by the WAL
     /// checkpoint to enumerate live data for compaction.  Default returns an
     /// empty vec; backends should override.

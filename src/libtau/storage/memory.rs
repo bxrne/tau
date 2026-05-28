@@ -50,6 +50,10 @@ where
         Ok(did_compact)
     }
 
+    fn drop_lens(&mut self, lens: &str) {
+        self.lenses.remove(lens);
+    }
+
     fn layers(&self, lens: &str) -> Option<&Vec<Layer<V>>> {
         self.lenses.get(lens)
     }

@@ -113,7 +113,7 @@ RANGE 34; 35000:35040:i40; 35040:35100:i38; ...; 36960:37000:i47
 RANGE 78; 44340:44400:i76; 44640:44700:i76; ...; 53880:53940:i78
 ```
 
-78 segments over the full day, all in the mid-day window when the spike pushed CPU above 75%. The filter is just an expression — any of the operators (`< <= == != >= >`, `&& ||`, arithmetic) can appear.
+78 segments over the full day, all in the mid-day window when the spike pushed CPU above 75%. The filter is just an expression -- any of the operators (`< <= == != >= >`, `&& ||`, arithmetic) can appear.
 
 ## Derived lens examples
 
@@ -128,7 +128,7 @@ OK
 VAL f52.3                       # time-weighted mean of cpu over [42600, 43200)
 ```
 
-`avg(cpu, -600, 0)` evaluates at time `t` as the time-weighted average of `cpu` over `[t-600, t)`. The derived lens's type is whatever the expression yields — here a `float` even though the base lens is `int`.
+`avg(cpu, -600, 0)` evaluates at time `t` as the time-weighted average of `cpu` over `[t-600, t)`. The derived lens's type is whatever the expression yields -- here a `float` even though the base lens is `int`.
 
 ### Threshold-derived boolean
 
@@ -164,46 +164,6 @@ VAL b1                          # the instantaneous reading > 30-min mean
 ```
 
 The canonical "is the signal above its own rolling baseline" pattern. Useful for alerting derivations because adjacent same-value segments are merged so you get one segment per state-change rather than one per minute.
-
-## Measured performance
-
-Captured on Linux running the `--release` build against a single connection over loopback TCP, WAL on, auth on. Numbers come from the server's own `/metrics` endpoint scraped after the run; they exclude network and parse cost. The run loaded all three datasets, defined four derived lenses, and executed every query listed above.
-
-### Per-statement latency (executor time only)
-
-| operation                 | n   | total time | mean per op                        |
-|---------------------------|----:|-----------:|------------------------------------|
-| `APPEND` (256-row chunk)  | 11  | 572 µs     | **52 µs/chunk** (~200 ns/tau)      |
-| `AT` point lookup         | 6   | 24 µs      | **4 µs**                           |
-| `RANGE` scan              | 2   | 264 µs     | **132 µs** (34- and 78-segment)    |
-| `REDUCE` aggregate        | 9   | 491 µs     | **55 µs/agg** (some over 24 h)     |
-| DDL (`CREATE`, `DERIVE`)  | 8   | 137 µs     | **17 µs**                          |
-
-These are best-case in-memory + WAL-fsync numbers on a quiet machine. The 24-hour `cpu` lens (1440 rows) compacts down to a single canonical layer after the configured `--compact-threshold` (32) is crossed during the load.
-
-### Process footprint after loading all three datasets
-
-| gauge                          | value      |
-|--------------------------------|------------|
-| `tau_process_resident_bytes`   | 24.0 MiB   |
-| `tau_process_open_fds`         | 8          |
-| `tau_process_threads`          | 3          |
-| `tau_connections_total`        | 1          |
-| Total taus in store            | 2448       |
-
-The process is small because there is no per-database storage engine: a single `Database<Value>` owns one `HashMap<lens, Vec<Layer>>` plus an optional WAL handle. Memory scales with the number of distinct live taus, not with the number of historical layers (after compaction).
-
-### Chunk-size tradeoff for `load`
-
-The default `load` chunk is 256 rows per `APPEND`. For the 1440-row `cpu-load.csv`:
-
-| chunk size       | wire round-trips |
-|-----------------:|------------------|
-| 64               | 23               |
-| **256 (default)**| **6**            |
-| 1024             | 2                |
-
-Larger chunks mean fewer round-trips and faster ingest; the only ceiling is the server's per-line size (line-oriented protocol, no hard cap but lines >1 MiB stress the buffered reader). For most CSVs the default is fine. Tune with `load <lens> <path> <chunk>`.
 
 ## Reset
 

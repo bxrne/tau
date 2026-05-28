@@ -8,7 +8,7 @@
 #
 # Build args:
 #   RUST_VERSION  - must match rust-toolchain.toml (default: 1.94.1)
-#   BUILD_PROFILE - release (default) or release-bench for fat-LTO
+#   BUILD_PROFILE - release (default) or release-lto for fat-LTO
 
 ARG RUST_VERSION=1.94.1
 ARG BUILD_PROFILE=release

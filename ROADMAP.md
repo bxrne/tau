@@ -47,8 +47,7 @@ The core engine and server are feature-complete.
 **Tooling**
 - `tauctl` REPL with TLS, auth, named connection pool, history, client-side CSV load
 - Docker image + `docker-compose` stack with Prometheus and Grafana
-- Benchmark harness (`bench`) covering transport, auth, and WAL combinations
-- Deterministic simulation tester (`dst`) -- see [TEST.md](TEST.md)
+- Deterministic simulation tester (`dst`) covering all transport, auth, and WAL combinations -- see [TEST.md](TEST.md)
 
 ---
 
