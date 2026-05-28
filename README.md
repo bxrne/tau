@@ -46,7 +46,7 @@ VAL f19.75
 - [Containers](https://tau.bxrne.com/docs/containers/) — Docker stack with Prometheus and Grafana
 - [Examples](https://tau.bxrne.com/docs/examples/) — worked queries against real datasets
 - [Tutorials](https://tau.bxrne.com/docs/tutorials/local/) — local, Docker, and embedded
-- [Architecture](https://tau.bxrne.com/docs/architecture/) — storage model, WAL, compaction
+- [How it works](https://tau.bxrne.com/docs/how-it-works/) — storage model, WAL, compaction
 - [Testing](https://tau.bxrne.com/docs/testing/) — unit, property-based, and simulation testing
 
 ---

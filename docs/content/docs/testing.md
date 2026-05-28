@@ -1,10 +1,8 @@
 +++
 title = "Testing"
-date = 2024-01-07
+date = 2026-05-28
 template = "page.html"
 +++
-
-# Testing
 
 Tau uses three distinct testing layers. Each one finds a different class of bug; together they provide confidence across correctness, input coverage, and emergent system behaviour.
 
@@ -63,7 +61,7 @@ Hegel auto-installs a Python shim (`~/.cache/hegel`) on first run. Each property
 
 ## Layer 3: Deterministic Simulation Tester (DST)
 
-The DST is where emergent correctness bugs live — the ones that only appear when:
+The DST is where emergent correctness bugs live: the ones that only appear when:
 
 - A base lens compacts, a derived lens references it, and then the WAL replays
 - Hundreds of correction layers accumulate before compaction fires, then a concurrent `RANGE` scan sees the transition
@@ -77,11 +75,11 @@ The DST is where emergent correctness bugs live — the ones that only appear wh
 
 ### Oracle
 
-Both modes cross-check against a reference implementation: a `BTreeMap<start, (end, value)>` per lens with O(log n) lookups. It has no layers, no compaction, no WAL — just obviously correct temporal semantics. Any divergence between the oracle and the executor is a bug.
+Both modes cross-check against a reference implementation: a `BTreeMap<start, (end, value)>` per lens with O(log n) lookups. It has no layers, no compaction, no WAL. Just obviously correct temporal semantics. Any divergence between the oracle and the executor is a bug.
 
 ### Deterministic reproduction
 
-A `u64` seed drives the entire operation sequence. Given the same seed, the exact same operations execute in the same order — no flaky tests, no Heisenbugs.
+A `u64` seed drives the entire operation sequence. Given the same seed, the exact same operations execute in the same order. No flaky tests. No Heisenbugs.
 
 ```bash
 cargo run --release --bin dst -- --quick --seed 0xdeadbeef

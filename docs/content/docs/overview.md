@@ -1,12 +1,10 @@
 +++
 title = "Overview"
-date = 2024-01-01
+date = 2026-05-28
 template = "page.html"
 +++
 
-# Overview
-
-Tau is a time-series database built on **immutable, layered temporal intervals**. It is not a relational store — there are no rows, no tables, no indexes. There are *lenses* (named temporal functions), a query language designed around temporal semantics, and a storage model that makes correction cheap.
+Tau is a time-series database built on **immutable, layered temporal intervals**. It is not a relational store: no rows, no tables, no indexes. There are *lenses* (named temporal functions), a query language designed around temporal semantics, and a storage model that makes correction cheap.
 
 ---
 
@@ -14,7 +12,7 @@ Tau is a time-series database built on **immutable, layered temporal intervals**
 
 Most databases assume a row represents current truth. To record history you add timestamps. Updates replace old values.
 
-Tau starts from the opposite assumption: **every fact has a time range over which it was true**. A measurement saying "temperature was 22 °C from noon to 1 pm" is a first-class value. Correcting it means appending a new interval on top — a newer layer covering the same range with a newer value. The old data is never touched.
+Tau starts from the opposite assumption: **every fact has a time range over which it was true**. A measurement saying "temperature was 22 °C from noon to 1 pm" is a first-class value. Correcting it means appending a new interval on top: a newer layer covering the same range with a newer value. The old data is never touched.
 
 This model is correct by default for workloads where:
 
@@ -26,7 +24,7 @@ This model is correct by default for workloads where:
 
 ## Three primitives
 
-### `Tau<V>` — a single temporal fact
+### `Tau<V>`
 
 ```
 Tau { start: i64, end: i64, value: V }
@@ -34,23 +32,23 @@ Tau { start: i64, end: i64, value: V }
 
 A value `V` is true over the **half-open interval `[start, end)`**. The half-open boundary is intentional: adjacent intervals tile cleanly with no overlap and no gap. `start < end` is enforced at construction time.
 
-Timestamps are opaque `i64` integers. Tau places no assumption on epoch or unit — seconds, milliseconds, nanoseconds, or any other unit your application agrees on.
+Timestamps are opaque `i64` integers. Tau places no assumption on epoch or unit: seconds, milliseconds, nanoseconds, or any other unit your application agrees on.
 
-### `Layer<V>` — a batch of facts that arrived together
+### `Layer<V>`
 
 ```
 Layer { id: u64, taus: Arc<[Tau<V>]>, min_start: i64, max_end: i64 }
 ```
 
-A layer is an immutable, sorted, non-overlapping slice of taus. Cloning a layer is an atomic reference-count bump — the data is never copied.
+A layer is an immutable, sorted, non-overlapping slice of taus. Cloning a layer is an atomic reference-count bump; the data is never copied.
 
 `min_start` and `max_end` allow point queries to skip entire layers with two comparisons before touching the data.
 
-### `Lens<V>` — a named temporal function
+### `Lens<V>`
 
 A lens is either:
-- **`Base`** — backed by a stack of layers in a store
-- **`Derived(f)`** — a lazy closure compiled from a TauQL expression at `DERIVE` time
+- **`Base`**: backed by a stack of layers in a store
+- **`Derived(f)`**: a lazy closure compiled from a TauQL expression at `DERIVE` time
 
 Derived lenses are evaluated on demand. They compose: `DERIVE smooth AS avg(cpu, -600, 0)` compiles into a closure that calls `cpu`'s closure for every evaluation. Cycle detection runs at `DERIVE` time.
 
@@ -58,7 +56,7 @@ Derived lenses are evaluated on demand. They compose: `DERIVE smooth AS avg(cpu,
 
 ## Newest-layer-wins
 
-When multiple layers cover the same timestamp, the one with the highest layer ID (newest append) wins. There is no conflict resolution vocabulary — the rule is always the newest layer.
+When multiple layers cover the same timestamp, the one with the highest layer ID (newest append) wins. There is no conflict resolution vocabulary: the rule is always the newest layer.
 
 This makes concurrent appends trivially correct: both succeed, and the query result reflects both, with the newer one taking precedence in any overlap.
 
@@ -102,15 +100,15 @@ This is O(E log E) where E is the total number of taus. After compaction, the le
 ## The executor
 
 ```
-Stmt → Executor → Database<Value> → Store<V> + optional Wal
+Stmt -> Executor -> Database<Value> -> Store<V> + optional Wal
 ```
 
 The `Executor` owns a map of named databases, an active-database pointer, and a `UserStore`. Each database carries its own store, WAL, and lens definitions.
 
 Two entry-point pairs with different semantics:
 
-- `exec` / `exec_read` — unrestricted, no permission check. Used by library consumers, tests, and WAL replay.
-- `exec_as(stmt, user)` / `exec_read_as(stmt, user)` — looks up the user, calls `check_permission`, then delegates. The TCP server uses these for every authenticated session.
+- `exec` / `exec_read`: unrestricted, no permission check. Used by library consumers, tests, and WAL replay.
+- `exec_as(stmt, user)` / `exec_read_as(stmt, user)`: looks up the user, calls `check_permission`, then delegates. The TCP server uses these for every authenticated session.
 
 Auth is a server concern. Embedding Tau as a library bypasses permission checks entirely.
 
@@ -122,4 +120,4 @@ Each TCP connection runs on its own OS thread. All threads share one `Arc<RwLock
 
 ---
 
-*For deeper coverage of design decisions see [Architecture](/docs/architecture/). For the query language see [TauQL Reference](/docs/tauql/).*
+*For deeper coverage of design decisions see [How it works](/docs/how-it-works/). For the query language see [TauQL Reference](/docs/tauql/).*

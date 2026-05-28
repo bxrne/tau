@@ -6,6 +6,4 @@ template = "section.html"
 page_template = "page.html"
 +++
 
-# Blog
-
 Thinking behind Tau.

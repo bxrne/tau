@@ -1,0 +1,16 @@
+{% import "macros/head.html" as head -%}
+{% extends "index.html" -%}
+
+{%- block title %}
+    <title>Changelog - {{ config.extra.author }}</title>
+{%- endblock title -%}
+
+{%- block main -%}
+    <article class="post">
+        <header>
+            <h1 class="post-title">Changelog</h1>
+        </header>
+        {%- set body = load_data(path=config.extra.changelog_path, format="plain") -%}
+        {{ body | markdown | safe }}
+    </article>
+{%- endblock main -%}

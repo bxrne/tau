@@ -16,7 +16,8 @@ show_author = false
 show_categories = true
 show_tags = true
 theme_color = "orange"
-show_menu_items = 5
+show_menu_items = 6
+changelog_path = "CHANGELOG.md"
 
 full_width = false
 center = false
@@ -30,8 +31,12 @@ copyright = "Copyright Adam Byrne (https://github.com/bxrne/tau)"
 logo_text = "tau"
 logo_home_link = ""
 main_menu = [
+          {url="/docs/overview/", name="Overview"},
           {url="/docs/", name="Docs"},
-          {url="/posts/", name="Blog"},
+          {url="/docs/tauql/", name="TauQL"},
+          {url="/docs/how-it-works/", name="How it works"},
+          {url="/docs/tutorials/", name="Tutorials"},
+          {url="/docs/changelog/", name="Changelog"},
 ]
 
 menu_more = "show more"

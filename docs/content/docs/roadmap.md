@@ -1,12 +1,16 @@
-# Tau Roadmap
++++
+title = "Roadmap"
+date = 2026-05-28
+template = "page.html"
++++
 
-The goal of this roadmap is to reach **v1.0**. That milestone represents a system trusted enough for production time-series workloads: correct under adversity, observable, and well-documented enough that a new operator can run it without asking for help.
+The goal is to reach **v1.0**: a system trusted enough for production time-series workloads, correct under adversity, observable, and documented well enough that a new operator can run it without asking for help.
 
-Current work ships as **v0.1.0**. The v0.x line is where the engine matures -- features are complete but the operational story, correctness guarantees, and client ecosystem are still being hardened.
+Current work ships as **v0.1.0**. The v0.x line is where the engine matures; features are complete but the operational story, correctness guarantees, and client ecosystem are still being hardened.
 
 ---
 
-## v0.1.0 -- Current
+## v0.1.0 (current)
 
 The core engine and server are feature-complete.
 
@@ -27,7 +31,7 @@ The core engine and server are feature-complete.
 - `CREATE / DROP / USE DATABASE`; `SHOW DATABASES / LENSES`
 - `CREATE / DROP LENS` with static types
 - `APPEND LENS`; `COPY LENS FROM` for server-side CSV ingest
-- `DERIVE LENS AS <expr>` -- lazy computed lenses
+- `DERIVE LENS AS <expr>`: lazy computed lenses
 - `AT`, `RANGE [WHERE <expr>]`, `REDUCE USING (min|max|avg|sum|count)`
 - Rolling window aggregations in expressions
 - Full expression grammar: arithmetic, comparison, logical, unary
@@ -46,12 +50,12 @@ The core engine and server are feature-complete.
 
 **Tooling**
 - `tauctl` REPL with TLS, auth, named connection pool, history, client-side CSV load
-- Docker image + `docker-compose` stack with Prometheus and Grafana
-- Deterministic simulation tester (`dst`) covering all transport, auth, and WAL combinations -- see [TEST.md](TEST.md)
+- Docker image and `docker-compose` stack with Prometheus and Grafana
+- Deterministic simulation tester (`dst`) covering all transport, auth, and WAL combinations
 
 ---
 
-## v1.0 -- Criteria
+## v1.0 criteria
 
 v1.0 is not a feature list. It is a quality bar.
 
@@ -61,7 +65,7 @@ v1.0 is not a feature list. It is a quality bar.
 - Property-based tests cover `compact_layers` end-to-end: any layer sequence produces identical query results before and after.
 
 **Operability**
-- A new operator can deploy, configure, and monitor a Tau instance using only written documentation -- no tribal knowledge required.
+- A new operator can deploy, configure, and monitor a Tau instance using only written documentation; no tribal knowledge required.
 - A protocol specification describes the full wire format, all response codes, and the authentication handshake.
 - An operational guide covers WAL sizing, compaction tuning, and encryption key rotation.
 - Graceful shutdown drains in-flight connections on `SIGTERM`/`SIGINT`.
@@ -77,9 +81,9 @@ v1.0 is not a feature list. It is a quality bar.
 
 ---
 
-## TODO
+## Backlog
 
-- Named timestamp aliases -- ISO-8601 or human-readable offsets
-- `systemd` unit file for bare-metal deployments
+- Named timestamp aliases: ISO-8601 or human-readable offsets
+- `systemd` unit file for local deployments
 - `man` page for the server binary
 - Online schema evolution (rename lens, change type with migration)

@@ -6,40 +6,30 @@ template = "index.html"
 page_template = "page.html"
 +++
 
-# Tau — the time-series database that remembers everything
+A time-series database built on immutable, layered temporal intervals.
 
-Most databases overwrite the past. Tau never does.
-
-Every value in Tau is a **temporal interval**: a fact that was true from time `A` to time `B`. When that fact changes, you append a correction on top of the existing data. The old record stays intact. The new layer wins at query time. You get the full correction history for free, and write-write conflicts disappear entirely.
+Every value in Tau is a fact that was true from time A to time B. Corrections append on top of existing data. Old records stay intact. The newest layer wins at query time. Write-write conflicts disappear entirely.
 
 ```
 CREATE DATABASE sensors
 CREATE LENS temperature float
 APPEND LENS temperature 0 3600 18.5, 3600 7200 21.0
-AT LENS temperature 1800        → VAL f18.5
-RANGE LENS temperature 0 7200  → RANGE 2; 0:3600:f18.5; 3600:7200:f21
-REDUCE LENS temperature 0 7200 USING avg  → VAL f19.75
+AT LENS temperature 1800        -> VAL f18.5
+RANGE LENS temperature 0 7200  -> RANGE 2; 0:3600:f18.5; 3600:7200:f21
+REDUCE LENS temperature 0 7200 USING avg  -> VAL f19.75
 ```
 
 ---
 
 ## Why Tau?
 
-**Correction is the natural state of real data.** Sensor readings drift. Financial prices get restated. Audit logs need amendments. Traditional databases model these as mutations — you update in place and the old value is gone. Tau models them as what they are: a newer layer superseding an older one. Nothing is lost. Everything is queryable.
+**Correction is the natural state of real data.** Sensor readings drift. Financial prices get restated. Audit logs need amendments. Traditional databases model these as mutations: update in place and the old value is gone. Tau models them as what they are: a newer layer superseding an older one. Nothing is lost. Everything is queryable.
 
-**No write-write conflicts.** Because every write is an append, two concurrent clients writing to the same lens at the same time will both succeed. Resolution happens lazily at query time: newest layer wins. This means you can ingest out-of-order streams without locking or coordination.
+**No write-write conflicts.** Every write is an append. Two concurrent clients writing to the same lens at the same time will both succeed. Resolution happens lazily at query time: newest layer wins. Out-of-order streams ingest without locking or coordination.
 
-**Derived lenses are lazy and live.** `DERIVE LENS fahrenheit AS celsius * 9.0 / 5.0 + 32.0` creates a virtual lens that evaluates its expression on demand. Nothing is materialised. It stays up to date automatically because it re-evaluates on every query.
+**Derived lenses are lazy and live.** `DERIVE LENS fahrenheit AS celsius * 9.0 / 5.0 + 32.0` creates a virtual lens that evaluates its expression on demand. Nothing is materialised. It stays current because it re-evaluates on every query.
 
 **Rolling window aggregations in expressions.** `avg(cpu, -600, 0)` inside a `DERIVE` evaluates the time-weighted average of `cpu` over the 600-unit window ending at the query point. Use it to build threshold alerts, smoothed baselines, and anomaly detectors as first-class database objects.
-
----
-
-## What it is (and isn't)
-
-Tau is a **purpose-built temporal store** for append-only, correction-heavy time series. It is not a general-purpose relational database. There are no rows, no joins, no indexes. There are lenses (named temporal functions), expressions, and a five-function aggregation vocabulary that gets surprisingly far.
-
-If your data is "the CPU load was X from time T1 to T2" and you need to query "what was the load at noon" or "what was the 10-minute rolling average at noon", Tau is a direct fit. If you need joins across entity types or ad-hoc SQL, use something else.
 
 ---
 
@@ -69,7 +59,7 @@ ctl
 VAL i45
 ```
 
-→ [Full quick-start tutorial](/docs/tutorials/local/)
+[Full quick-start tutorial](/docs/tutorials/local/)
 
 ---
 
@@ -90,12 +80,12 @@ VAL i45
 
 ## Explore
 
-- [Overview](/docs/overview/) — data model, architecture, and design philosophy
-- [TauQL Reference](/docs/tauql/) — complete language reference
-- [Examples](/docs/examples/) — worked queries against real datasets
-- [Tutorials](/docs/tutorials/local/) — step-by-step for local, Docker, and embedded use
-- [Configuration](/docs/configuration/) — all server flags and environment variables
-- [Containers](/docs/containers/) — Docker stack with Prometheus and Grafana
+- [Overview](/docs/overview/): data model, internals, and design philosophy
+- [TauQL Reference](/docs/tauql/): complete language reference
+- [Examples](/docs/examples/): worked queries against real datasets
+- [Tutorials](/docs/tutorials/local/): step-by-step for local, Docker, and embedded use
+- [Configuration](/docs/configuration/): all server flags and environment variables
+- [Containers](/docs/containers/): Docker stack with Prometheus and Grafana
 
 ---
 

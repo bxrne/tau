@@ -1,10 +1,8 @@
 +++
 title = "Containers"
-date = 2024-01-04
+date = 2026-05-28
 template = "page.html"
 +++
-
-# Containers
 
 Tau ships a production Docker stack: **Tau + Prometheus + Grafana**, wired up out of the box.
 
@@ -49,7 +47,7 @@ Configure the container stack in `.env`:
 | `TAU_ADDR` | `0.0.0.0:7070` | Bind address inside the container |
 | `TAU_METRICS_PORT` | `9090` | Port for Prometheus scraping |
 | `TAU_LOG_LEVEL` | `info` | `error` \| `warn` \| `info` \| `debug` \| `trace` |
-| `TAU_ENCRYPTION_KEY` | (none) | 64 hex chars — enables AES-256-GCM encryption at rest |
+| `TAU_ENCRYPTION_KEY` | (none) | 64 hex chars; enables AES-256-GCM encryption at rest |
 | `TAU_CPU_LIMIT` | `1` | Docker CPU limit |
 | `TAU_MEM_LIMIT` | `512m` | Docker memory limit |
 | `GRAFANA_USER` | `admin` | Grafana admin username |
@@ -82,7 +80,7 @@ Add to `.env`:
 TAU_ENCRYPTION_KEY=<your 64-char hex key>
 ```
 
-WAL entries written with this key are AES-256-GCM encrypted. The key is never stored — keep it in a secrets manager and inject it at runtime. A WAL file written with a key cannot be read without it.
+WAL entries written with this key are AES-256-GCM encrypted. The key is never stored; keep it in a secrets manager and inject it at runtime. A WAL file written with a key cannot be read without it.
 
 ---
 
@@ -111,11 +109,11 @@ Dashboard UID: `tau-db-prod`. Open at `http://localhost:3000/d/tau-db-prod`.
 
 Panels:
 
-- **Overview** — throughput, error rate, auth failures, rejected connections
-- **Throughput** — statements/s split by type
-- **Latency** — p50/p95/p99 per statement type
-- **Security** — AUTH attempts vs failures
-- **Resources** — RSS, virtual memory, open FDs, uptime
+- **Overview**: throughput, error rate, auth failures, rejected connections
+- **Throughput**: statements/s split by type
+- **Latency**: p50/p95/p99 per statement type
+- **Security**: AUTH attempts vs failures
+- **Resources**: RSS, virtual memory, open FDs, uptime
 
 ---
 

@@ -1,10 +1,8 @@
 +++
 title = "Embedded Tutorial"
-date = 2024-01-10
+date = 2026-05-28
 template = "page.html"
 +++
-
-# Embedded Tutorial
 
 Use Tau as a Rust library with no server process, no TCP, and no authentication overhead. This is the fastest way to use Tau and the right choice for applications that own their data directly.
 
@@ -64,7 +62,7 @@ fn main() {
 
 ## 3. Derived lenses
 
-Derived lenses evaluate lazily on every query — nothing is materialised.
+Derived lenses evaluate lazily on every query; nothing is materialised.
 
 ```rust
 for q in [
@@ -117,12 +115,12 @@ match executor.exec_read(&stmt)? {
 
 Two entry points with the same semantics but different lock behaviour:
 
-- `exec(&stmt)` — takes a write lock; use for DDL and write statements (`APPEND`, `DERIVE`, etc.)
-- `exec_read(&stmt)` — takes a read lock; use for query statements (`AT`, `RANGE`, `REDUCE`, `SHOW *`)
+- `exec(&stmt)`: takes a write lock; use for DDL and write statements (`APPEND`, `DERIVE`, etc.)
+- `exec_read(&stmt)`: takes a read lock; use for query statements (`AT`, `RANGE`, `REDUCE`, `SHOW *`)
 
 Using `exec_read` for queries allows concurrent read operations on a shared executor. Using `exec` serialises all access.
 
-Neither entry point performs any permission check — auth is a server concern. Embedded callers bypass CRUDA entirely.
+Neither entry point performs any permission check; auth is a server concern. Embedded callers bypass CRUDA entirely.
 
 ---
 
@@ -197,6 +195,6 @@ db.set_auto_checkpoint(false);
 
 ## Next steps
 
-- [TauQL Reference](/docs/tauql/) — all statement syntax
-- [Architecture](/docs/architecture/) — how the executor and storage layer work
-- [Testing](/docs/testing/) — using the DST embedded mode for correctness validation
+- [TauQL Reference](/docs/tauql/): all statement syntax
+- [How it works](/docs/how-it-works/): how the executor and storage layer work
+- [Testing](/docs/testing/): using the DST embedded mode for correctness validation
