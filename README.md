@@ -10,7 +10,6 @@ Tau models time as a sequence of half-open intervals `[start, end)` that tile wi
 
 **Documentation:** [tau.bxrne.com](https://tau.bxrne.com)
 
----
 
 ## Why Tau
 
@@ -20,7 +19,6 @@ Tau models time as a sequence of half-open intervals `[start, end)` that tile wi
 - **Derived lenses compose.** `DERIVE LENS f AS expr` compiles the expression into a lazy closure at definition time. Closures capture other lens closures, so derivations chain. Cycle detection runs at `DERIVE` time by walking the dependency graph.
 - **Verified by PBT and DST.** Algebraic invariants (`Tau::contains`, `Layer::at`, `compact_layers` query-equivalence, WAL roundtrip) are checked by Hegel/Hypothesis against hundreds of randomised inputs per property. The deterministic simulation tester drives every transport × auth × WAL combination against a reference oracle, injecting faults across hundreds of millions of simulated operations.
 
----
 
 ## Quick start
 
@@ -52,7 +50,6 @@ VAL f20                                   # newest layer wins; prior layer still
 VAL f20.5                                 # aggregate reflects the correction
 ```
 
----
 
 ## Documentation
 
@@ -65,7 +62,6 @@ VAL f20.5                                 # aggregate reflects the correction
 - [Examples](https://tau.bxrne.com/docs/examples/) — worked queries against real datasets
 - [Tutorials](https://tau.bxrne.com/docs/tutorials/local/) — local, Docker, and embedded
 
----
 
 ## Development
 
@@ -78,7 +74,6 @@ cargo run --release --bin dst -- --quick      # deterministic simulation tester
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and workflow details.
 
----
 
 ## License
 
