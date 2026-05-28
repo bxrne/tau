@@ -82,4 +82,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and workflow details.
 
 ## License
 
-[PolyForm Noncommercial License 1.0.0](LICENSE) — free for personal use, research, and education.
+[Apache License 2.0](LICENSE)

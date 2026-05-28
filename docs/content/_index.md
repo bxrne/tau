@@ -96,4 +96,4 @@ VAL i45
 
 ---
 
-*Tau is open source under the [PolyForm Noncommercial License](https://github.com/bxrne/tau/blob/master/LICENSE). Free for personal use, research, and education.*
+*Tau is open source under the [Apache License 2.0](https://github.com/bxrne/tau/blob/master/LICENSE).*

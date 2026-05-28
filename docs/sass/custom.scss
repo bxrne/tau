@@ -1,23 +1,23 @@
 /* local overrides */
 
-.menu {
+.menu:not(.hidden) {
     display: flex;
     align-items: center;
 
     .menu__inner--desktop {
         flex: 1;
     }
+}
 
-    &__github {
-        flex-shrink: 0;
-        margin-left: 20px;
-        text-decoration: none;
-        color: var(--accent);
-        white-space: nowrap;
+.menu__github {
+    flex-shrink: 0;
+    margin-left: 20px;
+    text-decoration: none;
+    color: var(--accent);
+    white-space: nowrap;
 
-        @media (max-width: 683px) {
-            display: none;
-        }
+    @media (max-width: 683px) {
+        display: none;
     }
 }
 

@@ -2,8 +2,8 @@
 name = "tau"
 version = "0.1.0" # x-release-please-version
 edition = "2024"
-license-file = "LICENSE"
-description = "Tau time-series database (PolyForm Noncommercial 1.0.0; not redistributable for commercial use)."
+license = "Apache-2.0"
+description = "A time-series database built on algebraically precise temporal intervals."
 publish = false
 
 [[bin]]
