@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.2](https://github.com/bxrne/tau/compare/tau-v0.1.1...tau-v0.1.2) (2026-05-28)
+
+
+### Features
+
+* add transaction blocks ([ea1ae34](https://github.com/bxrne/tau/commit/ea1ae346f12d664e49399c0e12f87bc27f55af9e))
+
+
+### Bug Fixes
+
+* load uses tx for safe batch ([8f8e487](https://github.com/bxrne/tau/commit/8f8e487d1aaae4bbcf6af7a35be2e2e3f258cd1b))
+* sonar fixes ([eae64eb](https://github.com/bxrne/tau/commit/eae64ebb1e85340d30f266e87dca1fc4b18efaaf))
+
 ## [0.1.1](https://github.com/bxrne/tau/compare/tau-v0.1.0...tau-v0.1.1) (2026-05-28)
 
 
