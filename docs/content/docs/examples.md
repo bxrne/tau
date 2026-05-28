@@ -1,6 +1,6 @@
 +++
 title = "Examples"
-date = 2024-01-05
+date = 2026-05-28
 template = "page.html"
 +++
 
@@ -108,7 +108,7 @@ VAL i2095                  ← peak minute (the burst)
 RANGE 34; 35000:35040:i40; 35040:35100:i38; ...; 36960:37000:i47
 ```
 
-34 segments because every minute boundary inside the window is a change point. Adjacent segments with identical values are merged automatically — a long flat run produces a single segment.
+34 segments because every minute boundary inside the window is a change point. Adjacent segments with identical values are merged automatically; a long flat run produces a single segment.
 
 ---
 
@@ -119,7 +119,7 @@ RANGE 34; 35000:35040:i40; 35040:35100:i38; ...; 36960:37000:i47
 RANGE 78; 44340:44400:i76; 44640:44700:i76; ...; 53880:53940:i78
 ```
 
-78 segments, all in the mid-day window when the spike pushed CPU above 75%. The filter is a plain expression — any operator (`< <= == != >= >`, `&& ||`, arithmetic) works.
+78 segments, all in the mid-day window when the spike pushed CPU above 75%. The filter is a plain expression; any operator (`< <= == != >= >`, `&& ||`, arithmetic) works.
 
 ---
 
@@ -174,7 +174,7 @@ OK
 VAL b1              ← instantaneous reading is above the 30-minute rolling mean
 ```
 
-This is the canonical "is the signal above its own rolling baseline" pattern. Because adjacent same-value segments are merged, you get one segment per state-change rather than one per minute — ideal for alerting.
+This is the canonical "is the signal above its own rolling baseline" pattern. Because adjacent same-value segments are merged, you get one segment per state-change rather than one per minute; ideal for alerting.
 
 ---
 

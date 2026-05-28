@@ -1,12 +1,12 @@
 +++
 title = "Local Tutorial"
-date = 2024-01-08
+date = 2026-05-28
 template = "page.html"
 +++
 
 # Local Tutorial
 
-Run Tau on bare metal from source. This tutorial assumes you have Rust installed.
+Run Tau locally from source. This tutorial assumes you have Rust installed.
 
 **Prerequisites:** Rust 1.81+ (`rustup` recommended), `git`, a terminal.
 
@@ -214,6 +214,6 @@ On success you'll see a table of `PASS` results. On failure, the seed is printed
 
 ## Next steps
 
-- [TauQL Reference](/docs/tauql/) — all statements and expressions
-- [Configuration](/docs/configuration/) — all flags and environment variables
-- [Examples](/docs/examples/) — more queries against the example datasets
+- [TauQL Reference](/docs/tauql/): all statements and expressions
+- [Configuration](/docs/configuration/): all flags and environment variables
+- [Examples](/docs/examples/): more queries against the example datasets

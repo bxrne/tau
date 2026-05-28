@@ -1,12 +1,12 @@
 +++
 title = "Architecture"
-date = 2024-01-06
+date = 2026-05-28
 template = "page.html"
 +++
 
 # Architecture
 
-Tau is a time-series database for recording how values change over time. It is not a general-purpose relational store — no rows, no tables, no indexes. Only temporal intervals, a query language built around them, and a storage model that makes correction cheap.
+Tau is a time-series database for recording how values change over time. It is not a general-purpose relational store: no rows, no tables, no indexes. Only temporal intervals, a query language built around them, and a storage model that makes correction cheap.
 
 This document describes *why* Tau is built the way it is, not just how it works. Decisions that might look odd from the outside have reasons. Knowing the reasons lets you contribute without fighting the grain of the design.
 
@@ -42,7 +42,7 @@ The half-open interval is intentional. Adjacent intervals tile cleanly: `[0, 10)
 
 `Tau::new` asserts `start < end`. There are no zero-width taus.
 
-Timestamps are `i64` — nanoseconds, milliseconds, or any other unit the caller agrees on. Tau treats them as opaque ordered integers.
+Timestamps are `i64` (nanoseconds, milliseconds, or any other unit the caller agrees on). Tau treats them as opaque ordered integers.
 
 ### `Layer<V>`
 
@@ -56,7 +56,7 @@ Layers are immutable once created. Cloning a layer is an atomic reference-count 
 
 `min_start` and `max_end` are skip-check bounds. A point query for timestamp `t` can skip an entire layer with two comparisons (`t < min_start || t >= max_end`) before touching the data.
 
-Within the slice, a binary search — `partition_point` on `tau.end <= t` — locates the candidate in O(log n).
+Within the slice, a binary search (`partition_point` on `tau.end <= t`) locates the candidate in O(log n).
 
 ### `Lens<V>`
 
@@ -77,9 +77,9 @@ Cycle detection runs at `DERIVE` time by walking the dependency graph.
 
 ### Backends
 
-**`InMemory`** — a `HashMap<name, Vec<Layer<V>>>` with no I/O. Used for tests and ephemeral workloads.
+**`InMemory`**: a `HashMap<name, Vec<Layer<V>>>` with no I/O. Used for tests and ephemeral workloads.
 
-**`Disk`** — a binary file:
+**`Disk`**: a binary file:
 
 ```
 magic (3 bytes)  "TAU" (plaintext) or "TAUE" (encrypted)
@@ -91,7 +91,7 @@ magic (3 bytes)  "TAU" (plaintext) or "TAUE" (encrypted)
 
 On open, the file is read entry by entry, integrity-checked, and replayed into the in-memory layer stack. The file handle stays open in append mode.
 
-Encryption is AES-256-GCM with a random 12-byte nonce per entry. The key is never stored — it must be supplied via `TAU_ENCRYPTION_KEY` at startup. The `TAUE` magic prevents accidentally opening an encrypted file without a key.
+Encryption is AES-256-GCM with a random 12-byte nonce per entry. The key is never stored; it must be supplied via `TAU_ENCRYPTION_KEY` at startup. The `TAUE` magic prevents accidentally opening an encrypted file without a key.
 
 ### Write-Ahead Log
 
@@ -136,7 +136,7 @@ This is O(E log E) where E is the total number of taus. After compaction, the le
 WAL.write(entry) → WAL.fsync() → Store.append(layer)
 ```
 
-A WAL fsync failure leaves the in-memory store unchanged — the entry is not committed. No partial-write window is visible to readers.
+A WAL fsync failure leaves the in-memory store unchanged; the entry is not committed. No partial-write window is visible to readers.
 
 ### `Executor`
 
@@ -150,9 +150,9 @@ Each `DbState` carries:
 
 **Two entry-point pairs:**
 
-`exec` / `exec_read` — unrestricted. Used by library consumers, tests, and schema replay (`in_replay = true` prevents DDL from being re-appended).
+`exec` / `exec_read`: unrestricted. Used by library consumers, tests, and schema replay (`in_replay = true` prevents DDL from being re-appended).
 
-`exec_as(stmt, caller)` / `exec_read_as(stmt, caller)` — looks up `caller` in `self.users`, calls `check_permission`, then delegates. Used by the TCP server for every authenticated session. `SHOW DATABASES` is post-filtered to only databases the caller holds any grant on.
+`exec_as(stmt, caller)` / `exec_read_as(stmt, caller)`: looks up `caller` in `self.users`, calls `check_permission`, then delegates. Used by the TCP server for every authenticated session. `SHOW DATABASES` is post-filtered to only databases the caller holds any grant on.
 
 The split is intentional: embedding Tau as a library bypasses auth entirely. Auth is a server concern, not an engine concern.
 
@@ -160,7 +160,7 @@ The split is intentional: embedding Tau as a library bypasses auth entirely. Aut
 
 ## Query Language
 
-TauQL is a line-oriented command language: one statement in, one response line out. The grammar is minimal — no implicit join, no subquery, no transaction syntax.
+TauQL is a line-oriented command language: one statement in, one response line out. The grammar is minimal: no implicit join, no subquery, no transaction syntax.
 
 The parser is a `nom` combinator in `libtau::ql::parser`. Adding a new statement requires changes to four files: `ast.rs` (new variant + `Display`), `parser.rs` (production + `alt` entry), `executor.rs` (handler + `check_permission` arm), and `bin/tau/main.rs` (output formatter).
 

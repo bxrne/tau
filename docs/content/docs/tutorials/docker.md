@@ -1,6 +1,6 @@
 +++
 title = "Docker Tutorial"
-date = 2024-01-09
+date = 2026-05-28
 template = "page.html"
 +++
 
@@ -105,7 +105,7 @@ Ship a CSV from your local machine into the containerised server:
 loaded 1440 rows into cpu (6 chunks)
 ```
 
-The `load` command reads the file from your local filesystem and ships it as batched `APPEND` statements over the active TCP connection — no file access required on the server side.
+The `load` command reads the file from your local filesystem and ships it as batched `APPEND` statements over the active TCP connection. No file access is required on the server side.
 
 Alternatively, copy the file into the Docker volume and use server-side `COPY`:
 
@@ -185,7 +185,7 @@ Restart Tau:
 docker compose up -d tau
 ```
 
-All subsequent WAL entries are AES-256-GCM encrypted. Keep the key in a secrets manager — a WAL written with the key cannot be read without it.
+All subsequent WAL entries are AES-256-GCM encrypted. Keep the key in a secrets manager; a WAL written with the key cannot be read without it.
 
 ---
 
