@@ -16,26 +16,30 @@ show_author = false
 show_categories = true
 show_tags = true
 theme_color = "orange"
-show_menu_items = 6
+show_menu_items = 3
 changelog_path = "CHANGELOG.md"
+custom_css = true
 
 full_width = false
-center = false
+center = true
 
 # favicon = ""
 # og_preview_img = ""
 
-version = "0.0.0"  # injected by CI: scripts/inject-version.sh
 
-copyright = "Copyright Adam Byrne (https://github.com/bxrne/tau)"
+copyright = "Copyright Adam Byrne"
 logo_text = "tau"
 logo_home_link = ""
 main_menu = [
           {url="/docs/overview/", name="Overview"},
-          {url="/docs/", name="Docs"},
-          {url="/docs/tauql/", name="TauQL"},
           {url="/docs/how-it-works/", name="How it works"},
+          {url="/docs/tauql/", name="TauQL"},
           {url="/docs/tutorials/", name="Tutorials"},
+          {url="/docs/examples/", name="Examples"},
+          {url="/docs/configuration/", name="Configuration"},
+          {url="/docs/containers/", name="Containers"},
+          {url="/docs/testing/", name="Testing"},
+          {url="/docs/roadmap/", name="Roadmap"},
           {url="/docs/changelog/", name="Changelog"},
 ]
 

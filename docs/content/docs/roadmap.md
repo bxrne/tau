@@ -4,26 +4,26 @@ date = 2026-05-28
 template = "page.html"
 +++
 
-The goal is to reach **v1.0**: a system trusted enough for production time-series workloads, correct under adversity, observable, and documented well enough that a new operator can run it without asking for help.
-
-Current work ships as **v0.1.0**. The v0.x line is where the engine matures; features are complete but the operational story, correctness guarantees, and client ecosystem are still being hardened.
+Tau is in active development. The current line is **v0.x**, where the engine matures and the operational story tightens. The destination is **v1.0**: a system you can trust under load, in production, without asking the maintainer how to do anything.
 
 ---
 
-## v0.1.0 (current)
+## v0.1.0 — the engine is complete
 
-The core engine and server are feature-complete.
+The core engine and server are feature-complete and shipping. The data model, query language, storage backends, and simulation testing infrastructure are all in this release.
 
 **Engine**
-- Immutable, layered temporal intervals; newest-layer-wins semantics
-- O(log n) point lookup; sweep-line compaction
-- Derived lenses with lazy evaluation and cycle detection
-- `Arc`-backed cheap layer clones
+- Half-open interval model with monoid concatenation semantics
+- Newest-layer-wins resolution by monotonic layer ID — deterministic, no configuration
+- O(log n) point lookup per layer; sweep-line normalisation compaction
+- Derived lenses with lazy closure composition and cycle detection at `DERIVE` time
+- Rolling window aggregations as first-class expression nodes
+- `Arc`-backed immutable layers — clones are pointer bumps
 
 **Storage**
 - In-memory and binary disk backends
 - AES-256-GCM encryption at rest; per-entry CRC32 integrity
-- Write-ahead log with fsync durability and WAL replay on startup
+- Write-ahead log with per-statement fsync and full WAL replay on startup
 - Schema DDL (`CREATE LENS` / `DERIVE LENS`) persisted and replayed
 - WAL checkpoint after compaction
 
@@ -31,52 +31,46 @@ The core engine and server are feature-complete.
 - `CREATE / DROP / USE DATABASE`; `SHOW DATABASES / LENSES`
 - `CREATE / DROP LENS` with static types
 - `APPEND LENS`; `COPY LENS FROM` for server-side CSV ingest
-- `DERIVE LENS AS <expr>`: lazy computed lenses
+- `DERIVE LENS AS <expr>`: lazy computed lenses with composable closures
 - `AT`, `RANGE [WHERE <expr>]`, `REDUCE USING (min|max|avg|sum|count)`
-- Rolling window aggregations in expressions
-- Full expression grammar: arithmetic, comparison, logical, unary
+- Full expression grammar: arithmetic, comparison, logical, unary, rolling aggregations
 
 **Server**
 - Line-oriented TCP protocol with shared/exclusive locking
 - TLS (PEM cert/key or ephemeral self-signed)
 - Argon2id authentication; per-database CRUDA grants; wildcard grants
 - `CREATE / DROP USER`, `GRANT / REVOKE`, `SHOW USERS / GRANTS`
-- Connection limit and per-connection idle timeout
-- `GET /healthz` liveness probe
+- Connection cap with graceful rejection; per-connection idle timeout
+- `GET /healthz` liveness probe; Prometheus metrics via `--metrics-port`
 
-**Observability**
-- Prometheus metrics via `--metrics-port`
-- Structured `tracing` logs; per-query elapsed time
-
-**Tooling**
-- `tauctl` REPL with TLS, auth, named connection pool, history, client-side CSV load
-- Docker image and `docker-compose` stack with Prometheus and Grafana
-- Deterministic simulation tester (`dst`) covering all transport, auth, and WAL combinations
+**Verification**
+- Property-based tests (Hegel/Hypothesis): interval containment, layer lookup, value roundtrip, compaction query-equivalence, permission composition — each checked against hundreds of randomised inputs
+- Deterministic simulation tester (`dst`): every transport x auth x WAL combination, driven against a reference oracle, with fault injection and reproducible seeds
 
 ---
 
-## v1.0 criteria
+## v1.0 — the quality bar
 
-v1.0 is not a feature list. It is a quality bar.
+v1.0 is not a feature list. It is a commitment that what is already here behaves correctly under adversarial conditions, and that a new operator can run it in production using only the written documentation.
 
 **Correctness**
-- The DST runs without finding an invariant violation for any seed across the full operation space: compaction, WAL replay, derived lenses, and authorization all interact correctly under simulated stress.
-- Fuzz targets exist for the parser and WAL deserialiser and have run for at least 24 hours without crashes.
-- Property-based tests cover `compact_layers` end-to-end: any layer sequence produces identical query results before and after.
+- The DST runs to completion without finding an invariant violation for any seed across the full operation space: compaction, WAL replay, derived lens composition, and authorisation all interact correctly under sustained simulated stress.
+- Fuzz targets for the parser and WAL deserialiser have run for at least 24 hours without crashes or panics.
+- Property-based tests cover `compact_layers` end-to-end: for any randomly generated layer sequence, every query result is identical before and after compaction.
 
 **Operability**
-- A new operator can deploy, configure, and monitor a Tau instance using only written documentation; no tribal knowledge required.
-- A protocol specification describes the full wire format, all response codes, and the authentication handshake.
+- A new operator can deploy, configure, and monitor a Tau instance using only written documentation. No tribal knowledge required.
+- A protocol specification describes the full wire format, every response code, and the authentication handshake.
 - An operational guide covers WAL sizing, compaction tuning, and encryption key rotation.
-- Graceful shutdown drains in-flight connections on `SIGTERM`/`SIGINT`.
-- A TOML/YAML config file replaces long flag lists.
+- Graceful shutdown drains in-flight connections on `SIGTERM` and `SIGINT`.
+- A TOML or YAML config file replaces long flag lists.
 
 **Reliability**
-- Online backup and restore tooling exists and is tested.
-- WAL truncation mid-entry replays cleanly with no panic and no silent data loss.
+- Online backup and restore tooling exists and is tested against real failure scenarios.
+- WAL truncation mid-entry replays cleanly: no panic, no silent data loss.
 
 **Client story**
-- A typed async Rust client crate handles connection management, auth, and response parsing.
+- A typed async Rust client crate handles connection management, authentication, and response parsing.
 - At least one thin client (Python or Go) exists for integration-test ergonomics.
 
 ---

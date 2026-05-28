@@ -6,9 +6,9 @@ template = "index.html"
 page_template = "page.html"
 +++
 
-A time-series database built on immutable, layered temporal intervals.
+**A time-series database built on algebraically precise temporal intervals, verified by property-based tests and deterministic simulation.**
 
-Every value in Tau is a fact that was true from time A to time B. Corrections append on top of existing data. Old records stay intact. The newest layer wins at query time. Write-write conflicts disappear entirely.
+Time-series data is not static. Sensors drift. Prices get restated. Audit records get amended. Tau models this directly: values live in half-open intervals `[start, end)` that tile without gaps or overlap, corrections append as new layers, and the newest layer wins at query time. Compaction normalises any stack of layers into a single canonical form — every query result is preserved exactly, a property checked by randomised tests on every build.
 
 ```
 CREATE DATABASE sensors
@@ -17,19 +17,24 @@ APPEND LENS temperature 0 3600 18.5, 3600 7200 21.0
 AT LENS temperature 1800        -> VAL f18.5
 RANGE LENS temperature 0 7200  -> RANGE 2; 0:3600:f18.5; 3600:7200:f21
 REDUCE LENS temperature 0 7200 USING avg  -> VAL f19.75
-```
 
----
+APPEND LENS temperature 0 3600 20.0
+AT LENS temperature 1800        -> VAL f20
+RANGE LENS temperature 0 7200  -> RANGE 2; 0:3600:f20; 3600:7200:f21
+REDUCE LENS temperature 0 7200 USING avg  -> VAL f20.5
+```
 
 ## Why Tau?
 
-**Correction is the natural state of real data.** Sensor readings drift. Financial prices get restated. Audit logs need amendments. Traditional databases model these as mutations: update in place and the old value is gone. Tau models them as what they are: a newer layer superseding an older one. Nothing is lost. Everything is queryable.
+**The interval model has algebraic structure.** Half-open intervals `[start, end)` form a monoid under concatenation: `[a,b) + [b,c) = [a,c)`. Adjacent intervals tile cleanly, boundary ownership is unambiguous, and the structure composes. This is not an implementation detail — it is the reason the correctness properties are provable rather than assumed.
 
-**No write-write conflicts.** Every write is an append. Two concurrent clients writing to the same lens at the same time will both succeed. Resolution happens lazily at query time: newest layer wins. Out-of-order streams ingest without locking or coordination.
+**Conflict resolution is a deterministic rule, not a policy.** Every layer has a monotonically increasing ID. At any timestamp, the layer with the highest ID wins. There is no configuration, no per-lens strategy, no coordination between writers. Two concurrent appends to the same interval both succeed; the later one wins at query time.
 
-**Derived lenses are lazy and live.** `DERIVE LENS fahrenheit AS celsius * 9.0 / 5.0 + 32.0` creates a virtual lens that evaluates its expression on demand. Nothing is materialised. It stays current because it re-evaluates on every query.
+**Compaction is a normalisation.** The sweep-line algorithm reduces N layers to one canonical layer. Every `AT`, `RANGE`, and `REDUCE` result is identical before and after — this equivalence is the core invariant checked by Tau's property-based test suite. Compaction reduces query cost; it does not change what queries return.
 
-**Rolling window aggregations in expressions.** `avg(cpu, -600, 0)` inside a `DERIVE` evaluates the time-weighted average of `cpu` over the 600-unit window ending at the query point. Use it to build threshold alerts, smoothed baselines, and anomaly detectors as first-class database objects.
+**Derived lenses are function composition.** `DERIVE LENS fahrenheit AS celsius * 9.0 / 5.0 + 32.0` compiles an expression into a lazy closure at definition time. Closures compose: a lens derived from other derived lenses chains their closures. Rolling aggregations like `avg(cpu, -600, 0)` are first-class expression nodes, usable anywhere. Cycle detection runs at `DERIVE` time by walking the dependency graph.
+
+**Correctness is tested, not claimed.** The property-based test suite (Hegel/Hypothesis) checks algebraic invariants across hundreds of randomised inputs per property. The deterministic simulation tester (`dst`) drives every transport x auth x WAL configuration against a reference oracle, injecting faults across hundreds of millions of simulated operations. If there is a divergence, `dst` finds it, prints the seed, and tells you exactly how to reproduce it.
 
 ---
 
@@ -67,23 +72,25 @@ VAL i45
 
 | Feature | What it means |
 |---------|--------------|
-| **Immutable layers** | Corrections append; old data is never overwritten |
-| **Newest-layer-wins** | Query resolution is deterministic: the most recent layer covering a timestamp always wins |
-| **Derived lenses** | Lazy computed views over any expression; cycles detected at `DERIVE` time |
-| **Rolling aggregations** | `avg`, `min`, `max`, `sum`, `count` over relative windows, first-class in expressions |
-| **TLS + auth** | Optional TLS (PEM or ephemeral self-signed) and Argon2id authentication with per-database CRUDA grants |
-| **WAL durability** | Per-statement fsync, AES-256-GCM encryption at rest |
-| **Prometheus metrics** | Per-statement counters, latency histograms, process gauges |
-| **DST tested** | Deterministic simulation tester covers compaction, WAL replay, auth, and fault injection across hundreds of millions of simulated operations |
+| **Half-open interval monoid** | `[start, end)` intervals tile cleanly; concatenation is associative; no boundary ambiguity |
+| **Layer total order** | Every append gets a monotonically increasing ID; newest-layer-wins is a deterministic rule, not a policy |
+| **Compaction normalisation** | Sweep-line reduces N layers to one canonical layer; query results are provably identical before and after |
+| **Derived lenses** | Lazy closure composition; cycles detected at `DERIVE` time; rolling window aggregations are first-class |
+| **Property-based tests** | Hegel/Hypothesis verifies algebraic invariants across hundreds of randomised inputs per property |
+| **Deterministic simulation** | `dst` runs every config combination against a reference oracle; faults injected; reproducible by seed |
+| **TLS + auth** | Optional TLS and Argon2id authentication with per-database CRUDA grants |
+| **WAL durability** | Per-statement fsync, AES-256-GCM encryption at rest, schema DDL persisted and replayed |
 
 ---
 
 ## Explore
 
-- [Overview](/docs/overview/): data model, internals, and design philosophy
-- [TauQL Reference](/docs/tauql/): complete language reference
+- [Overview](/docs/overview/): the data model and its algebraic properties
+- [TauQL Reference](/docs/tauql/): every statement and operator
+- [How it works](/docs/how-it-works/): storage, WAL, compaction, concurrency
+- [Testing](/docs/testing/): property-based tests and the deterministic simulation tester
 - [Examples](/docs/examples/): worked queries against real datasets
-- [Tutorials](/docs/tutorials/local/): step-by-step for local, Docker, and embedded use
+- [Tutorials](/docs/tutorials/local/): local, Docker, embedded
 - [Configuration](/docs/configuration/): all server flags and environment variables
 - [Containers](/docs/containers/): Docker stack with Prometheus and Grafana
 

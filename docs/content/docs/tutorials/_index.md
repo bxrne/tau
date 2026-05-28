@@ -3,11 +3,10 @@ title = "Tutorials"
 sort_by = "title"
 paginate_by = 20
 template = "section.html"
-page_template = "page.html"
 +++
 
-Step-by-step guides for getting Tau running in three different configurations.
+Three paths to running Tau, from quickest to most integrated.
 
-- [Local](/docs/tutorials/local/): build from source, run the server, query with the REPL
-- [Docker](/docs/tutorials/docker/): full observability stack with Prometheus and Grafana
-- [Embedded (library)](/docs/tutorials/embedded/): use Tau as a Rust library with no server process
+- [Local](/docs/tutorials/local/): build from source, start the server, query with the REPL, and run the simulation tester
+- [Docker](/docs/tutorials/docker/): full Tau + Prometheus + Grafana stack with one `docker compose up`
+- [Embedded](/docs/tutorials/embedded/): link Tau as a Rust library — no server process, no network, no auth overhead

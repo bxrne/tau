@@ -6,21 +6,20 @@ template = "section.html"
 page_template = "page.html"
 +++
 
-Complete reference for building with Tau.
+Complete reference for Tau — the data model, query language, storage internals, and operational guide.
 
-- [Overview](/docs/overview/): data model, design decisions
+- [Overview](/docs/overview/): the algebraic interval model, layers, lenses, compaction, and concurrency
 - [TauQL Reference](/docs/tauql/): every statement, operator, and response code
-- [Configuration](/docs/configuration/): server flags and environment variables
-- [Containers](/docs/containers/): Docker compose stack with observability
-- [Examples](/docs/examples/): worked queries against the bundled datasets
-- [How it works](/docs/how-it-works/): internals, storage model, WAL, compaction
-- [Testing](/docs/testing/): unit tests, property-based tests, deterministic simulation
-- [Roadmap](/docs/roadmap/): v0.1.0 feature set and v1.0 quality criteria
+- [How it works](/docs/how-it-works/): storage internals, WAL, compaction algorithm, design decisions
+- [Testing](/docs/testing/): property-based tests, the deterministic simulation tester, and what each layer catches
+- [Examples](/docs/examples/): worked queries against the bundled real datasets
+- [Configuration](/docs/configuration/): all server flags and environment variables
+- [Containers](/docs/containers/): Docker compose stack with Prometheus and Grafana
+- [Roadmap](/docs/roadmap/): what shipped in v0.1.0 and what v1.0 requires
 - [Changelog](/docs/changelog/): release history
 
-**Tutorials:**
+**Tutorials — step by step:**
 
-- [Local](/docs/tutorials/local/)
-- [Docker](/docs/tutorials/docker/)
-- [Embedded (library)](/docs/tutorials/embedded/)
-
+- [Local](/docs/tutorials/local/): build from source and run the server
+- [Docker](/docs/tutorials/docker/): full observability stack in under five minutes
+- [Embedded](/docs/tutorials/embedded/): use Tau as a Rust library with no server process
