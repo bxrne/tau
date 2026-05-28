@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1](https://github.com/bxrne/tau/compare/tau-v0.1.0...tau-v0.1.1) (2026-05-28)
+
+
+### Bug Fixes
+
+* update licence and assoc docs, fixed menu on mobile ([135071c](https://github.com/bxrne/tau/commit/135071cb956ff7fbec2340252a2cec4f8e5c7c54))
+
 ## 0.1.0 (2026-05-28)
 
 
