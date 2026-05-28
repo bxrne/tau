@@ -308,16 +308,40 @@ pub fn load_command() -> Command {
             let mut total: u64 = 0;
             let mut chunks: u64 = 0;
 
-            for (lineno, raw) in reader.lines().enumerate() {
-                let raw = raw.map_err(|e| format!("read {} line {}: {}", path, lineno + 1, e))?;
-                if let Some(triple) = parse_csv_line(&raw, path, lineno)? {
-                    buffer.push(triple);
-                }
-                if buffer.len() >= chunk {
-                    flush_chunk(conn, lens, &mut buffer, &mut total, &mut chunks)?;
-                }
+            let resp = conn.send("START TRANSACTION").map_err(|e| e.to_string())?;
+            if !resp.starts_with("OK") {
+                return Err(format!(
+                    "START TRANSACTION: {}",
+                    resp.strip_prefix("ERR ").unwrap_or(&resp)
+                ));
             }
-            flush_chunk(conn, lens, &mut buffer, &mut total, &mut chunks)?;
+
+            let run_result: Result<(), String> = (|| {
+                for (lineno, raw) in reader.lines().enumerate() {
+                    let raw =
+                        raw.map_err(|e| format!("read {} line {}: {}", path, lineno + 1, e))?;
+                    if let Some(triple) = parse_csv_line(&raw, path, lineno)? {
+                        buffer.push(triple);
+                    }
+                    if buffer.len() >= chunk {
+                        flush_chunk(conn, lens, &mut buffer, &mut total, &mut chunks)?;
+                    }
+                }
+                flush_chunk(conn, lens, &mut buffer, &mut total, &mut chunks)
+            })();
+
+            if let Err(e) = run_result {
+                let _ = conn.send("ROLLBACK");
+                return Err(e);
+            }
+
+            let resp = conn.send("COMMIT").map_err(|e| e.to_string())?;
+            if !resp.starts_with("OK") {
+                return Err(format!(
+                    "COMMIT: {}",
+                    resp.strip_prefix("ERR ").unwrap_or(&resp)
+                ));
+            }
 
             println!(
                 "loaded {} rows into {} ({} chunk{})",
@@ -649,11 +673,13 @@ mod tests {
         (c.action)(&registry, &mut repl, &cmd).expect("load should succeed");
 
         let captured = lines.lock().unwrap().clone();
-        // 5 rows, chunk size 2 -> chunks of 2, 2, 1.
-        assert_eq!(captured.len(), 3);
-        assert_eq!(captured[0], "APPEND LENS temp 0 10 1, 10 20 2");
-        assert_eq!(captured[1], "APPEND LENS temp 20 30 3, 30 40 4");
-        assert_eq!(captured[2], "APPEND LENS temp 40 50 5");
+        // START TRANSACTION + 3 APPEND chunks (2,2,1) + COMMIT = 5 messages.
+        assert_eq!(captured.len(), 5);
+        assert_eq!(captured[0], "START TRANSACTION");
+        assert_eq!(captured[1], "APPEND LENS temp 0 10 1, 10 20 2");
+        assert_eq!(captured[2], "APPEND LENS temp 20 30 3, 30 40 4");
+        assert_eq!(captured[3], "APPEND LENS temp 40 50 5");
+        assert_eq!(captured[4], "COMMIT");
 
         std::fs::remove_file(&path).ok();
     }
