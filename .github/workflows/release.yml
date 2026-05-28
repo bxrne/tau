@@ -1,15 +1,5 @@
 name: Release
 
-# Release-please opens / merges a release PR (commit message
-# `chore(master): release X.Y.Z`).  When that merge lands, this workflow
-# runs once more, sees that release-please created a GitHub Release, and
-# fans out into the docker, build, upload, and bench jobs.
-#
-# Important: GitHub does NOT fire a `release: { types: [published] }`
-# event for a release created by `GITHUB_TOKEN` from inside a workflow.
-# Chaining off `needs.release-please.outputs.release_created` is the
-# documented workaround - no PAT required.
-
 on:
   push:
     branches: [master]
@@ -20,12 +10,17 @@ on:
         required: true
         type: string
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
   pull-requests: write
   packages: write
 
 jobs:
+  # Opens/updates the release PR on every push. Skipped for workflow_dispatch.
   release-please:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
@@ -40,14 +35,12 @@ jobs:
           release-type: simple
           draft: false
 
-  # Resolve the tag this workflow run is building artifacts for, regardless
-  # of whether the trigger was `push` (via release-please) or
-  # `workflow_dispatch` (manual rebuild).  Other jobs key off
-  # `needs.gate.outputs.should_release == 'true'`.
+  # Determines whether this run should produce release artifacts.
+  # Runs after release-please (or alone for workflow_dispatch).
   gate:
-    runs-on: ubuntu-latest
-    needs: release-please
+    needs: [release-please]
     if: always()
+    runs-on: ubuntu-latest
     outputs:
       should_release: ${{ steps.decide.outputs.should_release }}
       tag_name: ${{ steps.decide.outputs.tag_name }}
@@ -57,15 +50,84 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "should_release=true" >> "$GITHUB_OUTPUT"
+            echo "should_release=true"  >> "$GITHUB_OUTPUT"
             echo "tag_name=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
           elif [ "${{ needs.release-please.outputs.release_created }}" = "true" ]; then
-            echo "should_release=true" >> "$GITHUB_OUTPUT"
+            echo "should_release=true"  >> "$GITHUB_OUTPUT"
             echo "tag_name=${{ needs.release-please.outputs.tag_name }}" >> "$GITHUB_OUTPUT"
           else
             echo "should_release=false" >> "$GITHUB_OUTPUT"
-            echo "tag_name=" >> "$GITHUB_OUTPUT"
+            echo "tag_name="            >> "$GITHUB_OUTPUT"
           fi
+
+  # Cross-compile binaries for each target. Both targets run independently
+  # so a failure in one does not cancel the other.
+  build:
+    needs: gate
+    if: needs.gate.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.tag_name }}
+
+      # Install the toolchain that rust-toolchain.toml pins, then explicitly
+      # add the cross-compilation target to that same toolchain. Using
+      # `targets:` in the action alone adds the target to the *stable*
+      # toolchain instead of the pinned version, which causes the linker to
+      # fail with "can't find crate for `core`".
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Add cross-compilation target
+        run: rustup target add ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Cache Zig
+        id: cache-zig
+        uses: actions/cache@v4
+        with:
+          path: ~/zig
+          key: zig-linux-x86_64-0.13.0
+
+      - name: Install Zig
+        if: steps.cache-zig.outputs.cache-hit != 'true'
+        run: |
+          curl -sSfL \
+            "https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz" \
+            | tar -xJ -C ~/
+          mv ~/zig-linux-x86_64-0.13.0 ~/zig
+
+      - name: Add Zig to PATH
+        run: echo "$HOME/zig" >> "$GITHUB_PATH"
+
+      - name: Install cargo-zigbuild
+        run: which cargo-zigbuild || cargo install --locked cargo-zigbuild
+
+      - name: Build
+        run: cargo zigbuild --release --target ${{ matrix.target }}
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/tau   dist/tau-${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/ctl   dist/ctl-${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/bench dist/bench-${{ matrix.target }}
+          tar -czf tau-${{ matrix.target }}.tar.gz -C dist .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tau-${{ matrix.target }}
+          path: tau-${{ matrix.target }}.tar.gz
 
   docker:
     needs: gate
@@ -78,113 +140,37 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.gate.outputs.tag_name }}
+
       - name: Resolve image name
         id: image
         run: |
           owner="${GITHUB_REPOSITORY_OWNER,,}"
           echo "name=ghcr.io/${owner}/tau" >> "$GITHUB_OUTPUT"
+
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-      - name: Build and tag Docker image
+
+      - name: Build and push Docker image
         run: |
           docker build -f container/Dockerfile \
             -t ${{ steps.image.outputs.name }}:latest \
             -t ${{ steps.image.outputs.name }}:${{ needs.gate.outputs.tag_name }} \
             .
-      - name: Push Docker image
-        run: |
           docker push ${{ steps.image.outputs.name }}:latest
           docker push ${{ steps.image.outputs.name }}:${{ needs.gate.outputs.tag_name }}
 
-  
-
-  build:
-    needs: gate
-    if: needs.gate.outputs.should_release == 'true'
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.gate.outputs.tag_name }}
-          
-      - name: Install Rust Toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Install Zig and cargo-zigbuild
-        run: |
-          sudo snap install zig --classic --beta
-          cargo install cargo-zigbuild
-
-      - name: Build
-        run: cargo zigbuild --release --target ${{ matrix.target }}
-
-      - name: Package
-        run: |
-          set -euo pipefail
-          mkdir -p dist
-          cp target/${{ matrix.target }}/release/tau dist/tau-${{ matrix.target }}
-          cp target/${{ matrix.target }}/release/ctl dist/ctl-${{ matrix.target }}
-          cp target/${{ matrix.target }}/release/bench dist/bench-${{ matrix.target }}
-          tar -czf tau-${{ matrix.target }}.tar.gz -C dist .
-          
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: tau-${{ matrix.target }}
-          path: tau-${{ matrix.target }}.tar.gz
-
+  # Uploads binaries to the GitHub Release only after both build and docker
+  # succeed, so the release is never published with partial artifacts.
   upload-release:
-    needs: [gate, build]
+    needs: [gate, build, docker]
     if: needs.gate.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
-      - name: Upload release assets
-        uses: softprops/action-gh-release@v2
+
+      - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.gate.outputs.tag_name }}
           files: |
             tau-x86_64-unknown-linux-gnu/*.tar.gz
             tau-aarch64-unknown-linux-gnu/*.tar.gz
-
-  # Bench results upload as a release asset only.  The release PR body
-  # is left alone - benchmark numbers do not leak into the release notes.
-  bench-release-artifact:
-    needs: [gate, build]
-    if: needs.gate.outputs.should_release == 'true'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    env:
-      RUSTFLAGS: "-C target-cpu=native -C codegen-units=1"
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.gate.outputs.tag_name }}
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Build bench (release-bench profile)
-        run: cargo build --profile release-bench --bin bench
-      - name: Run bench (full grid, best-of-5)
-        # Full grid covers transport (plain/TLS), auth (none/password), WAL
-        # (off/on) and every workload (append, at-lookup, range, reduce).
-        # best-of-5 picks the fastest of 5 runs per cell so runner noise
-        # does not dominate.
-        run: |
-          ./target/release-bench/bench \
-            --repeat 5 \
-            --ops 2000 \
-            --scratch "$GITHUB_WORKSPACE/.bench-scratch" \
-            --label "${{ needs.gate.outputs.tag_name }}" \
-            --out bench-results.csv \
-            | tee bench-results.txt
-      - name: Upload bench CSV to release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release upload "${{ needs.gate.outputs.tag_name }}" \
-            bench-results.csv bench-results.txt --clobber
