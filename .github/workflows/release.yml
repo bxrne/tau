@@ -32,7 +32,8 @@ jobs:
       - uses: googleapis/release-please-action@v4
         id: release
         with:
-          release-type: simple
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
           draft: false
 
   # Determines whether this run should produce release artifacts.
