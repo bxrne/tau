@@ -22,6 +22,9 @@
 //!         | DROP   DATABASE <ident>
 //!         | DROP   USER <ident>
 //! use    := USE    DATABASE <ident>
+//! start  := START TRANSACTION
+//! commit := COMMIT
+//! rollback := ROLLBACK
 //!
 //! create_user := CREATE USER <ident> PASSWORD "<pass>"
 //! grant       := GRANT  <perm-letters> ON <db-or-star> TO   <ident>
@@ -125,6 +128,14 @@ pub enum Expr {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
+    /// `START TRANSACTION` - begin a transaction.  Subsequent statements are
+    /// buffered until a `COMMIT` or `ROLLBACK`.  Transactions are not nested;
+    /// issuing `START` while a transaction is active is an error.
+    StartTransaction,
+    /// `COMMIT` - apply all buffered statements atomically.  Requires an active transaction.
+    Commit,
+    /// `ROLLBACK` - discard all buffered statements.  Requires an active transaction.
+    Rollback,
     /// `CREATE DATABASE <name>` - registers a fresh, empty database.
     /// The first database created also becomes the active one.
     CreateDatabase {

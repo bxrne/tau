@@ -28,6 +28,10 @@ A derived lens is an AST expression stored at definition time. Every `AT` or `RA
 
 `users` defines a 5-bit `Perm` bitmap (`C`, `R`, `U`, `D`, `A`) and a `UserStore` that maps `database_name -> Perm` per user - with `"*"` as a wildcard that grants on every database (including ones created later). The `Executor` owns one of these and exposes `exec_as(stmt, caller)` / `exec_read_as` that check the matched user's grants before delegating to the plain `exec`/`exec_read` path. Unrestricted `exec` and `exec_read` are still available for library / test use and for schema-replay startup. Persistence is a single text file, rewritten atomically on every mutation.
 
+### Transactions are connection-scoped and serially applied
+
+`START TRANSACTION` puts the executor into a buffering mode for the calling connection. Subsequent mutations are staged in a per-connection buffer rather than written to storage immediately; readers on other connections see the pre-transaction state throughout. `COMMIT` applies the entire buffer atomically under the write lock. `ROLLBACK` discards it. Nesting is not allowed — a second `START TRANSACTION` before a `COMMIT` or `ROLLBACK` returns `ExecError::TransactionAlreadyActive`. Issuing `COMMIT` or `ROLLBACK` without a preceding `START TRANSACTION` returns `ExecError::NoActiveTransaction`.
+
 ### Metrics are shared via Arc
 
 The `Executor` owns an `Arc<Metrics>` field. The TCP server receives a clone of that Arc and shares it with the metrics HTTP thread. This lets the metrics endpoint read counters without going through the executor lock - the counters use `Relaxed` atomics because they are best-effort observability data, not synchronisation barriers.

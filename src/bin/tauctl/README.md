@@ -138,6 +138,16 @@ The dispatcher is a transparent line forwarder - the server parses and executes 
 | `SHOW LENSES`                      | `NAMES n; …` | Sorted lens names in the active database. |
 | `DERIVE LENS <name> AS <expr>`     | `OK`         | Lazy computed lens; see expressions below. |
 
+### Transactions
+
+| statement | response | notes |
+|---|---|---|
+| `START TRANSACTION` | `OK` | Begin buffering mutations. `ERR transaction already active` if one is already open. |
+| `COMMIT`            | `OK` | Apply all buffered mutations atomically. `ERR no active transaction` if none open. |
+| `ROLLBACK`          | `OK` | Discard all buffered mutations. `ERR no active transaction` if none open. |
+
+Mutations issued inside a transaction (`APPEND`, `COPY`, `CREATE LENS`, etc.) are held in memory and invisible to other connections until `COMMIT`. `ROLLBACK` drops them entirely. Transactions are per-connection; nesting is not supported.
+
 ### Writes
 
 | statement | response | notes |

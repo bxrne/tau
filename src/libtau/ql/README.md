@@ -10,7 +10,7 @@ A small, purpose-built query language for temporal interval data. It is delibera
 
 ```
 stmt   := create | append | copy | derive | show | at | range | reduce
-        | drop | use | user_admin
+        | drop | use | user_admin | start | commit | rollback
 
 create := CREATE DATABASE <name>
         | CREATE LENS <name> <type>
@@ -29,6 +29,9 @@ drop   := DROP LENS <name>
         | DROP DATABASE <name>
         | DROP USER <name>
 use    := USE DATABASE <name>
+start  := START TRANSACTION
+commit := COMMIT
+rollback := ROLLBACK
 
 user_admin
        := GRANT <perms> ON <db | *> TO <user>
@@ -52,6 +55,23 @@ Expressions have standard C-style operator precedence: `||` < `&&` < comparisons
 ### `COPY` CSV ingestion
 
 `COPY LENS name FROM "/path/to/file.csv"` reads a CSV file where every non-blank, non-comment (`#`) line is `start,end,value`. The entire file is parsed and appended as a single layer, so the ingest is atomic from the perspective of concurrent readers. The path is resolved on the **server's** filesystem - use `tauctl`'s `load` command instead when the file lives on the client.
+
+### Transactions
+
+`START TRANSACTION` begins a transaction on the current connection. All subsequent mutations (`APPEND`, `COPY`, `CREATE LENS`, `DERIVE LENS`, `DROP LENS`) are buffered in memory and invisible to every other connection until `COMMIT` is issued. `ROLLBACK` discards the buffer without applying anything.
+
+```
+START TRANSACTION
+APPEND LENS cpu 0 3600 42
+APPEND LENS cpu 3600 7200 55
+COMMIT              ← both appends applied atomically at this point
+```
+
+Error cases:
+- `START TRANSACTION` while a transaction is already active → `ERR transaction already active`
+- `COMMIT` or `ROLLBACK` with no active transaction → `ERR no active transaction`
+
+Transactions are scoped to a single client connection. There is no distributed transaction manager, no support for isolation levels, and no cross-connection conflict detection. The server processes each transaction serially; the write lock is held for the entire commit so readers see either zero or all of the batch's writes.
 
 ### User and permission management
 

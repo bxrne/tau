@@ -134,7 +134,7 @@ fn embedded_sim(seed: u64, cli: &Cli) {
         let lens_idx = rng_usize(&mut rng, 0, EMBEDDED_LENSES.len());
         let lens_name = EMBEDDED_LENSES[lens_idx];
 
-        match rng.gen_range(0u8..16) {
+        match rng.gen_range(0u8..20) {
             0 if live[lens_idx] => {
                 let stmt = parse(&format!("DROP LENS {lens_name}")).expect("parse").1;
                 executor.write().expect("lock").exec(&stmt).ok();
@@ -158,6 +158,34 @@ fn embedded_sim(seed: u64, cli: &Cli) {
                 let rs = rng.gen_range(0..time_cursor);
                 let re = rs + rng_range(&mut rng, 1, (time_cursor / 10).max(2));
                 embedded_check_range(&executor, lens_name, rs, re, op_idx);
+            }
+            16..=17 if live[lens_idx] => {
+                // Transactional append that commits: same observable effect as
+                // a direct append; the oracle is updated after commit.
+                if !embedded_do_tx_commit(
+                    &mut rng,
+                    &executor,
+                    &mut oracle,
+                    &max_cursor,
+                    lens_name,
+                    &mut time_cursor,
+                    op_idx,
+                ) {
+                    continue;
+                }
+                write_ops += 1;
+            }
+            18 if live[lens_idx] => {
+                // Transactional append that rolls back: oracle unchanged,
+                // executor state must also be unchanged.
+                embedded_do_tx_rollback(
+                    &mut rng,
+                    &executor,
+                    &oracle,
+                    lens_name,
+                    time_cursor,
+                    op_idx,
+                );
             }
             _ if live[lens_idx] => {
                 if !embedded_do_append(
@@ -186,6 +214,136 @@ fn embedded_sim(seed: u64, cli: &Cli) {
     info!(
         "dst embedded: {total_ops} ops ({write_ops} writes), \
          {segments} segments stored, simulated {simulated_years:.0} years"
+    );
+}
+
+fn embedded_do_tx_commit(
+    rng: &mut StdRng,
+    executor: &Arc<RwLock<Executor>>,
+    oracle: &mut Oracle,
+    max_cursor: &Arc<AtomicI64>,
+    lens_name: &str,
+    time_cursor: &mut i64,
+    op_idx: u64,
+) -> bool {
+    let batch_size = rng_usize(rng, 1, 5);
+    let mut segs: Vec<(i64, i64, i64)> = Vec::with_capacity(batch_size);
+    let mut cur = *time_cursor;
+    for _ in 0..batch_size {
+        let advance = rng_range(rng, 1_000_000, 100_000_000);
+        let s = cur + advance;
+        let e = s + rng_range(rng, 1, 10_000_001);
+        let v = rng_range(rng, i32::MIN as i64, i32::MAX as i64);
+        segs.push((s, e, v));
+        cur = e;
+    }
+    *time_cursor = cur;
+    max_cursor.store(*time_cursor, Ordering::Relaxed);
+
+    let mut exec = executor.write().expect("lock");
+    if exec
+        .exec(&parse("START TRANSACTION").expect("parse").1)
+        .is_err()
+    {
+        return false;
+    }
+    for &(s, e, v) in &segs {
+        let stmt_text = format!("APPEND LENS {lens_name} {s} {e} {v}");
+        if exec.exec(&parse(&stmt_text).expect("parse").1).is_err() {
+            exec.exec(&parse("ROLLBACK").expect("parse").1).ok();
+            return false;
+        }
+    }
+    if exec.exec(&parse("COMMIT").expect("parse").1).is_err() {
+        return false;
+    }
+    drop(exec);
+
+    oracle.append(lens_name, &segs);
+
+    let mid = segs[0].0;
+    let expected = oracle.at(lens_name, mid);
+    let stmt = parse(&format!("AT LENS {lens_name} {mid}"))
+        .expect("parse")
+        .1;
+    let got = match executor
+        .read()
+        .expect("lock")
+        .exec_read(&stmt)
+        .unwrap_or(Output::Value(None))
+    {
+        Output::Value(Some(Value::Int(i))) => Some(i),
+        _ => None,
+    };
+    assert_eq!(
+        got, expected,
+        "op {op_idx}: after COMMIT AT LENS {lens_name} {mid}: exec={got:?} oracle={expected:?}"
+    );
+    true
+}
+
+fn embedded_do_tx_rollback(
+    rng: &mut StdRng,
+    executor: &Arc<RwLock<Executor>>,
+    oracle: &Oracle,
+    lens_name: &str,
+    time_cursor: i64,
+    op_idx: u64,
+) {
+    let batch_size = rng_usize(rng, 1, 5);
+    let base = time_cursor + rng_range(rng, 1_000_000, 100_000_000);
+    let mut cur = base;
+    let mut segs: Vec<(i64, i64, i64)> = Vec::with_capacity(batch_size);
+    for _ in 0..batch_size {
+        let s = cur;
+        let e = s + rng_range(rng, 1, 10_000_001);
+        let v = rng_range(rng, i32::MIN as i64, i32::MAX as i64);
+        segs.push((s, e, v));
+        cur = e + rng_range(rng, 1, 100_000);
+    }
+
+    let mut exec = executor.write().expect("lock");
+    exec.exec(&parse("START TRANSACTION").expect("parse").1)
+        .expect("start tx");
+    for &(s, e, v) in &segs {
+        let stmt_text = format!("APPEND LENS {lens_name} {s} {e} {v}");
+        exec.exec(&parse(&stmt_text).expect("parse").1)
+            .expect("append in tx");
+    }
+
+    // Pending writes must be invisible before COMMIT.
+    let mid = segs[0].0;
+    let isolation_stmt = parse(&format!("AT LENS {lens_name} {mid}"))
+        .expect("parse")
+        .1;
+    let before = exec.exec(&isolation_stmt).unwrap_or(Output::Value(None));
+    assert!(
+        !matches!(before, Output::Value(Some(_))),
+        "op {op_idx}: pending write visible before COMMIT on {lens_name} at {mid}"
+    );
+
+    exec.exec(&parse("ROLLBACK").expect("parse").1)
+        .expect("rollback");
+    drop(exec);
+
+    // After ROLLBACK the executor must match the oracle (rolled-back range
+    // was beyond time_cursor so oracle.at returns None).
+    let oracle_val = oracle.at(lens_name, mid);
+    let stmt = parse(&format!("AT LENS {lens_name} {mid}"))
+        .expect("parse")
+        .1;
+    let exec_val = match executor
+        .read()
+        .expect("lock")
+        .exec_read(&stmt)
+        .unwrap_or(Output::Value(None))
+    {
+        Output::Value(Some(Value::Int(i))) => Some(i),
+        _ => None,
+    };
+    assert_eq!(
+        exec_val, oracle_val,
+        "op {op_idx}: after ROLLBACK AT LENS {lens_name} {mid}: exec={exec_val:?} oracle={oracle_val:?}"
     );
 }
 

@@ -70,6 +70,8 @@ The exposition includes per-statement-type counters, latency histograms in micro
 
 Each incoming connection gets its own OS thread. All threads share one `Arc<RwLock<Executor>>`. Read-only statements (`AT`, `RANGE`, `REDUCE`, `SHOW DATABASES`, `SHOW LENSES`) take the read lock and run concurrently. Mutating statements (`CREATE`, `APPEND`, `COPY`, `DERIVE`, `DROP`) take the write lock exclusively.
 
+When a connection is inside a `START TRANSACTION … COMMIT` block, individual mutation statements are buffered in memory under the write lock as usual but their changes are not committed to storage until the `COMMIT` statement is processed. At commit time the write lock is held for the entire batch so concurrent readers see either none or all of the transaction's writes. `ROLLBACK` acquires the write lock only to discard the buffer.
+
 This is a simple and correct model. The tradeoff is that a slow write (e.g. a WAL fsync with a slow disk) blocks all concurrent reads. For write-heavy workloads this can become a bottleneck. A per-database lock rather than a single global lock would improve write-read concurrency, but adds complexity.
 
 ### Connection capacity

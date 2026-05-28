@@ -671,6 +671,8 @@ fn format_error(e: &ExecError) -> String {
         ExecError::PermissionDenied(m) => format!("permission denied: {m}"),
         ExecError::DuplicateUser(n) => format!("duplicate user: {n}"),
         ExecError::UnknownUser(n) => format!("unknown user: {n}"),
+        ExecError::TransactionAlreadyActive => "transaction already active".into(),
+        ExecError::NoActiveTransaction => "no active transaction".into(),
     }
 }
 

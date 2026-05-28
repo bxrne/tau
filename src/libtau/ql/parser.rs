@@ -43,6 +43,9 @@ pub fn parse(input: &str) -> IResult<&str, Stmt> {
         stmt_show,
         stmt_grant,
         stmt_revoke,
+        stmt_start_tx,
+        stmt_commit,
+        stmt_rollback,
     ))
     .parse(input)?;
     let (input, _) = multispace0(input)?;
@@ -78,6 +81,22 @@ fn stmt_create_database(i: &str) -> IResult<&str, Stmt> {
     let (i, _) = kw("DATABASE").parse(i)?;
     let (i, name) = ident(i)?;
     Ok((i, Stmt::CreateDatabase { name }))
+}
+
+fn stmt_start_tx(i: &str) -> IResult<&str, Stmt> {
+    let (i, _) = kw("START").parse(i)?;
+    let (i, _) = tag_no_case("TRANSACTION")(i)?;
+    Ok((i, Stmt::StartTransaction))
+}
+
+fn stmt_commit(i: &str) -> IResult<&str, Stmt> {
+    let (i, _) = tag_no_case("COMMIT")(i)?;
+    Ok((i, Stmt::Commit))
+}
+
+fn stmt_rollback(i: &str) -> IResult<&str, Stmt> {
+    let (i, _) = tag_no_case("ROLLBACK")(i)?;
+    Ok((i, Stmt::Rollback))
 }
 
 /// Parse a single `start end value` triple (no comma prefix).
@@ -797,6 +816,8 @@ mod tests {
                     | "REDUCE"
                     | "GRANT"
                     | "REVOKE"
+                    | "COMMIT"
+                    | "ROLLBACK"
             )
         }));
         assert!(parse(&format!("{junk} LENS x 1")).is_err());
@@ -897,6 +918,24 @@ mod tests {
             panic!()
         };
         assert_eq!(op, BinOp::And);
+    }
+
+    #[test]
+    fn start_transaction_parses() {
+        assert_eq!(parsed("START TRANSACTION"), Stmt::StartTransaction);
+        assert_eq!(parsed("start transaction"), Stmt::StartTransaction);
+    }
+
+    #[test]
+    fn commit_parses() {
+        assert_eq!(parsed("COMMIT"), Stmt::Commit);
+        assert_eq!(parsed("commit"), Stmt::Commit);
+    }
+
+    #[test]
+    fn rollback_parses() {
+        assert_eq!(parsed("ROLLBACK"), Stmt::Rollback);
+        assert_eq!(parsed("rollback"), Stmt::Rollback);
     }
 
     #[test]

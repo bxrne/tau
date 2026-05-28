@@ -89,6 +89,10 @@ pub enum ExecError {
     DuplicateUser(String),
     /// `DROP USER` / `GRANT` / `REVOKE` targeted a non-existent user.
     UnknownUser(String),
+    /// `START TRANSACTION` issued while a transaction is already active.
+    TransactionAlreadyActive,
+    /// `COMMIT` or `ROLLBACK` issued without a preceding `START TRANSACTION`.
+    NoActiveTransaction,
 }
 
 /// Per-database executor state.
@@ -159,6 +163,11 @@ pub struct Executor {
     /// Always present; the server clones the Arc to give the metrics thread
     /// read access without locking the executor.
     pub metrics: Arc<Metrics>,
+    /// Buffered mutations for the active transaction.  `None` means no
+    /// transaction is open.  `Some(stmts)` means `START TRANSACTION` was
+    /// issued and `stmts` is the ordered list of mutations queued for
+    /// `COMMIT`.
+    pending: Option<Vec<Stmt>>,
 }
 
 impl Default for Executor {
@@ -181,6 +190,7 @@ impl Executor {
             in_replay: false,
             users: UserStore::new(),
             metrics: Metrics::arc(),
+            pending: None,
         }
     }
 
@@ -278,7 +288,16 @@ impl Executor {
     /// Execute a single parsed statement.
     pub fn exec(&mut self, stmt: &Stmt) -> Result<Output, ExecError> {
         let t0 = Instant::now();
+        // While inside a transaction, buffer mutable lens statements.
+        // They are replayed atomically when COMMIT is issued.
+        if self.pending.is_some() && is_transactable(stmt) {
+            self.pending.as_mut().unwrap().push(stmt.clone());
+            return Ok(Output::Empty);
+        }
         let result = match stmt {
+            Stmt::StartTransaction => self.start_transaction(),
+            Stmt::Commit => self.commit(),
+            Stmt::Rollback => self.rollback(),
             Stmt::CreateDatabase { name } => self.create_database(name),
             Stmt::DropDatabase { name } => self.drop_database(name),
             Stmt::UseDatabase { name } => self.use_database(name),
@@ -435,6 +454,7 @@ impl Executor {
                     require_global_admin()
                 }
             }
+            Stmt::StartTransaction | Stmt::Commit | Stmt::Rollback => Ok(()),
         }
     }
 
@@ -498,6 +518,29 @@ impl Executor {
             }
         }
         Ok(Output::Grants(out))
+    }
+
+    fn start_transaction(&mut self) -> Result<Output, ExecError> {
+        if self.pending.is_some() {
+            return Err(ExecError::TransactionAlreadyActive);
+        }
+        self.pending = Some(Vec::new());
+        Ok(Output::Empty)
+    }
+
+    fn commit(&mut self) -> Result<Output, ExecError> {
+        let stmts = self.pending.take().ok_or(ExecError::NoActiveTransaction)?;
+        // pending is now None so the buffering intercept in exec is inactive
+        // and the replayed statements go straight to storage.
+        for stmt in stmts {
+            self.exec(&stmt)?;
+        }
+        Ok(Output::Empty)
+    }
+
+    fn rollback(&mut self) -> Result<Output, ExecError> {
+        self.pending.take().ok_or(ExecError::NoActiveTransaction)?;
+        Ok(Output::Empty)
     }
 
     fn create_database(&mut self, name: &str) -> Result<Output, ExecError> {
@@ -775,6 +818,20 @@ impl Executor {
             .get_mut(name)
             .ok_or_else(|| ExecError::UnknownDatabase(name.into()))
     }
+}
+
+/// Returns `true` for the statement kinds that are deferred when a transaction
+/// is active.  Only lens-scoped mutations are buffered; database management,
+/// user management, and DDL that operates outside lens storage are not.
+fn is_transactable(stmt: &Stmt) -> bool {
+    matches!(
+        stmt,
+        Stmt::Create { .. }
+            | Stmt::Append { .. }
+            | Stmt::Copy { .. }
+            | Stmt::Derive { .. }
+            | Stmt::Drop { .. }
+    )
 }
 
 /// For `SHOW DATABASES` returned to a non-global-admin caller, drop entries
@@ -1329,6 +1386,8 @@ fn numeric_min_max(a: Value, b: Value, want_max: bool) -> Result<Value, ExecErro
 mod tests {
     use super::*;
     use crate::libtau::ql::parse;
+    use hegel::TestCase;
+    use hegel::generators as gs;
     use pretty_assertions::assert_eq;
 
     /// Parse + run.  Panics on parse failure; returns `Result` on exec.
@@ -2172,6 +2231,191 @@ mod tests {
             }
             _ => panic!("expected Names"),
         }
+    }
+
+    #[test]
+    fn transaction_start_returns_ok() {
+        let mut e = setup();
+        assert_eq!(run(&mut e, "START TRANSACTION").unwrap(), Output::Empty);
+    }
+
+    #[test]
+    fn commit_without_active_transaction_errors() {
+        let mut e = setup();
+        assert_eq!(run(&mut e, "COMMIT"), Err(ExecError::NoActiveTransaction));
+    }
+
+    #[test]
+    fn rollback_without_active_transaction_errors() {
+        let mut e = setup();
+        assert_eq!(run(&mut e, "ROLLBACK"), Err(ExecError::NoActiveTransaction));
+    }
+
+    #[test]
+    fn nested_start_transaction_errors() {
+        let mut e = setup();
+        run(&mut e, "START TRANSACTION").unwrap();
+        assert_eq!(
+            run(&mut e, "START TRANSACTION"),
+            Err(ExecError::TransactionAlreadyActive)
+        );
+    }
+
+    #[test]
+    fn transaction_rollback_discards_appends() {
+        let mut e = setup();
+        run(&mut e, "CREATE LENS x int").unwrap();
+        run(&mut e, "START TRANSACTION").unwrap();
+        run(&mut e, "APPEND LENS x 0 10 42").unwrap();
+        run(&mut e, "ROLLBACK").unwrap();
+        assert_eq!(run(&mut e, "AT LENS x 5").unwrap(), Output::Value(None));
+    }
+
+    #[test]
+    fn appends_within_transaction_not_visible_before_commit() {
+        let mut e = setup();
+        run(&mut e, "CREATE LENS x int").unwrap();
+        run(&mut e, "START TRANSACTION").unwrap();
+        run(&mut e, "APPEND LENS x 0 10 42").unwrap();
+        // Data should not be visible until COMMIT.
+        assert_eq!(run(&mut e, "AT LENS x 5").unwrap(), Output::Value(None));
+        run(&mut e, "COMMIT").unwrap();
+        assert_eq!(
+            run(&mut e, "AT LENS x 5").unwrap(),
+            Output::Value(Some(Value::Int(42)))
+        );
+    }
+
+    #[hegel::test]
+    fn committed_transaction_matches_direct_writes(tc: TestCase) {
+        let n = tc.draw(gs::integers::<usize>().min_value(1).max_value(6));
+        let mut segs: Vec<(i64, i64, i64)> = Vec::new();
+        let mut cursor: i64 = 0;
+        for _ in 0..n {
+            let gap = tc.draw(gs::integers::<i64>().min_value(1).max_value(1_000));
+            let len = tc.draw(gs::integers::<i64>().min_value(1).max_value(1_000));
+            let val = tc.draw(gs::integers::<i64>().min_value(-10_000).max_value(10_000));
+            let s = cursor + gap;
+            let e = s + len;
+            segs.push((s, e, val));
+            cursor = e;
+        }
+
+        let mut direct = setup();
+        run(&mut direct, "CREATE LENS x int").unwrap();
+        for &(s, e, v) in &segs {
+            run(&mut direct, &format!("APPEND LENS x {s} {e} {v}")).unwrap();
+        }
+
+        let mut tx = setup();
+        run(&mut tx, "CREATE LENS x int").unwrap();
+        run(&mut tx, "START TRANSACTION").unwrap();
+        for &(s, e, v) in &segs {
+            run(&mut tx, &format!("APPEND LENS x {s} {e} {v}")).unwrap();
+        }
+        run(&mut tx, "COMMIT").unwrap();
+
+        for &(s, e, v) in &segs {
+            let mid = s + (e - s) / 2;
+            assert_eq!(
+                run(&mut direct, &format!("AT LENS x {mid}")).unwrap(),
+                run(&mut tx, &format!("AT LENS x {mid}")).unwrap(),
+                "segment [{s},{e}) value {v} diverged after commit"
+            );
+        }
+    }
+
+    #[hegel::test]
+    fn rollback_leaves_lens_unchanged(tc: TestCase) {
+        let base_val = tc.draw(gs::integers::<i64>().min_value(-10_000).max_value(10_000));
+        let tx_val = tc.draw(gs::integers::<i64>().min_value(-10_000).max_value(10_000));
+
+        let mut e = setup();
+        run(&mut e, "CREATE LENS x int").unwrap();
+        run(&mut e, &format!("APPEND LENS x 0 100 {base_val}")).unwrap();
+
+        run(&mut e, "START TRANSACTION").unwrap();
+        run(&mut e, &format!("APPEND LENS x 100 200 {tx_val}")).unwrap();
+        run(&mut e, "ROLLBACK").unwrap();
+
+        assert_eq!(
+            run(&mut e, "AT LENS x 50").unwrap(),
+            Output::Value(Some(Value::Int(base_val))),
+            "base data corrupted by rollback"
+        );
+        assert_eq!(
+            run(&mut e, "AT LENS x 150").unwrap(),
+            Output::Value(None),
+            "rolled-back data still visible"
+        );
+    }
+
+    #[hegel::test]
+    fn pending_writes_invisible_before_commit(tc: TestCase) {
+        let val = tc.draw(gs::integers::<i64>().min_value(-10_000).max_value(10_000));
+        let s = tc.draw(gs::integers::<i64>().min_value(1).max_value(1_000));
+        let e_ts = s + tc.draw(gs::integers::<i64>().min_value(1).max_value(1_000));
+
+        let mut exec = setup();
+        run(&mut exec, "CREATE LENS x int").unwrap();
+        run(&mut exec, "START TRANSACTION").unwrap();
+        run(&mut exec, &format!("APPEND LENS x {s} {e_ts} {val}")).unwrap();
+
+        let mid = s + (e_ts - s) / 2;
+        assert_eq!(
+            run(&mut exec, &format!("AT LENS x {mid}")).unwrap(),
+            Output::Value(None),
+            "pending write visible before COMMIT"
+        );
+    }
+
+    #[hegel::test]
+    fn multiple_sequential_transactions_accumulate(tc: TestCase) {
+        let n = tc.draw(gs::integers::<usize>().min_value(1).max_value(5));
+        let vals: Vec<i64> = (0..n)
+            .map(|_| tc.draw(gs::integers::<i64>().min_value(-10_000).max_value(10_000)))
+            .collect();
+
+        let mut e = setup();
+        run(&mut e, "CREATE LENS x int").unwrap();
+        for (i, &v) in vals.iter().enumerate() {
+            let s = (i as i64) * 100;
+            let end = s + 100;
+            run(&mut e, "START TRANSACTION").unwrap();
+            run(&mut e, &format!("APPEND LENS x {s} {end} {v}")).unwrap();
+            run(&mut e, "COMMIT").unwrap();
+        }
+        for (i, &v) in vals.iter().enumerate() {
+            let mid = (i as i64) * 100 + 50;
+            assert_eq!(
+                run(&mut e, &format!("AT LENS x {mid}")).unwrap(),
+                Output::Value(Some(Value::Int(v))),
+                "tx {i} value {v} missing after sequential commits"
+            );
+        }
+    }
+
+    #[hegel::test]
+    fn rollback_then_commit_independent(tc: TestCase) {
+        let discard_val = tc.draw(gs::integers::<i64>().min_value(-10_000).max_value(10_000));
+        let keep_val = tc.draw(gs::integers::<i64>().min_value(-10_000).max_value(10_000));
+
+        let mut e = setup();
+        run(&mut e, "CREATE LENS x int").unwrap();
+
+        run(&mut e, "START TRANSACTION").unwrap();
+        run(&mut e, &format!("APPEND LENS x 0 100 {discard_val}")).unwrap();
+        run(&mut e, "ROLLBACK").unwrap();
+
+        run(&mut e, "START TRANSACTION").unwrap();
+        run(&mut e, &format!("APPEND LENS x 0 100 {keep_val}")).unwrap();
+        run(&mut e, "COMMIT").unwrap();
+
+        assert_eq!(
+            run(&mut e, "AT LENS x 50").unwrap(),
+            Output::Value(Some(Value::Int(keep_val))),
+            "committed value wrong after preceding rollback"
+        );
     }
 
     #[test]

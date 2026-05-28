@@ -92,6 +92,8 @@ Encryption is AES-256-GCM with a random 12-byte nonce per entry, keyed by `TAU_E
 
 Each TCP connection runs on its own OS thread. All threads share one `Arc<RwLock<Executor>>`. Read-only statements (`AT`, `RANGE`, `REDUCE`, `SHOW *`) take the read lock and run concurrently. Write statements take the exclusive write lock.
 
+When a connection uses `START TRANSACTION … COMMIT`, mutations are buffered per-connection and not written to storage until `COMMIT`. At commit time the write lock is held for the entire batch, so readers see either none or all of the transaction's writes. `ROLLBACK` discards the buffer. Nesting is not supported.
+
 The design is intentionally simple. The trade-off — a slow write blocks concurrent reads — is acceptable for the expected workload and avoids the complexity of per-database locking or MVCC.
 
 ---

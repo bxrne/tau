@@ -155,6 +155,50 @@ Requires `U` permission on the active database.
 
 ---
 
+## Transactions
+
+### `START TRANSACTION`
+
+Begins a transaction on the current connection. Subsequent mutations are buffered in memory and not applied to storage until `COMMIT`.
+
+```
+START TRANSACTION
+→ OK
+```
+
+Issuing `START TRANSACTION` while a transaction is already active returns `ERR transaction already active`.
+
+### `COMMIT`
+
+Applies all buffered mutations atomically. Every other connection sees either none of the batch or all of it — there is no partial visibility. After commit the connection returns to autocommit mode.
+
+```
+START TRANSACTION
+APPEND LENS cpu 0 3600 45
+APPEND LENS cpu 3600 7200 60
+COMMIT
+→ OK
+```
+
+Issuing `COMMIT` with no active transaction returns `ERR no active transaction`.
+
+### `ROLLBACK`
+
+Discards all buffered mutations without applying them.
+
+```
+START TRANSACTION
+APPEND LENS cpu 0 3600 45
+ROLLBACK
+→ OK
+```
+
+`AT LENS cpu 1800` after the rollback above returns `VAL NIL` — the append was discarded.
+
+Issuing `ROLLBACK` with no active transaction returns `ERR no active transaction`.
+
+---
+
 ## Reads
 
 ### `AT LENS <name> <timestamp>`
@@ -388,6 +432,9 @@ statement :=
   | AT LENS name timestamp
   | RANGE LENS name start end [WHERE expr]
   | REDUCE LENS name start end USING func
+  | START TRANSACTION
+  | COMMIT
+  | ROLLBACK
   | CREATE USER name PASSWORD "pass"
   | DROP USER name
   | GRANT perms ON db|* TO user
