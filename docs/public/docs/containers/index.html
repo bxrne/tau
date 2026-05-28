@@ -78,7 +78,7 @@
             </h1>
             
     <div class="post-meta">
-        <span class="post-date">2024.01.04
+        <span class="post-date">2026.05.28
                 </span>
 
         <span class="post-author"></span>
@@ -183,7 +183,7 @@ docker compose up -d
 <tr><td><code>TAU_ADDR</code></td><td><code>0.0.0.0:7070</code></td><td>Bind address inside the container</td></tr>
 <tr><td><code>TAU_METRICS_PORT</code></td><td><code>9090</code></td><td>Port for Prometheus scraping</td></tr>
 <tr><td><code>TAU_LOG_LEVEL</code></td><td><code>info</code></td><td><code>error</code> | <code>warn</code> | <code>info</code> | <code>debug</code> | <code>trace</code></td></tr>
-<tr><td><code>TAU_ENCRYPTION_KEY</code></td><td>(none)</td><td>64 hex chars — enables AES-256-GCM encryption at rest</td></tr>
+<tr><td><code>TAU_ENCRYPTION_KEY</code></td><td>(none)</td><td>64 hex chars; enables AES-256-GCM encryption at rest</td></tr>
 <tr><td><code>TAU_CPU_LIMIT</code></td><td><code>1</code></td><td>Docker CPU limit</td></tr>
 <tr><td><code>TAU_MEM_LIMIT</code></td><td><code>512m</code></td><td>Docker memory limit</td></tr>
 <tr><td><code>GRAFANA_USER</code></td><td><code>admin</code></td><td>Grafana admin username</td></tr>
@@ -206,7 +206,7 @@ openssl rand -hex 32
 <p>Add to <code>.env</code>:</p>
 <pre><code>TAU_ENCRYPTION_KEY=&lt;your 64-char hex key&gt;
 </code></pre>
-<p>WAL entries written with this key are AES-256-GCM encrypted. The key is never stored — keep it in a secrets manager and inject it at runtime. A WAL file written with a key cannot be read without it.</p>
+<p>WAL entries written with this key are AES-256-GCM encrypted. The key is never stored; keep it in a secrets manager and inject it at runtime. A WAL file written with a key cannot be read without it.</p>
 <hr />
 <h2 id="prometheus-alert-rules">Prometheus alert rules</h2>
 <p>The stack ships with <code>prometheus/alerts.yml</code>:</p>
@@ -226,11 +226,11 @@ openssl rand -hex 32
 <p>Dashboard UID: <code>tau-db-prod</code>. Open at <code>http://localhost:3000/d/tau-db-prod</code>.</p>
 <p>Panels:</p>
 <ul>
-<li><strong>Overview</strong> — throughput, error rate, auth failures, rejected connections</li>
-<li><strong>Throughput</strong> — statements/s split by type</li>
-<li><strong>Latency</strong> — p50/p95/p99 per statement type</li>
-<li><strong>Security</strong> — AUTH attempts vs failures</li>
-<li><strong>Resources</strong> — RSS, virtual memory, open FDs, uptime</li>
+<li><strong>Overview</strong>: throughput, error rate, auth failures, rejected connections</li>
+<li><strong>Throughput</strong>: statements/s split by type</li>
+<li><strong>Latency</strong>: p50/p95/p99 per statement type</li>
+<li><strong>Security</strong>: AUTH attempts vs failures</li>
+<li><strong>Resources</strong>: RSS, virtual memory, open FDs, uptime</li>
 </ul>
 <hr />
 <h2 id="loading-data-into-the-container">Loading data into the container</h2>

@@ -1,6 +1,6 @@
 +++
 title = "Configuration"
-date = 2024-01-03
+date = 2026-05-28
 template = "page.html"
 +++
 
@@ -37,7 +37,7 @@ When `--wal` is enabled, every write is fsynced to the WAL before being applied 
 | `--tls-cert <PATH>` | (ephemeral self-signed) | PEM certificate file |
 | `--tls-key <PATH>` | (ephemeral self-signed) | PEM private key file |
 
-With `--tls` and no cert/key paths, an ephemeral self-signed certificate is generated at startup — convenient for development but not verifiable by clients. For production, provide a real cert and key.
+With `--tls` and no cert/key paths, an ephemeral self-signed certificate is generated at startup; convenient for development but not verifiable by clients. For production, provide a real cert and key.
 
 ### Authentication
 
@@ -146,7 +146,7 @@ When `--auth` is enabled, every statement is checked against the caller's CRUDA 
 | `R` | `AT`, `RANGE`, `REDUCE`, `SHOW LENSES` |
 | `U` | `APPEND LENS`, `COPY LENS FROM` |
 | `D` | `DROP LENS` |
-| `A` | Admin — manage users, `GRANT`/`REVOKE`, `CREATE DATABASE`, `DROP DATABASE` |
+| `A` | Admin: manage users, `GRANT`/`REVOKE`, `CREATE DATABASE`, `DROP DATABASE` |
 
 Effective permissions for a user on database `db` = `grants[db] | grants["*"]`. A user with `A` on `"*"` is a global admin.
 

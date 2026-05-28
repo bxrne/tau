@@ -78,7 +78,7 @@
             </h1>
             
     <div class="post-meta">
-        <span class="post-date">2024.01.03
+        <span class="post-date">2026.05.28
                 </span>
 
         <span class="post-author"></span>
@@ -191,7 +191,7 @@ Arguments:
 <tr><td><code>--tls-cert &lt;PATH&gt;</code></td><td>(ephemeral self-signed)</td><td>PEM certificate file</td></tr>
 <tr><td><code>--tls-key &lt;PATH&gt;</code></td><td>(ephemeral self-signed)</td><td>PEM private key file</td></tr>
 </tbody></table>
-<p>With <code>--tls</code> and no cert/key paths, an ephemeral self-signed certificate is generated at startup — convenient for development but not verifiable by clients. For production, provide a real cert and key.</p>
+<p>With <code>--tls</code> and no cert/key paths, an ephemeral self-signed certificate is generated at startup; convenient for development but not verifiable by clients. For production, provide a real cert and key.</p>
 <h3 id="authentication">Authentication</h3>
 <table><thead><tr><th>flag</th><th>default</th><th>description</th></tr></thead><tbody>
 <tr><td><code>--auth</code></td><td>off</td><td>Enable per-connection authentication</td></tr>
@@ -267,7 +267,7 @@ GET http://127.0.0.1:&lt;PORT&gt;/healthz    Liveness probe (returns &quot;ok&qu
 <tr><td><code>R</code></td><td><code>AT</code>, <code>RANGE</code>, <code>REDUCE</code>, <code>SHOW LENSES</code></td></tr>
 <tr><td><code>U</code></td><td><code>APPEND LENS</code>, <code>COPY LENS FROM</code></td></tr>
 <tr><td><code>D</code></td><td><code>DROP LENS</code></td></tr>
-<tr><td><code>A</code></td><td>Admin — manage users, <code>GRANT</code>/<code>REVOKE</code>, <code>CREATE DATABASE</code>, <code>DROP DATABASE</code></td></tr>
+<tr><td><code>A</code></td><td>Admin: manage users, <code>GRANT</code>/<code>REVOKE</code>, <code>CREATE DATABASE</code>, <code>DROP DATABASE</code></td></tr>
 </tbody></table>
 <p>Effective permissions for a user on database <code>db</code> = <code>grants[db] | grants["*"]</code>. A user with <code>A</code> on <code>"*"</code> is a global admin.</p>
 <p><code>SHOW DATABASES</code> is post-filtered for non-admins: only databases the caller holds any grant on are returned.</p>

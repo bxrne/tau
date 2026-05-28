@@ -78,7 +78,7 @@
             </h1>
             
     <div class="post-meta">
-        <span class="post-date">2024.01.07
+        <span class="post-date">2026.05.28
                 </span>
 
         <span class="post-author"></span>
@@ -199,7 +199,7 @@ cargo nextest run               # parallel runner, nicer output
 <p>Hegel auto-installs a Python shim (<code>~/.cache/hegel</code>) on first run. Each property runs 100+ randomised cases by default. Use <code>HEGEL_MAX_EXAMPLES=500</code> to increase the draw count.</p>
 <hr />
 <h2 id="layer-3-deterministic-simulation-tester-dst">Layer 3: Deterministic Simulation Tester (DST)</h2>
-<p>The DST is where emergent correctness bugs live — the ones that only appear when:</p>
+<p>The DST is where emergent correctness bugs live: the ones that only appear when:</p>
 <ul>
 <li>A base lens compacts, a derived lens references it, and then the WAL replays</li>
 <li>Hundreds of correction layers accumulate before compaction fires, then a concurrent <code>RANGE</code> scan sees the transition</li>
@@ -209,9 +209,9 @@ cargo nextest run               # parallel runner, nicer output
 <p><strong>Embedded (<code>--quick</code>):</strong> uses the library executor directly, no server process, no I/O. Simulates centuries of temporal data in seconds. Suitable for CI.</p>
 <p><strong>Full (default):</strong> spawns a real <code>tau</code> server for each config cell in the matrix (Transport × Auth × WAL), drives traffic over TCP, cross-checks every response against a simple oracle, injects faults (connection drops, WAL truncation), and scrapes Prometheus metrics to verify statement counts. Outputs a table of results.</p>
 <h3 id="oracle">Oracle</h3>
-<p>Both modes cross-check against a reference implementation: a <code>BTreeMap&lt;start, (end, value)&gt;</code> per lens with O(log n) lookups. It has no layers, no compaction, no WAL — just obviously correct temporal semantics. Any divergence between the oracle and the executor is a bug.</p>
+<p>Both modes cross-check against a reference implementation: a <code>BTreeMap&lt;start, (end, value)&gt;</code> per lens with O(log n) lookups. It has no layers, no compaction, no WAL. Just obviously correct temporal semantics. Any divergence between the oracle and the executor is a bug.</p>
 <h3 id="deterministic-reproduction">Deterministic reproduction</h3>
-<p>A <code>u64</code> seed drives the entire operation sequence. Given the same seed, the exact same operations execute in the same order — no flaky tests, no Heisenbugs.</p>
+<p>A <code>u64</code> seed drives the entire operation sequence. Given the same seed, the exact same operations execute in the same order. No flaky tests. No Heisenbugs.</p>
 <pre><code data-lang="bash">cargo run --release --bin dst -- --quick --seed 0xdeadbeef
 </code></pre>
 <p>A seed that found a bug six months ago can be re-run against a patched binary to confirm the fix.</p>
