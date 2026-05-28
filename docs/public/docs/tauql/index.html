@@ -78,7 +78,7 @@
             </h1>
             
     <div class="post-meta">
-        <span class="post-date">2024.01.02
+        <span class="post-date">2026.05.28
                 </span>
 
         <span class="post-author"></span>
@@ -365,7 +365,7 @@ DERIVE LENS cpu_hot AS cpu &gt; avg(cpu, -1800, 0)
 <hr />
 <h2 id="writes">Writes</h2>
 <h3 id="append-lens-name-s-e-v-s-e-v"><code>APPEND LENS &lt;name&gt; &lt;s&gt; &lt;e&gt; &lt;v&gt; [, &lt;s&gt; &lt;e&gt; &lt;v&gt; ...]</code></h3>
-<p>Appends one or more temporal intervals to a lens. Multiple intervals in a single <code>APPEND</code> form one atomic layer — they either all succeed or all fail.</p>
+<p>Appends one or more temporal intervals to a lens. Multiple intervals in a single <code>APPEND</code> form one atomic layer: they either all succeed or all fail.</p>
 <pre><code>APPEND LENS temperature 0 3600 18.5
 → OK
 
@@ -490,7 +490,7 @@ SHOW GRANTS
 <li><strong>Literals:</strong> integers (<code>42</code>, <code>-5</code>), floats (<code>3.14</code>, <code>-0.5</code>), booleans (<code>true</code>, <code>false</code>), strings (<code>"hello"</code>), null (<code>null</code>)</li>
 <li><strong>Identifiers:</strong> reference another lens by name, e.g. <code>cpu</code>, <code>temperature</code></li>
 <li><strong>Parentheses:</strong> <code>(expr)</code> for explicit grouping</li>
-<li><strong>Aggregation calls:</strong> <code>func(lens, rel_start, rel_end)</code> — see below</li>
+<li><strong>Aggregation calls:</strong> <code>func(lens, rel_start, rel_end)</code> (see Aggregations below)</li>
 </ul>
 <h3 id="aggregation-expressions">Aggregation expressions</h3>
 <p>Rolling-window aggregations are first-class expression nodes, available in both <code>DERIVE</code> and <code>WHERE</code>:</p>

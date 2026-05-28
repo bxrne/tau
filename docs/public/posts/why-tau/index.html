@@ -78,7 +78,7 @@
             </h1>
             
     <div class="post-meta">
-        <span class="post-date">2024.01.01
+        <span class="post-date">2026.05.28
                 </span>
 
         <span class="post-author"></span>
@@ -154,7 +154,7 @@
 <p>Tau is built on a different assumption: <strong>corrections are normal, and the history of corrections is valuable</strong>.</p>
 <hr />
 <h2 id="the-immutable-layer-model">The immutable layer model</h2>
-<p>Every value in Tau is a <em>temporal interval</em>: a value <code>V</code> that was true from time <code>A</code> to time <code>B</code>. When that fact changes, you don't update it — you append a new layer on top.</p>
+<p>Every value in Tau is a <em>temporal interval</em>: a value <code>V</code> that was true from time <code>A</code> to time <code>B</code>. When that fact changes, you don't update it. You append a new layer on top.</p>
 <pre><code>APPEND LENS temperature 0 3600 18.5  ← original reading
 ...
 APPEND LENS temperature 1800 3600 19.2  ← correction arrives
@@ -171,24 +171,24 @@ APPEND LENS temperature 1800 3600 19.2  ← correction arrives
 DERIVE LENS hot AS temperature &gt; avg(temperature, -1800, 0)
 DERIVE LENS req_rate AS requests / 60
 </code></pre>
-<p>These aren't views in the SQL sense — they're lazy closures compiled at <code>DERIVE</code> time. Every query evaluates the expression on demand. Nothing is materialised. The derived lens stays up to date automatically because it re-evaluates every time.</p>
+<p>These aren't views in the SQL sense; they're lazy closures compiled at <code>DERIVE</code> time. Every query evaluates the expression on demand. Nothing is materialised. The derived lens stays up to date automatically because it re-evaluates every time.</p>
 <p>The <code>avg(temperature, -1800, 0)</code> expression evaluates the time-weighted average of <code>temperature</code> over the 30 minutes ending at the query point. This is a rolling window aggregation expressed as a first-class database object. You can chain derived lenses: <code>DERIVE smoothed_hot AS smoothed_temp &gt; avg(smoothed_temp, -300, 0)</code> composes two derived lenses.</p>
 <p>The result is that anomaly detection, unit conversion, smoothing, and threshold logic can all live inside the database, where they're always consistent with the underlying data.</p>
 <hr />
 <h2 id="what-tau-is-and-isn-t">What Tau is and isn't</h2>
 <p>Tau is not a replacement for PostgreSQL or ClickHouse. It doesn't do joins. It has no SQL. There are no indexes to tune, no query planner to fight, no schema migrations to coordinate.</p>
 <p>Tau is a purpose-built temporal store for a specific class of problem: data where you need to record how things change over time, where corrections are normal, where the history matters, and where you want to express time-based computations close to the data.</p>
-<p>If your data fits that shape — sensor streams, financial time series, audit logs, monitoring data — Tau gives you a data model that matches your domain directly, without the impedance mismatch of forcing temporal semantics onto a row-mutation model.</p>
+<p>If your data fits that shape (sensor streams, financial time series, audit logs, monitoring data), Tau gives you a data model that matches your domain directly, without the impedance mismatch of forcing temporal semantics onto a row-mutation model.</p>
 <hr />
 <h2 id="correctness-as-a-first-principle">Correctness as a first principle</h2>
-<p>Tau is young. We don't claim production-hardened battle-testing. What we do claim is that the design prioritises correctness over features.</p>
+<p>Tau is young. The design prioritises correctness over features rather than claiming production-hardened battle-testing.</p>
 <p>The deterministic simulation tester (<code>dst</code>) exercises the engine across hundreds of millions of operations, simulating centuries of temporal data, injecting faults (connection drops, WAL truncation), and cross-checking every result against a simple reference oracle. The seed that found a bug six months ago can be re-run against today's binary to confirm the fix. No flaky tests. No Heisenbugs.</p>
 <p>Property-based testing (via Hegel, backed by Hypothesis) covers the core invariants: layer at-queries match linear scans, value encoding roundtrips, permission checks fire on the right conditions. These run automatically in CI.</p>
 <p>The WAL design is conservative: every write is fsynced before the response is returned. Crash recovery replays the WAL exactly. The only risk is a duplicate replay, which the idempotent append semantics handle gracefully.</p>
 <hr />
 <h2 id="why-now">Why now</h2>
-<p>Time-series data is ubiquitous and growing. IoT fleets, monitoring stacks, financial feeds, audit systems — all of them produce streams of facts that change over time. Most are jammed into relational databases or columnar stores that weren't designed for temporal semantics, with history tables bolted on as an afterthought.</p>
-<p>The tools that exist (InfluxDB, TimescaleDB, QuestDB, etc.) are powerful and mature, but they're largely optimised for append-only sensor data at high throughput. Correction — the restatement of a past fact — is either unsupported, awkward, or requires you to build your own layer management.</p>
+<p>Time-series data is ubiquitous and growing. IoT fleets, monitoring stacks, financial feeds and audit systems all produce streams of facts that change over time. Most are jammed into relational databases or columnar stores that weren't designed for temporal semantics, with history tables bolted on as an afterthought.</p>
+<p>The tools that exist (InfluxDB, TimescaleDB, QuestDB, etc.) are powerful and mature, but largely optimised for append-only sensor data at high throughput. Correction (the restatement of a past fact) is either unsupported, awkward, or requires building your own layer management.</p>
 <p>Tau's immutable layer model makes correction a primitive. That's the gap it fills.</p>
 <hr />
 <h2 id="try-it">Try it</h2>

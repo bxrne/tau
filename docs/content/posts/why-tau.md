@@ -1,6 +1,6 @@
 +++
 title = "Why Tau: a time-series database that never forgets"
-date = 2024-01-01
+date = 2026-05-28
 template = "page.html"
 [taxonomies]
 tags = ["release", "design"]
@@ -18,7 +18,7 @@ Tau is built on a different assumption: **corrections are normal, and the histor
 
 ## The immutable layer model
 
-Every value in Tau is a *temporal interval*: a value `V` that was true from time `A` to time `B`. When that fact changes, you don't update it — you append a new layer on top.
+Every value in Tau is a *temporal interval*: a value `V` that was true from time `A` to time `B`. When that fact changes, you don't update it. You append a new layer on top.
 
 ```
 APPEND LENS temperature 0 3600 18.5  ← original reading
@@ -48,7 +48,7 @@ DERIVE LENS hot AS temperature > avg(temperature, -1800, 0)
 DERIVE LENS req_rate AS requests / 60
 ```
 
-These aren't views in the SQL sense — they're lazy closures compiled at `DERIVE` time. Every query evaluates the expression on demand. Nothing is materialised. The derived lens stays up to date automatically because it re-evaluates every time.
+These aren't views in the SQL sense; they're lazy closures compiled at `DERIVE` time. Every query evaluates the expression on demand. Nothing is materialised. The derived lens stays up to date automatically because it re-evaluates every time.
 
 The `avg(temperature, -1800, 0)` expression evaluates the time-weighted average of `temperature` over the 30 minutes ending at the query point. This is a rolling window aggregation expressed as a first-class database object. You can chain derived lenses: `DERIVE smoothed_hot AS smoothed_temp > avg(smoothed_temp, -300, 0)` composes two derived lenses.
 
@@ -62,13 +62,13 @@ Tau is not a replacement for PostgreSQL or ClickHouse. It doesn't do joins. It h
 
 Tau is a purpose-built temporal store for a specific class of problem: data where you need to record how things change over time, where corrections are normal, where the history matters, and where you want to express time-based computations close to the data.
 
-If your data fits that shape — sensor streams, financial time series, audit logs, monitoring data — Tau gives you a data model that matches your domain directly, without the impedance mismatch of forcing temporal semantics onto a row-mutation model.
+If your data fits that shape (sensor streams, financial time series, audit logs, monitoring data), Tau gives you a data model that matches your domain directly, without the impedance mismatch of forcing temporal semantics onto a row-mutation model.
 
 ---
 
 ## Correctness as a first principle
 
-Tau is young. We don't claim production-hardened battle-testing. What we do claim is that the design prioritises correctness over features.
+Tau is young. The design prioritises correctness over features rather than claiming production-hardened battle-testing.
 
 The deterministic simulation tester (`dst`) exercises the engine across hundreds of millions of operations, simulating centuries of temporal data, injecting faults (connection drops, WAL truncation), and cross-checking every result against a simple reference oracle. The seed that found a bug six months ago can be re-run against today's binary to confirm the fix. No flaky tests. No Heisenbugs.
 
@@ -80,9 +80,9 @@ The WAL design is conservative: every write is fsynced before the response is re
 
 ## Why now
 
-Time-series data is ubiquitous and growing. IoT fleets, monitoring stacks, financial feeds, audit systems — all of them produce streams of facts that change over time. Most are jammed into relational databases or columnar stores that weren't designed for temporal semantics, with history tables bolted on as an afterthought.
+Time-series data is ubiquitous and growing. IoT fleets, monitoring stacks, financial feeds and audit systems all produce streams of facts that change over time. Most are jammed into relational databases or columnar stores that weren't designed for temporal semantics, with history tables bolted on as an afterthought.
 
-The tools that exist (InfluxDB, TimescaleDB, QuestDB, etc.) are powerful and mature, but they're largely optimised for append-only sensor data at high throughput. Correction — the restatement of a past fact — is either unsupported, awkward, or requires you to build your own layer management.
+The tools that exist (InfluxDB, TimescaleDB, QuestDB, etc.) are powerful and mature, but largely optimised for append-only sensor data at high throughput. Correction (the restatement of a past fact) is either unsupported, awkward, or requires building your own layer management.
 
 Tau's immutable layer model makes correction a primitive. That's the gap it fills.
 

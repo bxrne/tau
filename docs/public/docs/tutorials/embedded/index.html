@@ -78,7 +78,7 @@
             </h1>
             
     <div class="post-meta">
-        <span class="post-date">2024.01.10
+        <span class="post-date">2026.05.28
                 </span>
 
         <span class="post-author"></span>
@@ -206,7 +206,7 @@ fn main() {
 </code></pre>
 <hr />
 <h2 id="3-derived-lenses">3. Derived lenses</h2>
-<p>Derived lenses evaluate lazily on every query — nothing is materialised.</p>
+<p>Derived lenses evaluate lazily on every query; nothing is materialised.</p>
 <pre><code data-lang="rust">for q in [
     &quot;DERIVE LENS fahrenheit AS temperature * 9.0 / 5.0 + 32.0&quot;,
     &quot;DERIVE LENS hot AS temperature &gt; 20.0&quot;,
@@ -244,11 +244,11 @@ let executor = Executor::with_threshold(4);
 <h2 id="6-using-exec-vs-exec-read">6. Using exec vs exec_read</h2>
 <p>Two entry points with the same semantics but different lock behaviour:</p>
 <ul>
-<li><code>exec(&amp;stmt)</code> — takes a write lock; use for DDL and write statements (<code>APPEND</code>, <code>DERIVE</code>, etc.)</li>
-<li><code>exec_read(&amp;stmt)</code> — takes a read lock; use for query statements (<code>AT</code>, <code>RANGE</code>, <code>REDUCE</code>, <code>SHOW *</code>)</li>
+<li><code>exec(&amp;stmt)</code>: takes a write lock; use for DDL and write statements (<code>APPEND</code>, <code>DERIVE</code>, etc.)</li>
+<li><code>exec_read(&amp;stmt)</code>: takes a read lock; use for query statements (<code>AT</code>, <code>RANGE</code>, <code>REDUCE</code>, <code>SHOW *</code>)</li>
 </ul>
 <p>Using <code>exec_read</code> for queries allows concurrent read operations on a shared executor. Using <code>exec</code> serialises all access.</p>
-<p>Neither entry point performs any permission check — auth is a server concern. Embedded callers bypass CRUDA entirely.</p>
+<p>Neither entry point performs any permission check; auth is a server concern. Embedded callers bypass CRUDA entirely.</p>
 <hr />
 <h2 id="7-concurrent-access">7. Concurrent access</h2>
 <p>Wrap the executor in <code>Arc&lt;RwLock&lt;Executor&gt;&gt;</code> for multi-threaded use:</p>
@@ -305,9 +305,9 @@ db.set_auto_checkpoint(false);
 <hr />
 <h2 id="next-steps">Next steps</h2>
 <ul>
-<li><a href="/docs/tauql/">TauQL Reference</a> — all statement syntax</li>
-<li><a href="/docs/architecture/">Architecture</a> — how the executor and storage layer work</li>
-<li><a href="/docs/testing/">Testing</a> — using the DST embedded mode for correctness validation</li>
+<li><a href="/docs/tauql/">TauQL Reference</a>: all statement syntax</li>
+<li><a href="/docs/architecture/">Architecture</a>: how the executor and storage layer work</li>
+<li><a href="/docs/testing/">Testing</a>: using the DST embedded mode for correctness validation</li>
 </ul>
 
 

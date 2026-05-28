@@ -78,7 +78,7 @@
             </h1>
             
     <div class="post-meta">
-        <span class="post-date">2024.01.09
+        <span class="post-date">2026.05.28
                 </span>
 
         <span class="post-author"></span>
@@ -222,7 +222,7 @@ VAL f18.5
 τ: load cpu examples/data/cpu-load.csv
 loaded 1440 rows into cpu (6 chunks)
 </code></pre>
-<p>The <code>load</code> command reads the file from your local filesystem and ships it as batched <code>APPEND</code> statements over the active TCP connection — no file access required on the server side.</p>
+<p>The <code>load</code> command reads the file from your local filesystem and ships it as batched <code>APPEND</code> statements over the active TCP connection. No file access is required on the server side.</p>
 <p>Alternatively, copy the file into the Docker volume and use server-side <code>COPY</code>:</p>
 <pre><code data-lang="bash">docker run --rm \
   -v container_tau_data:/data \
@@ -269,7 +269,7 @@ cp server.crt server.key container/certs/
 <p>Restart Tau:</p>
 <pre><code data-lang="bash">docker compose up -d tau
 </code></pre>
-<p>All subsequent WAL entries are AES-256-GCM encrypted. Keep the key in a secrets manager — a WAL written with the key cannot be read without it.</p>
+<p>All subsequent WAL entries are AES-256-GCM encrypted. Keep the key in a secrets manager; a WAL written with the key cannot be read without it.</p>
 <hr />
 <h2 id="9-stop-and-reset">9. Stop and reset</h2>
 <pre><code data-lang="bash"># Stop and keep data

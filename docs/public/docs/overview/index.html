@@ -78,7 +78,7 @@
             </h1>
             
     <div class="post-meta">
-        <span class="post-date">2024.01.01
+        <span class="post-date">2026.05.28
                 </span>
 
         <span class="post-author"></span>
@@ -114,17 +114,17 @@
 								<ul>
 								
 									<li>
-										<a href="https://tau.bxrne.com/docs/overview/#tau-v-a-single-temporal-fact">Tau&lt;V&gt; — a single temporal fact</a>
+										<a href="https://tau.bxrne.com/docs/overview/#tau-v">Tau&lt;V&gt;</a>
 										
 									</li>
 								
 									<li>
-										<a href="https://tau.bxrne.com/docs/overview/#layer-v-a-batch-of-facts-that-arrived-together">Layer&lt;V&gt; — a batch of facts that arrived together</a>
+										<a href="https://tau.bxrne.com/docs/overview/#layer-v">Layer&lt;V&gt;</a>
 										
 									</li>
 								
 									<li>
-										<a href="https://tau.bxrne.com/docs/overview/#lens-v-a-named-temporal-function">Lens&lt;V&gt; — a named temporal function</a>
+										<a href="https://tau.bxrne.com/docs/overview/#lens-v">Lens&lt;V&gt;</a>
 										
 									</li>
 								
@@ -184,11 +184,11 @@
 </div>
 
 </header><h1 id="overview">Overview</h1>
-<p>Tau is a time-series database built on <strong>immutable, layered temporal intervals</strong>. It is not a relational store — there are no rows, no tables, no indexes. There are <em>lenses</em> (named temporal functions), a query language designed around temporal semantics, and a storage model that makes correction cheap.</p>
+<p>Tau is a time-series database built on <strong>immutable, layered temporal intervals</strong>. It is not a relational store: no rows, no tables, no indexes. There are <em>lenses</em> (named temporal functions), a query language designed around temporal semantics, and a storage model that makes correction cheap.</p>
 <hr />
 <h2 id="the-core-idea">The core idea</h2>
 <p>Most databases assume a row represents current truth. To record history you add timestamps. Updates replace old values.</p>
-<p>Tau starts from the opposite assumption: <strong>every fact has a time range over which it was true</strong>. A measurement saying "temperature was 22 °C from noon to 1 pm" is a first-class value. Correcting it means appending a new interval on top — a newer layer covering the same range with a newer value. The old data is never touched.</p>
+<p>Tau starts from the opposite assumption: <strong>every fact has a time range over which it was true</strong>. A measurement saying "temperature was 22 °C from noon to 1 pm" is a first-class value. Correcting it means appending a new interval on top: a newer layer covering the same range with a newer value. The old data is never touched.</p>
 <p>This model is correct by default for workloads where:</p>
 <ul>
 <li>Values arrive out of order (sensor streams with delivery lag)</li>
@@ -197,26 +197,26 @@
 </ul>
 <hr />
 <h2 id="three-primitives">Three primitives</h2>
-<h3 id="tau-v-a-single-temporal-fact"><code>Tau&lt;V&gt;</code> — a single temporal fact</h3>
+<h3 id="tau-v"><code>Tau&lt;V&gt;</code></h3>
 <pre><code>Tau { start: i64, end: i64, value: V }
 </code></pre>
 <p>A value <code>V</code> is true over the <strong>half-open interval <code>[start, end)</code></strong>. The half-open boundary is intentional: adjacent intervals tile cleanly with no overlap and no gap. <code>start &lt; end</code> is enforced at construction time.</p>
-<p>Timestamps are opaque <code>i64</code> integers. Tau places no assumption on epoch or unit — seconds, milliseconds, nanoseconds, or any other unit your application agrees on.</p>
-<h3 id="layer-v-a-batch-of-facts-that-arrived-together"><code>Layer&lt;V&gt;</code> — a batch of facts that arrived together</h3>
+<p>Timestamps are opaque <code>i64</code> integers. Tau places no assumption on epoch or unit: seconds, milliseconds, nanoseconds, or any other unit your application agrees on.</p>
+<h3 id="layer-v"><code>Layer&lt;V&gt;</code></h3>
 <pre><code>Layer { id: u64, taus: Arc&lt;[Tau&lt;V&gt;]&gt;, min_start: i64, max_end: i64 }
 </code></pre>
-<p>A layer is an immutable, sorted, non-overlapping slice of taus. Cloning a layer is an atomic reference-count bump — the data is never copied.</p>
+<p>A layer is an immutable, sorted, non-overlapping slice of taus. Cloning a layer is an atomic reference-count bump; the data is never copied.</p>
 <p><code>min_start</code> and <code>max_end</code> allow point queries to skip entire layers with two comparisons before touching the data.</p>
-<h3 id="lens-v-a-named-temporal-function"><code>Lens&lt;V&gt;</code> — a named temporal function</h3>
+<h3 id="lens-v"><code>Lens&lt;V&gt;</code></h3>
 <p>A lens is either:</p>
 <ul>
-<li><strong><code>Base</code></strong> — backed by a stack of layers in a store</li>
-<li><strong><code>Derived(f)</code></strong> — a lazy closure compiled from a TauQL expression at <code>DERIVE</code> time</li>
+<li><strong><code>Base</code></strong>: backed by a stack of layers in a store</li>
+<li><strong><code>Derived(f)</code></strong>: a lazy closure compiled from a TauQL expression at <code>DERIVE</code> time</li>
 </ul>
 <p>Derived lenses are evaluated on demand. They compose: <code>DERIVE smooth AS avg(cpu, -600, 0)</code> compiles into a closure that calls <code>cpu</code>'s closure for every evaluation. Cycle detection runs at <code>DERIVE</code> time.</p>
 <hr />
 <h2 id="newest-layer-wins">Newest-layer-wins</h2>
-<p>When multiple layers cover the same timestamp, the one with the highest layer ID (newest append) wins. There is no conflict resolution vocabulary — the rule is always the newest layer.</p>
+<p>When multiple layers cover the same timestamp, the one with the highest layer ID (newest append) wins. There is no conflict resolution vocabulary: the rule is always the newest layer.</p>
 <p>This makes concurrent appends trivially correct: both succeed, and the query result reflects both, with the newer one taking precedence in any overlap.</p>
 <hr />
 <h2 id="storage">Storage</h2>
@@ -241,13 +241,13 @@
 <p>This is O(E log E) where E is the total number of taus. After compaction, the lens has exactly one layer. Query results are identical before and after compaction.</p>
 <hr />
 <h2 id="the-executor">The executor</h2>
-<pre><code>Stmt → Executor → Database&lt;Value&gt; → Store&lt;V&gt; + optional Wal
+<pre><code>Stmt -&gt; Executor -&gt; Database&lt;Value&gt; -&gt; Store&lt;V&gt; + optional Wal
 </code></pre>
 <p>The <code>Executor</code> owns a map of named databases, an active-database pointer, and a <code>UserStore</code>. Each database carries its own store, WAL, and lens definitions.</p>
 <p>Two entry-point pairs with different semantics:</p>
 <ul>
-<li><code>exec</code> / <code>exec_read</code> — unrestricted, no permission check. Used by library consumers, tests, and WAL replay.</li>
-<li><code>exec_as(stmt, user)</code> / <code>exec_read_as(stmt, user)</code> — looks up the user, calls <code>check_permission</code>, then delegates. The TCP server uses these for every authenticated session.</li>
+<li><code>exec</code> / <code>exec_read</code>: unrestricted, no permission check. Used by library consumers, tests, and WAL replay.</li>
+<li><code>exec_as(stmt, user)</code> / <code>exec_read_as(stmt, user)</code>: looks up the user, calls <code>check_permission</code>, then delegates. The TCP server uses these for every authenticated session.</li>
 </ul>
 <p>Auth is a server concern. Embedding Tau as a library bypasses permission checks entirely.</p>
 <hr />
