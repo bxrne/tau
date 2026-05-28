@@ -121,7 +121,7 @@ jobs:
           mkdir -p dist
           cp target/${{ matrix.target }}/release/tau   dist/tau-${{ matrix.target }}
           cp target/${{ matrix.target }}/release/ctl   dist/ctl-${{ matrix.target }}
-          cp target/${{ matrix.target }}/release/bench dist/bench-${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/dst   dist/dst-${{ matrix.target }}
           tar -czf tau-${{ matrix.target }}.tar.gz -C dist .
 
       - uses: actions/upload-artifact@v4

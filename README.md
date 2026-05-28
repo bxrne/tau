@@ -323,28 +323,30 @@ cargo nextest run
 
 Toolchain is pinned to Rust **1.94.1** (edition 2024) via `rust-toolchain.toml`. CI runs fmt -> build -> clippy -> tests.
 
-## Benchmarks
+## Simulation and Performance Testing
 
-The bench binary (`src/bin/bench/`) spawns a real `tau` server process for each configuration cell and measures throughput via the server's Prometheus `/metrics` endpoint. This covers every server dimension: transport (plain/TLS), authentication (none/password), and WAL (off/on).
+The `dst` binary (`src/bin/dst/`) is the single tool for both correctness verification and performance measurement. It spawns a real `tau` server for each configuration cell (transport x auth x WAL), drives traffic via TCP, cross-checks every response against a simple oracle, injects faults (connection drops, WAL truncation), and scrapes Prometheus metrics to verify statement counts. Results are printed as a table and optionally written to CSV.
 
 ```bash
-cargo run --release --bin bench -- --quick                             # CI-suitable fast grid
-cargo run --release --bin bench -- --scratch /var/tmp/tau --out r.csv  # full grid, real disk
+cargo run --release --bin dst                                          # full simulation, all config cells
+cargo run --release --bin dst -- --quick                               # embedded mode, no server (CI-suitable)
+cargo run --release --bin dst -- --scratch /var/tmp/tau --out r.csv    # full grid, real disk, CSV output
 ```
 
-Bench options:
+DST options:
 
 | flag | default | description |
 |------|---------|-------------|
-| `--quick` | off | Plain/no-auth only; fewer cells, suitable for CI |
-| `--ops N` | 1000 | Operations per workload run |
-| `--repeat N` | 3 | Best-of-N runs per cell |
-| `--compact-threshold N` | 64 | Compaction threshold per server |
+| `--quick` | off | Embedded executor mode; fast, no server processes, good for CI |
+| `--ops N` | 2000 | Operations per config cell in full mode |
+| `--fault-interval N` | 500 | Inject a fault every N ops |
+| `--duration N` | 30 | Seconds to run in embedded mode |
+| `--readers N` | 8 | Concurrent reader threads in embedded mode |
 | `--scratch DIR` | $TMPDIR | WAL scratch directory (use a real disk path for fsync timings) |
 | `--out PATH` | none | Write CSV results to path |
 | `--label NAME` | run | Tag attached to every CSV row |
 
-See [`TEST.md`](TEST.md) for how `bench` and the `dst` deterministic simulation tester relate to each other.
+See [`TEST.md`](TEST.md) for the full testing philosophy and how the three test layers relate to each other.
 
 ## Container usage
 

@@ -11,10 +11,6 @@ name = "tau"
 path = "src/bin/tau/main.rs"
 
 [[bin]]
-name = "bench"
-path = "src/bin/bench/main.rs"
-
-[[bin]]
 name = "dst"
 path = "src/bin/dst/main.rs"
 
@@ -43,15 +39,3 @@ hegeltest-macros = "0.14.12"
 pretty_assertions = "1.4"
 tempfile = "3.27.0"
 
-# Single-codegen-unit + fat-LTO + abort-on-panic profile for the bench binary.
-# About 3x slower to compile but produces the tightest hot loops; CI uses this
-# whenever it runs the bench.
-[profile.release-bench]
-inherits = "release"
-opt-level = 3
-codegen-units = 1
-lto = "fat"
-panic = "abort"
-debug = false
-strip = true
-overflow-checks = false

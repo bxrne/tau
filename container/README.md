@@ -64,7 +64,7 @@ docker pull ghcr.io/bxrne/tau:latest        # no docker login needed
 
 ### Verifying a release pushed the image
 
-The release workflow is chained internally: a push to `master` runs `release-please`, and if that step produces `release_created=true` (i.e. the release PR was just merged and a tag was cut), a `gate` job propagates the tag and the `docker`, `build`, `upload-release`, and `bench-release-artifact` jobs all fan out from it.
+The release workflow is chained internally: a push to `master` runs `release-please`, and if that step produces `release_created=true` (i.e. the release PR was just merged and a tag was cut), a `gate` job propagates the tag and the `docker`, `build`, `upload-release`, and `dst-release-artifact` jobs all fan out from it.
 
 This avoids a known limitation: GitHub does **not** fire a `release: { types: [published] }` event for a release that a workflow itself created via `GITHUB_TOKEN`. If your `release-please` commit lands on master and you only see `chore(master): release X.Y.Z` plus a tag, but no `docker` job runs, you are hitting that limitation - the chained workflow above is the documented workaround, with no PAT required.
 
@@ -74,7 +74,7 @@ You can also force a rebuild for any existing tag manually:
 GitHub Actions → Release → Run workflow → tag: v0.4.0
 ```
 
-That runs the `docker` / `build` / `upload-release` / `bench-release-artifact` jobs against the chosen tag, gated on the same `gate` step.
+That runs the `docker` / `build` / `upload-release` / `dst-release-artifact` jobs against the chosen tag, gated on the same `gate` step.
 
 Diagnostic commands:
 
@@ -238,7 +238,7 @@ docker build \
   -t tau:local .
 ```
 
-Use `BUILD_PROFILE=release-bench` for fat-LTO builds (slower compile, slightly tighter binary).
+Use `BUILD_PROFILE=release-lto` for fat-LTO builds (slower compile, slightly tighter binary).
 
 ## Production hardening checklist
 

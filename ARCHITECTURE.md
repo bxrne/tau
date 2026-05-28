@@ -259,6 +259,6 @@ Layer data is immutable once created. Sharing it across the read path without co
 
 Writing to the WAL before writing to the store means a crash between the two leaves an entry in the WAL that is replayed on the next startup, completing the write. It does not leave a partial write visible to readers. The only risk is a duplicate replay, which the idempotent `append` semantics handle: replaying a layer that already exists adds it again, but the query result is identical (newest-layer-wins picks the same value in both cases).
 
-### Separate `bench` and `dst` binaries
+### Two modes in the `dst` binary
 
-`bench` measures throughput using a real TCP server and real disk I/O. `dst` checks correctness using an embedded executor with no I/O. Combining them would mean either polluting the benchmark with correctness overhead or running the simulation tester at I/O speed, which would limit how much simulated time it can cover. They answer different questions and run in different environments -- keep them separate.
+`dst` serves as both the correctness tester and the performance measurement tool. In full mode (default), it spawns real server processes, tests all config combinations, injects faults, and outputs throughput numbers alongside pass/fail results. In embedded mode (`--quick`), it bypasses the server entirely and uses the library executor directly, covering centuries of simulated time without I/O overhead. The seed printed at startup makes any failure reproducible from a single flag.

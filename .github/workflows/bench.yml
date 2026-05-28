@@ -1,36 +1,31 @@
-name: Bench
+name: DST
 
 on:
   workflow_dispatch:
 
 jobs:
-  bench:
-    name: Benchmark
+  dst:
+    name: Deterministic Simulation Tester
     runs-on: ubuntu-latest
-    env:
-      RUSTFLAGS: "-C target-cpu=native -C codegen-units=1"
-      MALLOC_CONF: "narenas:1"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: bench
-      - name: Build bench binary
-        run: cargo build --profile release-bench --bin bench
-      - name: Run benchmarks
+          shared-key: dst
+      - name: Build dst binary
+        run: cargo build --release --bin dst
+      - name: Run full simulation
         run: |
-          ./target/release-bench/bench \
-            --quick \
-            --repeat 5 \
+          ./target/release/dst \
             --ops 1000 \
             --label "manual-${{ github.sha }}" \
-            --out bench-results.csv \
-            | tee bench-results.txt
+            --out dst-results.csv \
+            | tee dst-results.txt
       - uses: actions/upload-artifact@v4
         with:
-          name: bench-results-${{ github.sha }}
+          name: dst-results-${{ github.sha }}
           path: |
-            bench-results.csv
-            bench-results.txt
+            dst-results.csv
+            dst-results.txt
           if-no-files-found: error

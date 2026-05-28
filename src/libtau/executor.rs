@@ -994,13 +994,15 @@ fn values_equal(a: &Value, b: &Value) -> Result<bool, ExecError> {
 /// Collect sorted, deduped boundary points for a range scan of `name` over `[start, end)`,
 /// including any filter expression boundaries. Returns the bounds and an optional layer
 /// snapshot (Some for base lenses, None for derived).
+type RangeBoundsResult = Result<(Vec<Timestamp>, Option<Vec<Layer<Value>>>), ExecError>;
+
 fn collect_range_bounds(
     state: &DbState,
     name: &str,
     start: Timestamp,
     end: Timestamp,
     filter: Option<&Expr>,
-) -> Result<(Vec<Timestamp>, Option<Vec<Layer<Value>>>), ExecError> {
+) -> RangeBoundsResult {
     let mut bounds = Vec::with_capacity(64);
     bounds.push(start);
     bounds.push(end);

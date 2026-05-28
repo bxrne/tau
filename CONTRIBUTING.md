@@ -132,17 +132,20 @@ AT LENS temperature 50
 
 ---
 
-## Benchmarking
+## Simulation and Performance Testing
 
 ```bash
-# Quick run on tmpfs (measures compute cost; fsync is a no-op on tmpfs)
-cargo run --release --bin bench -- --quick
+# Embedded mode: fast correctness check, no server processes (good for CI)
+cargo run --release --bin dst -- --quick
 
-# Real-disk run (measures fsync cost)
-cargo run --release --bin bench -- --scratch /path/to/real/disk --out results.csv
+# Full simulation: all config cells, fault injection, metrics, throughput numbers
+cargo run --release --bin dst
+
+# Real-disk run with CSV output
+cargo run --release --bin dst -- --scratch /path/to/real/disk --out results.csv
 ```
 
-Note: `/tmp` is tmpfs on most Linux systems. Use a path on a real disk to measure fsync latency accurately. See [ARCHITECTURE.md](ARCHITECTURE.md) for the bench vs. dst distinction.
+`/tmp` is tmpfs on most Linux systems. Use a real-disk path with `--scratch` when comparing fsync vs no-fsync latency. See [TEST.md](TEST.md) for the full testing philosophy.
 
 ---
 

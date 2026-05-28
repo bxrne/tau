@@ -113,7 +113,7 @@ RANGE 34; 35000:35040:i40; 35040:35100:i38; ...; 36960:37000:i47
 RANGE 78; 44340:44400:i76; 44640:44700:i76; ...; 53880:53940:i78
 ```
 
-78 segments over the full day, all in the mid-day window when the spike pushed CPU above 75%. The filter is just an expression — any of the operators (`< <= == != >= >`, `&& ||`, arithmetic) can appear.
+78 segments over the full day, all in the mid-day window when the spike pushed CPU above 75%. The filter is just an expression -- any of the operators (`< <= == != >= >`, `&& ||`, arithmetic) can appear.
 
 ## Derived lens examples
 
@@ -128,7 +128,7 @@ OK
 VAL f52.3                       # time-weighted mean of cpu over [42600, 43200)
 ```
 
-`avg(cpu, -600, 0)` evaluates at time `t` as the time-weighted average of `cpu` over `[t-600, t)`. The derived lens's type is whatever the expression yields — here a `float` even though the base lens is `int`.
+`avg(cpu, -600, 0)` evaluates at time `t` as the time-weighted average of `cpu` over `[t-600, t)`. The derived lens's type is whatever the expression yields -- here a `float` even though the base lens is `int`.
 
 ### Threshold-derived boolean
 

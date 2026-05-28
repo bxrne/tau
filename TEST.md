@@ -73,9 +73,9 @@ The simulation tester is inspired by three sources.
 
 **Hypothesis / Hegel**: the operations themselves are drawn from the same machinery that powers Hegel. If the simulation finds an invariant violation, the operation sequence can be minimized to the smallest prefix that still reproduces the failure.
 
-### What the DST is not
+### Two modes
 
-The DST is not a benchmark. It deliberately avoids I/O (no TCP, no real filesystem writes by default) so it can run epochs fast. Use `cargo run --release --bin bench` for performance measurement. The DST binary at `src/bin/dst/` is a correctness tool only.
+The DST runs in two modes. In embedded mode (`--quick`), it uses the library executor directly with no server process, no I/O, and a tightly controlled simulation loop. This is the fast path: suitable for CI, covers centuries of simulated time in under a minute. In full mode (default), it spawns a real tau server for each config cell (transport x auth x WAL), drives traffic over TCP, cross-checks every response against the oracle, injects faults, and scrapes Prometheus metrics -- the same infrastructure used to measure throughput. Both modes share the same oracle and invariant checks.
 
 ### Architecture
 
@@ -163,21 +163,6 @@ On failure the DST prints:
 
 The seed alone is sufficient to reproduce the failure on the same binary.
 
-### Why keep `bench` and `dst` separate
-
-`bench` and `dst` answer different questions.
-
-| | `bench` | `dst` |
-|---|---|---|
-| Question | How fast is it? | Is it correct? |
-| Measures | Throughput, latency | Invariant violations |
-| Infrastructure | Real TCP server, Prometheus | Embedded executor, no I/O |
-| Time domain | Real wall-clock seconds | Simulated years |
-| Output | CSV rows, throughput numbers | Pass / fail, repro seed |
-| CI cost | ~2 minutes | Configurable (default: 30s fast) |
-
-Merging them into one binary would make both worse. `bench` needs real server processes and network stacks to produce meaningful numbers. `dst` needs to run millions of operations without I/O overhead to cover enough state space. Keep them separate.
-
 ---
 
 ## Summary
@@ -185,8 +170,8 @@ Merging them into one binary would make both worse. `bench` needs real server pr
 ```
 cargo test --release           fast, always run in CI, catches regressions
 cargo nextest run              same, parallel, better output
-cargo run --bin dst            correctness depth test, run before release
-cargo run --bin bench          perf regression check, run on reference hardware
+cargo run --bin dst -- --quick correctness depth test, run before release
+cargo run --bin dst            full simulation: all configs, fault injection, throughput
 ```
 
 Unit tests are the floor: any regression that breaks a named case fails immediately. Hegel PBT tests hammer invariants with random inputs and shrink on failure. The DST stress-tests emergent system behavior across operation sequences and simulated time periods that would take years to accumulate organically.
