@@ -406,9 +406,8 @@ impl Executor {
                 Ok(())
             }
         };
-        let caller_can_show_grants = |target: &Option<String>| {
-            target.as_deref().is_some_and(|t| t == user.name)
-        };
+        let caller_can_show_grants =
+            |target: &Option<String>| target.as_deref().is_some_and(|t| t == user.name);
 
         match stmt {
             Stmt::CreateDatabase { .. } => require_global_admin(),
@@ -430,7 +429,11 @@ impl Executor {
                 require_admin_or_a_on(database)
             }
             Stmt::ShowGrants { user: target } => {
-                if caller_can_show_grants(target) { Ok(()) } else { require_global_admin() }
+                if caller_can_show_grants(target) {
+                    Ok(())
+                } else {
+                    require_global_admin()
+                }
             }
         }
     }
