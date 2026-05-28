@@ -290,8 +290,10 @@ impl Executor {
         let t0 = Instant::now();
         // While inside a transaction, buffer mutable lens statements.
         // They are replayed atomically when COMMIT is issued.
-        if self.pending.is_some() && is_transactable(stmt) {
-            self.pending.as_mut().unwrap().push(stmt.clone());
+        if let Some(pending) = &mut self.pending
+            && is_transactable(stmt)
+        {
+            pending.push(stmt.clone());
             return Ok(Output::Empty);
         }
         let result = match stmt {
@@ -425,9 +427,6 @@ impl Executor {
                 Ok(())
             }
         };
-        let caller_can_show_grants =
-            |target: &Option<String>| target.as_deref().is_some_and(|t| t == user.name);
-
         match stmt {
             Stmt::CreateDatabase { .. } => require_global_admin(),
             Stmt::DropDatabase { name } => require_admin_or_a_on(name),
@@ -448,11 +447,10 @@ impl Executor {
                 require_admin_or_a_on(database)
             }
             Stmt::ShowGrants { user: target } => {
-                if caller_can_show_grants(target) {
-                    Ok(())
-                } else {
-                    require_global_admin()
+                if target.as_deref().is_some_and(|t| t == user.name) {
+                    return Ok(());
                 }
+                require_global_admin()
             }
             Stmt::StartTransaction | Stmt::Commit | Stmt::Rollback => Ok(()),
         }
