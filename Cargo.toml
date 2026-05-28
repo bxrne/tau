@@ -15,6 +15,10 @@ name = "bench"
 path = "src/bin/bench/main.rs"
 
 [[bin]]
+name = "dst"
+path = "src/bin/dst/main.rs"
+
+[[bin]]
 name = "ctl"
 path = "src/bin/tauctl/main.rs"
 
