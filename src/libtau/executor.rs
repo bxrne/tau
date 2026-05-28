@@ -385,19 +385,20 @@ impl Executor {
             }
         };
         let require_active = || active.ok_or(ExecError::NoActiveDatabase);
+        let require_admin_or_a_on = |db: &str| {
+            if user.is_global_admin() || user.effective(db).contains(Perm::A) {
+                Ok(())
+            } else {
+                Err(ExecError::PermissionDenied(format!(
+                    "user '{}' lacks A on {}",
+                    user.name, db
+                )))
+            }
+        };
 
         match stmt {
             Stmt::CreateDatabase { .. } => require_global_admin(),
-            Stmt::DropDatabase { name } => {
-                if user.is_global_admin() || user.effective(name).contains(Perm::A) {
-                    Ok(())
-                } else {
-                    Err(ExecError::PermissionDenied(format!(
-                        "user '{}' lacks A on {}",
-                        user.name, name
-                    )))
-                }
-            }
+            Stmt::DropDatabase { name } => require_admin_or_a_on(name),
             Stmt::UseDatabase { name } => {
                 if user.effective(name).is_empty() {
                     Err(ExecError::PermissionDenied(format!(
@@ -421,14 +422,7 @@ impl Executor {
                 require_global_admin()
             }
             Stmt::Grant { database, .. } | Stmt::Revoke { database, .. } => {
-                if user.is_global_admin() || user.effective(database).contains(Perm::A) {
-                    Ok(())
-                } else {
-                    Err(ExecError::PermissionDenied(format!(
-                        "user '{}' lacks A on {}",
-                        user.name, database
-                    )))
-                }
+                require_admin_or_a_on(database)
             }
             Stmt::ShowGrants { user: target } => match target {
                 None => require_global_admin(),
@@ -696,63 +690,12 @@ impl Executor {
             return Err(ExecError::InvalidRange);
         }
         let state = self.active_state()?;
-        // Confirm the lens exists up front so an empty range still errors.
         if !state.base_types.contains_key(name) && !state.derived.contains_key(name) {
             return Err(ExecError::UnknownLens(name.into()));
         }
-
-        let mut bounds = Vec::with_capacity(64);
-        bounds.push(start);
-        bounds.push(end);
-
-        // For base lenses snapshot layers once; the same snapshot drives both
-        // boundary collection and per-window lookups, saving N_windows store
-        // read-lock acquisitions.  For derived lenses fall back to the generic
-        // path (can't snapshot arbitrary expressions).
-        let layers_snap: Option<Vec<Layer<Value>>> = if state.base_types.contains_key(name) {
-            let snap = state.db.layers(name);
-            if let Some(ref ls) = snap {
-                collect_bounds_from_layers(ls, start, end, &mut bounds);
-            }
-            snap
-        } else {
-            collect_lens_bounds(state, name, start, end, &mut bounds)?;
-            None
-        };
-
-        if let Some(f) = filter {
-            collect_expr_bounds(state, f, start, end, &mut bounds)?;
-        }
-        bounds.sort_unstable();
-        bounds.dedup();
-
-        let mut out: Vec<(Timestamp, Timestamp, Value)> =
-            Vec::with_capacity(bounds.len().saturating_sub(1));
-        for w in bounds.windows(2) {
-            let (s, e) = (w[0], w[1]);
-            let v = if let Some(ref ls) = layers_snap {
-                match at_layers(ls, s) {
-                    Some(v) => v,
-                    None => continue,
-                }
-            } else {
-                match eval_lens(state, name, s)? {
-                    Some(v) => v,
-                    None => continue,
-                }
-            };
-            if let Some(f) = filter {
-                match eval_expr(state, f, s)? {
-                    Some(Value::Bool(true)) => {}
-                    _ => continue,
-                }
-            }
-            // Merge with previous segment if it's adjacent and same value.
-            match out.last_mut() {
-                Some(last) if last.1 == s && last.2 == v => last.1 = e,
-                _ => out.push((s, e, v)),
-            }
-        }
+        let (bounds, layers_snap) =
+            collect_range_bounds(state, name, start, end, filter)?;
+        let out = build_range_segments(state, name, &bounds, layers_snap.as_deref(), filter)?;
         Ok(Output::Range(out))
     }
 
@@ -938,62 +881,34 @@ fn as_f64(v: &Value) -> Option<f64> {
     }
 }
 
-fn apply_binary(op: BinOp, a: Value, b: Value) -> Result<Value, ExecError> {
+fn apply_int_binary_op(op: BinOp, x: i64, y: i64) -> Result<Value, ExecError> {
     use BinOp::*;
-    // Logical: both operands must be bool.
-    if matches!(op, And | Or) {
-        return match (a, b) {
-            (Value::Bool(x), Value::Bool(y)) => {
-                Ok(Value::Bool(if op == And { x && y } else { x || y }))
+    Ok(match op {
+        Add => Value::Int(x.wrapping_add(y)),
+        Sub => Value::Int(x.wrapping_sub(y)),
+        Mul => Value::Int(x.wrapping_mul(y)),
+        Div => {
+            if y == 0 {
+                return Err(ExecError::InvalidExpr("divide by zero".into()));
             }
-            (x, y) => Err(ExecError::InvalidExpr(format!(
-                "logical {op:?} requires bool/bool, got {}/{}",
-                x.type_name(),
-                y.type_name()
-            ))),
-        };
-    }
-
-    // Equality is permitted across any matching variants (and either pair
-    // of numerics after promotion).
-    if matches!(op, Eq | NotEq) {
-        let eq = values_equal(&a, &b)?;
-        return Ok(Value::Bool(if op == Eq { eq } else { !eq }));
-    }
-
-    // Ordering and arithmetic: numeric only.  Integer fast-path, else f64.
-    if let (Value::Int(x), Value::Int(y)) = (&a, &b) {
-        return Ok(match op {
-            Add => Value::Int(x.wrapping_add(*y)),
-            Sub => Value::Int(x.wrapping_sub(*y)),
-            Mul => Value::Int(x.wrapping_mul(*y)),
-            Div => {
-                if *y == 0 {
-                    return Err(ExecError::InvalidExpr("divide by zero".into()));
-                }
-                Value::Int(x / y)
+            Value::Int(x / y)
+        }
+        Mod => {
+            if y == 0 {
+                return Err(ExecError::InvalidExpr("modulo by zero".into()));
             }
-            Mod => {
-                if *y == 0 {
-                    return Err(ExecError::InvalidExpr("modulo by zero".into()));
-                }
-                Value::Int(x % y)
-            }
-            Lt => Value::Bool(x < y),
-            LtEq => Value::Bool(x <= y),
-            Gt => Value::Bool(x > y),
-            GtEq => Value::Bool(x >= y),
-            _ => unreachable!(),
-        });
-    }
+            Value::Int(x % y)
+        }
+        Lt => Value::Bool(x < y),
+        LtEq => Value::Bool(x <= y),
+        Gt => Value::Bool(x > y),
+        GtEq => Value::Bool(x >= y),
+        _ => unreachable!(),
+    })
+}
 
-    let (Some(x), Some(y)) = (as_f64(&a), as_f64(&b)) else {
-        return Err(ExecError::InvalidExpr(format!(
-            "operator {op:?} requires numeric operands, got {}/{}",
-            a.type_name(),
-            b.type_name()
-        )));
-    };
+fn apply_float_binary_op(op: BinOp, x: f64, y: f64) -> Result<Value, ExecError> {
+    use BinOp::*;
     Ok(match op {
         Add => Value::Float(x + y),
         Sub => Value::Float(x - y),
@@ -1016,6 +931,37 @@ fn apply_binary(op: BinOp, a: Value, b: Value) -> Result<Value, ExecError> {
         GtEq => Value::Bool(x >= y),
         _ => unreachable!(),
     })
+}
+
+fn apply_binary(op: BinOp, a: Value, b: Value) -> Result<Value, ExecError> {
+    use BinOp::*;
+    if matches!(op, And | Or) {
+        return match (a, b) {
+            (Value::Bool(x), Value::Bool(y)) => {
+                Ok(Value::Bool(if op == And { x && y } else { x || y }))
+            }
+            (x, y) => Err(ExecError::InvalidExpr(format!(
+                "logical {op:?} requires bool/bool, got {}/{}",
+                x.type_name(),
+                y.type_name()
+            ))),
+        };
+    }
+    if matches!(op, Eq | NotEq) {
+        let eq = values_equal(&a, &b)?;
+        return Ok(Value::Bool(if op == Eq { eq } else { !eq }));
+    }
+    if let (Value::Int(x), Value::Int(y)) = (&a, &b) {
+        return apply_int_binary_op(op, *x, *y);
+    }
+    let (Some(x), Some(y)) = (as_f64(&a), as_f64(&b)) else {
+        return Err(ExecError::InvalidExpr(format!(
+            "operator {op:?} requires numeric operands, got {}/{}",
+            a.type_name(),
+            b.type_name()
+        )));
+    };
+    apply_float_binary_op(op, x, y)
 }
 
 /// Strict variant equality plus numeric promotion.  Returns `Err` only for
@@ -1045,6 +991,75 @@ fn values_equal(a: &Value, b: &Value) -> Result<bool, ExecError> {
 /// be located with `partition_point` rather than a full linear scan.
 /// Point lookup on a pre-snapshotted layer stack (newest layer wins).
 ///
+/// Collect sorted, deduped boundary points for a range scan of `name` over `[start, end)`,
+/// including any filter expression boundaries. Returns the bounds and an optional layer
+/// snapshot (Some for base lenses, None for derived).
+fn collect_range_bounds(
+    state: &DbState,
+    name: &str,
+    start: Timestamp,
+    end: Timestamp,
+    filter: Option<&Expr>,
+) -> Result<(Vec<Timestamp>, Option<Vec<Layer<Value>>>), ExecError> {
+    let mut bounds = Vec::with_capacity(64);
+    bounds.push(start);
+    bounds.push(end);
+    let layers_snap: Option<Vec<Layer<Value>>> = if state.base_types.contains_key(name) {
+        let snap = state.db.layers(name);
+        if let Some(ref ls) = snap {
+            collect_bounds_from_layers(ls, start, end, &mut bounds);
+        }
+        snap
+    } else {
+        collect_lens_bounds(state, name, start, end, &mut bounds)?;
+        None
+    };
+    if let Some(f) = filter {
+        collect_expr_bounds(state, f, start, end, &mut bounds)?;
+    }
+    bounds.sort_unstable();
+    bounds.dedup();
+    Ok((bounds, layers_snap))
+}
+
+/// Build the output segments for a range scan from pre-computed `bounds`,
+/// optionally snapshotted `layers`, and an optional `filter` expression.
+fn build_range_segments(
+    state: &DbState,
+    name: &str,
+    bounds: &[Timestamp],
+    layers_snap: Option<&[Layer<Value>]>,
+    filter: Option<&Expr>,
+) -> Result<Vec<(Timestamp, Timestamp, Value)>, ExecError> {
+    let mut out: Vec<(Timestamp, Timestamp, Value)> =
+        Vec::with_capacity(bounds.len().saturating_sub(1));
+    for w in bounds.windows(2) {
+        let (s, e) = (w[0], w[1]);
+        let v = if let Some(ls) = layers_snap {
+            match at_layers(ls, s) {
+                Some(v) => v,
+                None => continue,
+            }
+        } else {
+            match eval_lens(state, name, s)? {
+                Some(v) => v,
+                None => continue,
+            }
+        };
+        if let Some(f) = filter {
+            match eval_expr(state, f, s)? {
+                Some(Value::Bool(true)) => {}
+                _ => continue,
+            }
+        }
+        match out.last_mut() {
+            Some(last) if last.1 == s && last.2 == v => last.1 = e,
+            _ => out.push((s, e, v)),
+        }
+    }
+    Ok(out)
+}
+
 /// Equivalent to `Store::at` but avoids any lock acquisition - callers must
 /// already hold a safe snapshot of the layer vec via `Database::layers`.
 /// Uses each layer's `min_start`/`max_end` range to skip layers without
@@ -1152,19 +1167,59 @@ fn collect_expr_bounds(
     }
 }
 
-fn eval_agg(
+fn agg_sum(segments: &[(i64, Value)]) -> Result<Value, ExecError> {
+    let mut int_sum: i64 = 0;
+    let mut float_sum: Option<f64> = None;
+    for (_, v) in segments {
+        match v {
+            Value::Int(i) => match &mut float_sum {
+                Some(f) => *f += *i as f64,
+                None => int_sum = int_sum.wrapping_add(*i),
+            },
+            Value::Float(f) => {
+                *float_sum.get_or_insert(int_sum as f64) += f;
+            }
+            _ => {
+                return Err(ExecError::InvalidExpr(format!(
+                    "sum requires numeric values, got {}",
+                    v.type_name()
+                )));
+            }
+        }
+    }
+    Ok(float_sum.map(Value::Float).unwrap_or(Value::Int(int_sum)))
+}
+
+fn agg_avg(segments: &[(i64, Value)]) -> Result<Option<Value>, ExecError> {
+    let total: i64 = segments.iter().map(|(d, _)| *d).sum();
+    if total == 0 {
+        return Ok(None);
+    }
+    let mut weighted = 0.0f64;
+    for (d, v) in segments {
+        match v {
+            Value::Int(i) => weighted += *i as f64 * *d as f64,
+            Value::Float(f) => weighted += f * *d as f64,
+            _ => {
+                return Err(ExecError::InvalidExpr(format!(
+                    "avg requires numeric values, got {}",
+                    v.type_name()
+                )));
+            }
+        }
+    }
+    Ok(Some(Value::Float(weighted / total as f64)))
+}
+
+fn collect_agg_segments(
     state: &DbState,
     lens: &str,
-    func: AggFunc,
     start: Timestamp,
     end: Timestamp,
-) -> Result<Option<Value>, ExecError> {
+) -> Result<Vec<(i64, Value)>, ExecError> {
     let mut bounds = Vec::with_capacity(64);
     bounds.push(start);
     bounds.push(end);
-
-    // Same snapshot strategy as range_lens: for base lenses take one store
-    // read lock and reuse it for both boundary collection and per-window lookup.
     let layers_snap: Option<Vec<Layer<Value>>> = if state.base_types.contains_key(lens) {
         let snap = state.db.layers(lens);
         if let Some(ref ls) = snap {
@@ -1175,26 +1230,34 @@ fn eval_agg(
         collect_lens_bounds(state, lens, start, end, &mut bounds)?;
         None
     };
-
     bounds.sort_unstable();
     bounds.dedup();
-
     let mut segments: Vec<(i64, Value)> = Vec::with_capacity(bounds.len().saturating_sub(1));
     for w in bounds.windows(2) {
         let (s, e) = (w[0], w[1]);
-        if let Some(v) = if let Some(ref ls) = layers_snap {
+        let v = if let Some(ref ls) = layers_snap {
             at_layers(ls, s)
         } else {
             eval_lens(state, lens, s)?
-        } {
+        };
+        if let Some(v) = v {
             segments.push((e - s, v));
         }
     }
+    Ok(segments)
+}
 
+fn eval_agg(
+    state: &DbState,
+    lens: &str,
+    func: AggFunc,
+    start: Timestamp,
+    end: Timestamp,
+) -> Result<Option<Value>, ExecError> {
+    let segments = collect_agg_segments(state, lens, start, end)?;
     if segments.is_empty() {
         return Ok(None);
     }
-
     Ok(Some(match func {
         AggFunc::Count => Value::Int(segments.len() as i64),
         AggFunc::Min => segments
@@ -1213,49 +1276,10 @@ fn eval_agg(
                 Some(a) => numeric_min_max(a, v, true).map(Some),
             })?
             .unwrap(),
-        AggFunc::Sum => {
-            let mut int_sum: i64 = 0;
-            let mut float_sum: Option<f64> = None;
-            for (_, v) in &segments {
-                match v {
-                    Value::Int(i) => match &mut float_sum {
-                        Some(f) => *f += *i as f64,
-                        None => int_sum = int_sum.wrapping_add(*i),
-                    },
-                    Value::Float(f) => {
-                        *float_sum.get_or_insert(int_sum as f64) += f;
-                    }
-                    _ => {
-                        return Err(ExecError::InvalidExpr(format!(
-                            "sum requires numeric values, got {}",
-                            v.type_name()
-                        )));
-                    }
-                }
-            }
-            float_sum.map(Value::Float).unwrap_or(Value::Int(int_sum))
-        }
-        AggFunc::Avg => {
-            let total: i64 = segments.iter().map(|(d, _)| *d).sum();
-            if total == 0 {
-                return Ok(None);
-            }
-            let mut weighted = 0.0f64;
-            for (d, v) in &segments {
-                match v {
-                    Value::Int(i) => weighted += *i as f64 * *d as f64,
-                    Value::Float(f) => weighted += f * *d as f64,
-                    _ => {
-                        return Err(ExecError::InvalidExpr(format!(
-                            "avg requires numeric values, got {}",
-                            v.type_name()
-                        )));
-                    }
-                }
-            }
-            Value::Float(weighted / total as f64)
-        }
-    }))
+        AggFunc::Sum => agg_sum(&segments)?,
+        AggFunc::Avg => return agg_avg(&segments),
+    })
+    )
 }
 
 fn numeric_min_max(a: Value, b: Value, want_max: bool) -> Result<Value, ExecError> {

@@ -141,6 +141,82 @@ impl<V: Codec> WalEntry<V> {
     }
 }
 
+/// Decrypt a data WAL entry (`E:<base64>` line content after stripping the `E:` prefix).
+/// Logs specific warnings for each failure mode and returns `None` on any error.
+fn decrypt_wal_data_entry(rest: &str, key: &Option<[u8; 32]>) -> Option<String> {
+    let key = match key {
+        Some(k) => k,
+        None => {
+            warn!("encrypted WAL entry found but no key configured, skipping");
+            return None;
+        }
+    };
+    let blob = match B64.decode(rest) {
+        Ok(b) => b,
+        Err(_) => {
+            warn!("WAL entry base64 decode failed, skipping");
+            return None;
+        }
+    };
+    match crypto::decrypt(key, &blob) {
+        Ok(bytes) => match String::from_utf8(bytes) {
+            Ok(s) => Some(s),
+            Err(_) => {
+                warn!("WAL entry decrypted but not valid UTF-8, skipping");
+                None
+            }
+        },
+        Err(_) => {
+            warn!("WAL entry decryption failed, skipping");
+            None
+        }
+    }
+}
+
+/// Decrypt a schema WAL entry (`SE:<base64>` after stripping the `SE:` prefix).
+fn decrypt_wal_schema_entry(rest: &str, key: &Option<[u8; 32]>) -> Option<String> {
+    let key = match key {
+        Some(k) => k,
+        None => {
+            warn!("encrypted schema WAL entry found but no key configured, skipping");
+            return None;
+        }
+    };
+    let blob = match B64.decode(rest) {
+        Ok(b) => b,
+        Err(_) => {
+            warn!("schema WAL entry base64 decode failed, skipping");
+            return None;
+        }
+    };
+    match crypto::decrypt(key, &blob) {
+        Ok(bytes) => match String::from_utf8(bytes) {
+            Ok(s) => Some(s),
+            Err(_) => {
+                warn!("schema WAL entry decrypted but not valid UTF-8, skipping");
+                None
+            }
+        },
+        Err(_) => {
+            warn!("schema WAL entry decryption failed, skipping");
+            None
+        }
+    }
+}
+
+/// Validate the checksum in `inner` (`"<crc32> <stmt>"`) and push `stmt` into `out` if valid.
+fn validate_schema_checksum(inner: &str, out: &mut Vec<String>) {
+    if let Some((ck_str, stmt)) = inner.split_once(' ') {
+        match ck_str.parse::<u32>() {
+            Ok(ck) if ck == crc32(stmt) => out.push(stmt.to_string()),
+            Ok(_) => warn!("schema WAL entry checksum mismatch, discarding"),
+            Err(_) => warn!("schema WAL entry malformed checksum, discarding"),
+        }
+    } else {
+        warn!("schema WAL entry missing checksum, discarding");
+    }
+}
+
 // TODO: add a truncation / rotation path - after a compaction checkpoint, entries
 // whose layers are fully covered by the compacted layer can be discarded from
 // the front of the file. Without this the WAL grows without bound.
@@ -291,33 +367,9 @@ impl Wal {
             }
 
             let plaintext: String = if let Some(rest) = line.strip_prefix("E:") {
-                let key = match &self.key {
-                    Some(k) => k,
+                match decrypt_wal_data_entry(rest, &self.key) {
+                    Some(s) => s,
                     None => {
-                        warn!("encrypted WAL entry found but no key configured, skipping");
-                        skipped += 1;
-                        continue;
-                    }
-                };
-                let blob = match B64.decode(rest) {
-                    Ok(b) => b,
-                    Err(_) => {
-                        warn!("WAL entry base64 decode failed, skipping");
-                        skipped += 1;
-                        continue;
-                    }
-                };
-                match crypto::decrypt(key, &blob) {
-                    Ok(bytes) => match String::from_utf8(bytes) {
-                        Ok(s) => s,
-                        Err(_) => {
-                            warn!("WAL entry decrypted but not valid UTF-8, skipping");
-                            skipped += 1;
-                            continue;
-                        }
-                    },
-                    Err(_) => {
-                        warn!("WAL entry decryption failed, skipping");
                         skipped += 1;
                         continue;
                     }
@@ -412,32 +464,9 @@ impl Wal {
             let trimmed = line.trim();
 
             let inner: String = if let Some(rest) = trimmed.strip_prefix("SE:") {
-                let key = match &self.key {
-                    Some(k) => k,
-                    None => {
-                        warn!("encrypted schema WAL entry found but no key configured, skipping");
-                        continue;
-                    }
-                };
-                let blob = match B64.decode(rest) {
-                    Ok(b) => b,
-                    Err(_) => {
-                        warn!("schema WAL entry base64 decode failed, skipping");
-                        continue;
-                    }
-                };
-                match crypto::decrypt(key, &blob) {
-                    Ok(bytes) => match String::from_utf8(bytes) {
-                        Ok(s) => s,
-                        Err(_) => {
-                            warn!("schema WAL entry decrypted but not valid UTF-8, skipping");
-                            continue;
-                        }
-                    },
-                    Err(_) => {
-                        warn!("schema WAL entry decryption failed, skipping");
-                        continue;
-                    }
+                match decrypt_wal_schema_entry(rest, &self.key) {
+                    Some(s) => s,
+                    None => continue,
                 }
             } else if let Some(rest) = trimmed.strip_prefix("S:") {
                 rest.to_string()
@@ -445,16 +474,7 @@ impl Wal {
                 continue;
             };
 
-            // inner = "<crc32> <stmt_text>"
-            if let Some((ck_str, stmt)) = inner.split_once(' ') {
-                match ck_str.parse::<u32>() {
-                    Ok(ck) if ck == crc32(stmt) => stmts.push(stmt.to_string()),
-                    Ok(_) => warn!("schema WAL entry checksum mismatch, discarding"),
-                    Err(_) => warn!("schema WAL entry malformed checksum, discarding"),
-                }
-            } else {
-                warn!("schema WAL entry missing checksum, discarding");
-            }
+            validate_schema_checksum(&inner, &mut stmts);
         }
         Ok(stmts)
     }

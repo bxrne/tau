@@ -23,7 +23,7 @@ use nom::{
     sequence::{delimited, pair, preceded},
 };
 
-use super::ast::*;
+use super::ast::{AggFunc, BinOp, Expr, Literal, Stmt, Type, UnOp};
 use crate::libtau::users::Perm;
 
 /// Parse a single statement.  Trailing whitespace is consumed but trailing
