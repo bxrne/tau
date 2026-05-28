@@ -160,6 +160,60 @@ pub struct Disk<V> {
     record_buf: Vec<u8>,
 }
 
+/// Wrap `file_reader` in the appropriate `Read` impl, decrypting if the file starts
+/// with the encrypted magic. Returns the reader positioned at the start of the header.
+fn open_disk_reader(
+    mut file_reader: BufReader<File>,
+    key: Option<[u8; 32]>,
+) -> io::Result<Box<dyn Read>> {
+    let mut magic4 = [0u8; 4];
+    file_reader.read_exact(&mut magic4)?;
+    if magic4 == MAGIC_ENC {
+        let enc_key = key.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "disk file is encrypted but no TAU_ENCRYPTION_KEY is set",
+            )
+        })?;
+        let mut blob = Vec::new();
+        file_reader.read_to_end(&mut blob)?;
+        let plaintext = crypto::decrypt(&enc_key, &blob)?;
+        Ok(Box::new(Cursor::new(plaintext)))
+    } else {
+        // Push the 4 bytes already read back via a chain reader.
+        Ok(Box::new(Read::chain(Cursor::new(magic4.to_vec()), file_reader)))
+    }
+}
+
+/// Read and validate the 8-byte disk header (magic + version + CRC32).
+fn verify_disk_header<R: Read>(reader: &mut R) -> io::Result<()> {
+    let mut header = [0u8; HEADER_OVERHEAD + 4];
+    reader.read_exact(&mut header)?;
+    let magic = &header[0..3];
+    let version = header[3];
+    let stored_checksum = u32::from_le_bytes(header[4..8].try_into().unwrap());
+    if magic != MAGIC {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid magic: expected TAU, got {:?}", String::from_utf8_lossy(magic)),
+        ));
+    }
+    if version != VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unsupported version: expected {}, got {}", VERSION, version),
+        ));
+    }
+    let computed = checksum(&header[0..HEADER_OVERHEAD]);
+    if stored_checksum != computed {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("header checksum mismatch: expected {}, got {}", stored_checksum, computed),
+        ));
+    }
+    Ok(())
+}
+
 impl<V: Clone + Codec> Disk<V> {
     /// Open existing store or create new one at `path`.
     ///
@@ -172,68 +226,8 @@ impl<V: Clone + Codec> Disk<V> {
 
         if path.exists() {
             let file = File::open(&path)?;
-            let mut file_reader = BufReader::new(file);
-
-            // Peek at the first 4 bytes to detect encryption.
-            let mut magic4 = [0u8; 4];
-            file_reader.read_exact(&mut magic4)?;
-
-            let mut reader: Box<dyn Read> = if magic4 == MAGIC_ENC {
-                // Encrypted format: decrypt the remainder, wrap in a Cursor.
-                let enc_key = key.ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "disk file is encrypted but no TAU_ENCRYPTION_KEY is set",
-                    )
-                })?;
-                let mut blob = Vec::new();
-                file_reader.read_to_end(&mut blob)?;
-                let plaintext = crypto::decrypt(&enc_key, &blob)?;
-                Box::new(Cursor::new(plaintext))
-            } else {
-                // Unencrypted format: the 4 bytes we already read are TAU + version.
-                // Push them back via a chain reader.
-                Box::new(Read::chain(Cursor::new(magic4.to_vec()), file_reader))
-            };
-
-            // Read and verify the standard 8-byte header (TAU + version + CRC32).
-            let mut header = [0u8; HEADER_OVERHEAD + 4];
-            reader.read_exact(&mut header)?;
-
-            let (magic, version, stored_checksum) = (
-                &header[0..3],
-                header[3],
-                u32::from_le_bytes(header[4..8].try_into().unwrap()),
-            );
-
-            if magic != MAGIC {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "invalid magic: expected TAU, got {:?}",
-                        String::from_utf8_lossy(magic)
-                    ),
-                ));
-            }
-            if version != VERSION {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("unsupported version: expected {}, got {}", VERSION, version),
-                ));
-            }
-
-            let computed_checksum = checksum(&header[0..HEADER_OVERHEAD]);
-            if stored_checksum != computed_checksum {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "header checksum mismatch: expected {}, got {}",
-                        stored_checksum, computed_checksum
-                    ),
-                ));
-            }
-
-            // Replay entries
+            let mut reader = open_disk_reader(BufReader::new(file), key)?;
+            verify_disk_header(&mut reader)?;
             loop {
                 match DiskEntry::read(&mut reader) {
                     Ok(entry) => {

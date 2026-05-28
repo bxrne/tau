@@ -137,112 +137,58 @@ pub struct Config {
     pub idle_timeout_secs: u64,
 }
 
-fn main() -> io::Result<()> {
-    let config = Config::parse();
-
-    let level = config.log_level.parse().unwrap_or(tracing::Level::INFO);
-    tracing_subscriber::fmt()
-        .with_max_level(level)
-        .with_target(false)
-        .init();
-
-    // Encryption key for WAL / Disk (optional).
-    let enc_key = crypto::parse_key_from_env();
-    if enc_key.is_some() {
-        info!("WAL encryption enabled (TAU_ENCRYPTION_KEY)");
-    }
-
-    // Build executor.
-    let executor: Arc<RwLock<Executor>> = if config.wal {
-        let wal_path = config.wal_path.ok_or_else(|| {
+fn build_executor(config: &Config, enc_key: Option<[u8; 32]>) -> io::Result<Arc<RwLock<Executor>>> {
+    if config.wal {
+        let wal_path = config.wal_path.clone().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "WAL enabled but no path provided (use -w/--wal-path)",
             )
         })?;
         info!(wal_path = %wal_path.display(), compact_threshold = config.compact_threshold, "starting with WAL");
-        Arc::new(RwLock::new(Executor::with_wal_threshold(
+        Ok(Arc::new(RwLock::new(Executor::with_wal_threshold(
             wal_path,
             config.compact_threshold,
             enc_key,
-        )?))
+        )?)))
     } else {
-        info!(
-            compact_threshold = config.compact_threshold,
-            "starting in-memory (no WAL)"
-        );
-        Arc::new(RwLock::new(Executor::with_threshold(
-            config.compact_threshold,
-        )))
-    };
-
-    // Build the user store and (optionally) bootstrap an initial admin.
-    let auth_enabled = config.auth;
-    if auth_enabled {
-        let mut store = match config.users_file.as_ref() {
-            Some(path) => UserStore::open(path)?,
-            None => UserStore::new(),
-        };
-
-        // Bootstrap: if no users exist yet AND --username/--password were
-        // provided, seed the store with a global-admin user.  Persists when a
-        // file path is configured.
-        if store.names().is_empty()
-            && let (Some(u), Some(p)) = (config.username.as_ref(), config.password.as_ref())
-        {
-            let mut grants = HashMap::new();
-            grants.insert("*".to_string(), Perm::ALL);
-            store
-                .add(User::new(u, p, grants))
-                .map_err(io::Error::other)?;
-            info!(user = %u, "bootstrapped global admin");
-        }
-
-        if store.names().is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "--auth: no users configured. Provide --username/--password to bootstrap a global admin or supply a populated --users-file",
-            ));
-        }
-
-        info!(users = store.names().len(), "authentication enabled");
-        executor.write().unwrap().users = store;
+        info!(compact_threshold = config.compact_threshold, "starting in-memory (no WAL)");
+        Ok(Arc::new(RwLock::new(Executor::with_threshold(config.compact_threshold))))
     }
+}
 
-    // Build TLS config (if TLS enabled).
-    let tls_config: Option<Arc<ServerConfig>> = if config.tls {
-        let server_cfg = build_tls_config(config.tls_cert.as_deref(), config.tls_key.as_deref())?;
-        info!(
-            cert = ?config.tls_cert,
-            key = ?config.tls_key,
-            "TLS enabled"
-        );
-        Some(Arc::new(server_cfg))
-    } else {
-        debug!("TLS disabled (plain TCP)");
-        None
+fn setup_auth(config: &Config, executor: &Arc<RwLock<Executor>>) -> io::Result<()> {
+    let mut store = match config.users_file.as_ref() {
+        Some(path) => UserStore::open(path)?,
+        None => UserStore::new(),
     };
-
-    // Metrics HTTP endpoint (optional).
-    if let Some(port) = config.metrics_port {
-        let metrics = executor.read().unwrap().metrics.clone();
-        thread::Builder::new()
-            .name("tau-metrics".into())
-            .spawn(move || serve_metrics_http(port, metrics))
-            .expect("failed to spawn metrics thread");
-        info!(port, "metrics endpoint enabled");
+    if store.names().is_empty()
+        && let (Some(u), Some(p)) = (config.username.as_ref(), config.password.as_ref())
+    {
+        let mut grants = HashMap::new();
+        grants.insert("*".to_string(), Perm::ALL);
+        store.add(User::new(u, p, grants)).map_err(io::Error::other)?;
+        info!(user = %u, "bootstrapped global admin");
     }
+    if store.names().is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--auth: no users configured. Provide --username/--password to bootstrap a global admin or supply a populated --users-file",
+        ));
+    }
+    info!(users = store.names().len(), "authentication enabled");
+    executor.write().unwrap().users = store;
+    Ok(())
+}
 
-    let bind = config.bind.clone();
-    let listener = TcpListener::bind(&bind)?;
-    info!(%bind, "tau server listening");
-
-    let connection_limit = config.max_connections;
-    let idle_timeout = if config.idle_timeout_secs == 0 {
-        None
-    } else {
-        Some(Duration::from_secs(config.idle_timeout_secs))
-    };
+fn accept_loop(
+    listener: TcpListener,
+    executor: Arc<RwLock<Executor>>,
+    tls_config: Option<Arc<ServerConfig>>,
+    auth_enabled: bool,
+    connection_limit: usize,
+    idle_timeout: Option<Duration>,
+) -> io::Result<()> {
     let active_connections = Arc::new(AtomicUsize::new(0));
     for incoming in listener.incoming() {
         match incoming {
@@ -266,12 +212,11 @@ fn main() -> io::Result<()> {
                 debug!(%peer, in_flight, "accepted connection");
                 let exec = executor.clone();
                 let tls = tls_config.clone();
-                let auth = auth_enabled;
                 let active_clone = active_connections.clone();
                 thread::Builder::new()
                     .name("tau-conn".into())
                     .spawn(move || {
-                        if let Err(e) = handle(stream, exec, tls, auth, idle_timeout) {
+                        if let Err(e) = handle(stream, exec, tls, auth_enabled, idle_timeout) {
                             warn!(error = %e, "connection ended with error");
                         }
                         active_clone.fetch_sub(1, Ordering::AcqRel);
@@ -281,8 +226,66 @@ fn main() -> io::Result<()> {
             Err(e) => error!(error = %e, "accept failed"),
         }
     }
-
     Ok(())
+}
+
+fn main() -> io::Result<()> {
+    let config = Config::parse();
+
+    let level = config.log_level.parse().unwrap_or(tracing::Level::INFO);
+    tracing_subscriber::fmt()
+        .with_max_level(level)
+        .with_target(false)
+        .init();
+
+    let enc_key = crypto::parse_key_from_env();
+    if enc_key.is_some() {
+        info!("WAL encryption enabled (TAU_ENCRYPTION_KEY)");
+    }
+
+    let executor = build_executor(&config, enc_key)?;
+
+    let auth_enabled = config.auth;
+    if auth_enabled {
+        setup_auth(&config, &executor)?;
+    }
+
+    let tls_config: Option<Arc<ServerConfig>> = if config.tls {
+        let server_cfg = build_tls_config(config.tls_cert.as_deref(), config.tls_key.as_deref())?;
+        info!(cert = ?config.tls_cert, key = ?config.tls_key, "TLS enabled");
+        Some(Arc::new(server_cfg))
+    } else {
+        debug!("TLS disabled (plain TCP)");
+        None
+    };
+
+    if let Some(port) = config.metrics_port {
+        let metrics = executor.read().unwrap().metrics.clone();
+        thread::Builder::new()
+            .name("tau-metrics".into())
+            .spawn(move || serve_metrics_http(port, metrics))
+            .expect("failed to spawn metrics thread");
+        info!(port, "metrics endpoint enabled");
+    }
+
+    let bind = config.bind.clone();
+    let listener = TcpListener::bind(&bind)?;
+    info!(%bind, "tau server listening");
+
+    let idle_timeout = if config.idle_timeout_secs == 0 {
+        None
+    } else {
+        Some(Duration::from_secs(config.idle_timeout_secs))
+    };
+
+    accept_loop(
+        listener,
+        executor,
+        tls_config,
+        auth_enabled,
+        config.max_connections,
+        idle_timeout,
+    )
 }
 
 /// Minimal HTTP server that serves `GET /metrics` in Prometheus text format.
@@ -444,6 +447,44 @@ fn parse_auth_line(line: &str) -> Option<(String, String)> {
     Some((user.to_string(), pass.to_string()))
 }
 
+/// Attempt to authenticate the client with the line already read.
+/// Returns `Ok(Some(username))` on success, `Ok(None)` on bad credentials
+/// (response already sent, caller should break), `Err` on I/O error.
+fn handle_auth_attempt<S: Read + Write>(
+    reader: &mut BufReader<S>,
+    peer: SocketAddr,
+    exec: &Arc<RwLock<Executor>>,
+    metrics: &Arc<Metrics>,
+    trimmed: &str,
+) -> io::Result<Option<String>> {
+    match parse_auth_line(trimmed) {
+        Some((u, p)) => {
+            metrics.record_auth_attempt();
+            if exec.read().unwrap().users.verify(&u, &p).is_some() {
+                reader.get_mut().write_all(b"OK\n")?;
+                reader.get_mut().flush()?;
+                info!(%peer, user = %u, "authenticated");
+                Ok(Some(u))
+            } else {
+                metrics.record_auth_failure();
+                metrics.record_error();
+                warn!(%peer, user = %u, "authentication failed");
+                reader.get_mut().write_all(b"ERR authentication failed\n")?;
+                reader.get_mut().flush()?;
+                Ok(None)
+            }
+        }
+        None => {
+            metrics.record_auth_failure();
+            metrics.record_error();
+            warn!(%peer, "first message was not AUTH");
+            reader.get_mut().write_all(b"ERR authentication required\n")?;
+            reader.get_mut().flush()?;
+            Ok(None)
+        }
+    }
+}
+
 /// Drive a single client connection over any `Read + Write` stream.
 ///
 /// Enforces authentication (when `auth_enabled`) as the very first exchange,
@@ -463,43 +504,18 @@ fn run_query_loop<S: Read + Write>(
         line_buf.clear();
         let n = reader.read_line(&mut line_buf)?;
         if n == 0 {
-            break; // EOF
+            break;
         }
-
         let trimmed = line_buf.trim();
         if trimmed.is_empty() {
             continue;
         }
 
         if auth_enabled && authenticated_user.is_none() {
-            match parse_auth_line(trimmed) {
-                Some((u, p)) => {
-                    metrics.record_auth_attempt();
-                    let ok = exec.read().unwrap().users.verify(&u, &p).is_some();
-                    if ok {
-                        reader.get_mut().write_all(b"OK\n")?;
-                        reader.get_mut().flush()?;
-                        info!(%peer, user = %u, "authenticated");
-                        authenticated_user = Some(u);
-                    } else {
-                        metrics.record_auth_failure();
-                        metrics.record_error();
-                        warn!(%peer, user = %u, "authentication failed");
-                        reader.get_mut().write_all(b"ERR authentication failed\n")?;
-                        reader.get_mut().flush()?;
-                        break;
-                    }
-                }
-                None => {
-                    metrics.record_auth_failure();
-                    metrics.record_error();
-                    warn!(%peer, "first message was not AUTH");
-                    reader
-                        .get_mut()
-                        .write_all(b"ERR authentication required\n")?;
-                    reader.get_mut().flush()?;
-                    break;
-                }
+            authenticated_user =
+                handle_auth_attempt(reader, peer, exec, &metrics, trimmed)?;
+            if authenticated_user.is_none() {
+                break;
             }
             continue;
         }

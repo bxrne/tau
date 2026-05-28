@@ -76,37 +76,52 @@ pub fn clear_command() -> Command {
     })
 }
 
+/// Remove the first case-insensitive `"tls"` token from `args` and return
+/// `(tls_found, remaining_args)`.  Uses `Box::leak` so the returned slice
+/// has the same lifetime as the leaked allocation; this is intentional - the
+/// slice lives only for the duration of a single command dispatch.
+fn strip_tls_token<'a>(args: &'a [&'a str]) -> (bool, &'a [&'a str]) {
+    if let Some(pos) = args.iter().position(|t| t.eq_ignore_ascii_case("tls")) {
+        let mut filtered: Vec<&str> = Vec::with_capacity(args.len() - 1);
+        for (i, t) in args.iter().enumerate() {
+            if i != pos {
+                filtered.push(*t);
+            }
+        }
+        (true, Box::leak(filtered.into_boxed_slice()))
+    } else {
+        (false, args)
+    }
+}
+
+/// Send an `AUTH user pass` message on `conn` and return an error if it fails.
+fn send_auth(
+    conn: &mut crate::tcpmgr::Connection,
+    user: &str,
+    pass: &str,
+) -> Result<(), String> {
+    let resp = conn
+        .send(&format!("AUTH {} {}", user, pass))
+        .map_err(|e| e.to_string())?;
+    println!("{}", resp);
+    if let Some(msg) = resp.strip_prefix("ERR ") {
+        return Err(msg.to_string());
+    }
+    Ok(())
+}
+
 pub fn connect_command() -> Command {
     Command::new(
         "connect",
         "connect <name> <host:port> [tls] [<user> <pass>] - open a tau connection",
         |_, repl, line| {
-            // Tokens after "connect": name, host:port, then any of [tls] [user pass].
             let args: Vec<&str> = line.split_whitespace().skip(1).collect();
             if args.len() < 2 {
                 return Err("usage: connect <name> <host:port> [tls] [<user> <pass>]".to_string());
             }
             let (name, addr) = (args[0], args[1]);
-            let mut rest = &args[2..];
+            let (tls, rest) = strip_tls_token(&args[2..]);
 
-            // Optional "tls" keyword (any position after addr).
-            let mut tls = false;
-            if let Some(pos) = rest.iter().position(|t| t.eq_ignore_ascii_case("tls")) {
-                tls = true;
-                // Remove the tls token from the slice by collecting around it.
-                // Simpler: rebuild rest without it.
-                let mut filtered: Vec<&str> = Vec::with_capacity(rest.len() - 1);
-                for (i, t) in rest.iter().enumerate() {
-                    if i != pos {
-                        filtered.push(*t);
-                    }
-                }
-                // Stash into a heap vec so the slice borrow lasts.
-                let filtered = Box::leak(filtered.into_boxed_slice());
-                rest = filtered;
-            }
-
-            // Optional auth: two trailing tokens = user pass.
             let auth_pair: Option<(&str, &str)> = match rest.len() {
                 0 => None,
                 2 => Some((rest[0], rest[1])),
@@ -118,8 +133,6 @@ pub fn connect_command() -> Command {
             };
 
             if tls {
-                // SNI: use the host part of host:port.  Defaults to "localhost"
-                // when parsing fails - matches the server's dev cert.
                 let sni = addr.split(':').next().unwrap_or("localhost").to_string();
                 repl.manager
                     .connect_tls(name, addr, &sni)
@@ -137,20 +150,12 @@ pub fn connect_command() -> Command {
                 if tls { "TLS" } else { "plain" }
             );
 
-            // If auth args were provided, send AUTH right away on the new
-            // connection (not the active one - connect doesn't steal active).
             if let Some((user, pass)) = auth_pair {
                 let conn = repl
                     .manager
                     .get_mut(name)
                     .ok_or_else(|| format!("connection '{}' vanished after connect", name))?;
-                let resp = conn
-                    .send(&format!("AUTH {} {}", user, pass))
-                    .map_err(|e| e.to_string())?;
-                println!("{}", resp);
-                if let Some(msg) = resp.strip_prefix("ERR ") {
-                    return Err(msg.to_string());
-                }
+                send_auth(conn, user, pass)?;
             }
             Ok(())
         },
@@ -214,6 +219,60 @@ pub fn use_command() -> Command {
     )
 }
 
+/// Parse one CSV data line (`start,end,value`) into a tau triple string.
+/// Returns `None` for blank lines or `#` comments; returns `Err` for malformed lines.
+fn parse_csv_line(
+    raw: &str,
+    path: &str,
+    lineno: usize,
+) -> Result<Option<String>, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return Ok(None);
+    }
+    let mut parts = trimmed.splitn(3, ',');
+    let start = parts
+        .next()
+        .ok_or_else(|| format!("{}:{}: missing start", path, lineno + 1))?
+        .trim();
+    let end = parts
+        .next()
+        .ok_or_else(|| format!("{}:{}: missing end", path, lineno + 1))?
+        .trim();
+    let value = parts
+        .next()
+        .ok_or_else(|| format!("{}:{}: missing value", path, lineno + 1))?
+        .trim();
+    Ok(Some(format!("{} {} {}", start, end, value)))
+}
+
+/// Flush `buffer` to the server as one `APPEND` statement.  Updates `total`
+/// and `chunks` on success; returns `Err` on server rejection or I/O failure.
+fn flush_chunk(
+    conn: &mut crate::tcpmgr::Connection,
+    lens: &str,
+    buffer: &mut Vec<String>,
+    total: &mut u64,
+    chunks: &mut u64,
+) -> Result<(), String> {
+    if buffer.is_empty() {
+        return Ok(());
+    }
+    let resp = ship(conn, lens, buffer)?;
+    if !resp.starts_with("OK") {
+        return Err(format!(
+            "server rejected chunk #{} at row {}: {}",
+            *chunks + 1,
+            *total + buffer.len() as u64,
+            resp.strip_prefix("ERR ").unwrap_or(&resp)
+        ));
+    }
+    *total += buffer.len() as u64;
+    *chunks += 1;
+    buffer.clear();
+    Ok(())
+}
+
 /// Client-side bulk load.  Reads a CSV (`start,end,value` per row, `#`
 /// comments and blank lines skipped) from the **client's** filesystem and
 /// ships it to the active connection as a sequence of multi-tau `APPEND`
@@ -254,51 +313,15 @@ pub fn load_command() -> Command {
             let mut chunks: u64 = 0;
 
             for (lineno, raw) in reader.lines().enumerate() {
-                let line = raw.map_err(|e| format!("read {} line {}: {}", path, lineno + 1, e))?;
-                let trimmed = line.trim();
-                if trimmed.is_empty() || trimmed.starts_with('#') {
-                    continue;
+                let raw = raw.map_err(|e| format!("read {} line {}: {}", path, lineno + 1, e))?;
+                if let Some(triple) = parse_csv_line(&raw, path, lineno)? {
+                    buffer.push(triple);
                 }
-                let mut parts = trimmed.splitn(3, ',');
-                let start = parts
-                    .next()
-                    .ok_or_else(|| format!("{}:{}: missing start", path, lineno + 1))?
-                    .trim();
-                let end = parts
-                    .next()
-                    .ok_or_else(|| format!("{}:{}: missing end", path, lineno + 1))?
-                    .trim();
-                let value = parts
-                    .next()
-                    .ok_or_else(|| format!("{}:{}: missing value", path, lineno + 1))?
-                    .trim();
-                buffer.push(format!("{} {} {}", start, end, value));
                 if buffer.len() >= chunk {
-                    let resp = ship(conn, lens, &buffer)?;
-                    if !resp.starts_with("OK") {
-                        return Err(format!(
-                            "server rejected chunk #{} at row {}: {}",
-                            chunks + 1,
-                            total + buffer.len() as u64,
-                            resp.strip_prefix("ERR ").unwrap_or(&resp)
-                        ));
-                    }
-                    total += buffer.len() as u64;
-                    chunks += 1;
-                    buffer.clear();
+                    flush_chunk(conn, lens, &mut buffer, &mut total, &mut chunks)?;
                 }
             }
-            if !buffer.is_empty() {
-                let resp = ship(conn, lens, &buffer)?;
-                if !resp.starts_with("OK") {
-                    return Err(format!(
-                        "server rejected final chunk: {}",
-                        resp.strip_prefix("ERR ").unwrap_or(&resp)
-                    ));
-                }
-                total += buffer.len() as u64;
-                chunks += 1;
-            }
+            flush_chunk(conn, lens, &mut buffer, &mut total, &mut chunks)?;
 
             println!(
                 "loaded {} rows into {} ({} chunk{})",

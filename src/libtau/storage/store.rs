@@ -1,5 +1,97 @@
 use crate::libtau::model::{Layer, Tau, Timestamp};
+use std::collections::{BinaryHeap, HashSet};
 use std::io;
+
+/// Build sweep-line events from `layers`: one start and one end event per tau.
+///
+/// Event tuple: `(time, is_end, layer_idx, tau_idx)`.
+/// Sorting by `(time, is_end)` ensures starts fire before ends at the same `t`.
+fn build_sweep_events<V>(layers: &[Layer<V>]) -> Vec<(Timestamp, bool, usize, usize)> {
+    let total: usize = layers.iter().map(|l| l.taus.len()).sum();
+    let mut events: Vec<(Timestamp, bool, usize, usize)> = Vec::with_capacity(total * 2);
+    for (layer_idx, layer) in layers.iter().enumerate() {
+        for (tau_idx, tau) in layer.taus.iter().enumerate() {
+            events.push((tau.start, false, layer_idx, tau_idx));
+            events.push((tau.end, true, layer_idx, tau_idx));
+        }
+    }
+    events.sort_unstable_by_key(|e| (e.0, e.1));
+    events
+}
+
+/// Pop lazily-closed entries off the top of `active`.
+fn drain_stale(active: &mut BinaryHeap<(usize, usize)>, closed: &mut HashSet<(usize, usize)>) {
+    while let Some(&top) = active.peek() {
+        if closed.remove(&top) {
+            active.pop();
+        } else {
+            break;
+        }
+    }
+}
+
+/// Emit a merged segment `[cursor, t)` if there is an active tau at that interval.
+fn maybe_emit_segment<V>(
+    cursor: Option<Timestamp>,
+    t: Timestamp,
+    active: &mut BinaryHeap<(usize, usize)>,
+    closed: &mut HashSet<(usize, usize)>,
+    merged: &mut Vec<Tau<V>>,
+    layers: &[Layer<V>],
+) where
+    V: Clone + PartialEq,
+{
+    if let Some(c) = cursor
+        && c < t
+    {
+        drain_stale(active, closed);
+        if let Some(&(layer_idx, tau_idx)) = active.peek() {
+            let v = layers[layer_idx].taus[tau_idx].value.clone();
+            match merged.last_mut() {
+                Some(last) if last.end == c && last.value == v => last.end = t,
+                _ => merged.push(Tau::new(c, t, v)),
+            }
+        }
+    }
+}
+
+/// Apply all events that share timestamp `t`, advancing `i`.
+fn apply_events_at(
+    events: &[(Timestamp, bool, usize, usize)],
+    i: &mut usize,
+    t: Timestamp,
+    active: &mut BinaryHeap<(usize, usize)>,
+    closed: &mut HashSet<(usize, usize)>,
+) {
+    while *i < events.len() && events[*i].0 == t {
+        let (_, is_end, layer_idx, tau_idx) = events[*i];
+        if is_end {
+            closed.insert((layer_idx, tau_idx));
+        } else {
+            active.push((layer_idx, tau_idx));
+        }
+        *i += 1;
+    }
+}
+
+/// Sweep events in order, producing a merged tau sequence.
+fn run_sweep<V>(events: &[(Timestamp, bool, usize, usize)], layers: &[Layer<V>]) -> Vec<Tau<V>>
+where
+    V: Clone + PartialEq,
+{
+    let mut active: BinaryHeap<(usize, usize)> = BinaryHeap::new();
+    let mut closed: HashSet<(usize, usize)> = HashSet::new();
+    let mut merged: Vec<Tau<V>> = Vec::new();
+    let mut cursor: Option<Timestamp> = None;
+    let mut i = 0;
+    while i < events.len() {
+        let t = events[i].0;
+        maybe_emit_segment(cursor, t, &mut active, &mut closed, &mut merged, layers);
+        cursor = Some(t);
+        apply_events_at(events, &mut i, t, &mut active, &mut closed);
+    }
+    merged
+}
 
 /// Compact `layers` down to a single layer representing the same newest-wins
 /// truth.  Every unique tau boundary becomes a potential split point; the
@@ -8,8 +100,7 @@ use std::io;
 /// are merged.  No-ops when there is already ≤ 1 layer.
 ///
 /// Implementation: sweep-line over `(time, start/end, layer_idx)` events.
-/// O(E log E) where E = 2 × total tau count, replacing the older
-/// O(B × L) "for every boundary, scan every layer" pass.
+/// O(E log E) where E = 2 × total tau count.
 pub fn compact_layers<V>(layers: &mut Vec<Layer<V>>)
 where
     V: Clone + PartialEq,
@@ -17,82 +108,14 @@ where
     if layers.len() <= 1 {
         return;
     }
-
     let total_taus: usize = layers.iter().map(|l| l.taus.len()).sum();
     if total_taus == 0 {
         layers.clear();
         return;
     }
-
     let max_id = layers.iter().map(|l| l.id).max().unwrap_or(0);
-
-    // Event kind: false=start (open before close at same t), true=end.
-    // Sorting by (time, kind) ensures all starts at t fire before all ends at t,
-    // so layers that touch (end of one == start of another) hand off cleanly.
-    let mut events: Vec<(Timestamp, bool, usize, usize)> = Vec::with_capacity(total_taus * 2);
-    for (layer_idx, layer) in layers.iter().enumerate() {
-        for (tau_idx, tau) in layer.taus.iter().enumerate() {
-            events.push((tau.start, false, layer_idx, tau_idx));
-            events.push((tau.end, true, layer_idx, tau_idx));
-        }
-    }
-    events.sort_unstable_by_key(|e| (e.0, e.1));
-
-    // `active` is a max-heap keyed by layer_idx - newer layer wins.  We tag
-    // each entry with `tau_idx` so we can drop the right one on close events
-    // when a layer has multiple taus stacked at the same boundary.  Stale
-    // entries (already closed) are skipped lazily.
-    use std::collections::{BinaryHeap, HashSet};
-    let mut active: BinaryHeap<(usize, usize)> = BinaryHeap::new();
-    let mut closed: HashSet<(usize, usize)> = HashSet::new();
-
-    let mut merged: Vec<Tau<V>> = Vec::new();
-    let mut cursor: Option<Timestamp> = None;
-
-    // Helper: pop stale entries off the top of the heap.
-    let drain_stale = |active: &mut BinaryHeap<(usize, usize)>,
-                       closed: &mut HashSet<(usize, usize)>| {
-        while let Some(&top) = active.peek() {
-            if closed.remove(&top) {
-                active.pop();
-            } else {
-                break;
-            }
-        }
-    };
-
-    let mut i = 0;
-    while i < events.len() {
-        let t = events[i].0;
-
-        // Emit segment [cursor, t) using the value of the top of `active`
-        // before applying any events at `t`.
-        if let Some(c) = cursor
-            && c < t
-        {
-            drain_stale(&mut active, &mut closed);
-            if let Some(&(layer_idx, tau_idx)) = active.peek() {
-                let v = layers[layer_idx].taus[tau_idx].value.clone();
-                match merged.last_mut() {
-                    Some(last) if last.end == c && last.value == v => last.end = t,
-                    _ => merged.push(Tau::new(c, t, v)),
-                }
-            }
-        }
-        cursor = Some(t);
-
-        // Apply all events at time `t`.  Starts go first (sort order), then ends.
-        while i < events.len() && events[i].0 == t {
-            let (_, is_end, layer_idx, tau_idx) = events[i];
-            if is_end {
-                closed.insert((layer_idx, tau_idx));
-            } else {
-                active.push((layer_idx, tau_idx));
-            }
-            i += 1;
-        }
-    }
-
+    let events = build_sweep_events(layers);
+    let merged = run_sweep(&events, layers);
     *layers = if merged.is_empty() {
         Vec::new()
     } else {
