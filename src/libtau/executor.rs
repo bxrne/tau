@@ -396,19 +396,24 @@ impl Executor {
             }
         };
 
+        let require_any_grant = |db: &str| {
+            if user.effective(db).is_empty() {
+                Err(ExecError::PermissionDenied(format!(
+                    "user '{}' has no grants on {}",
+                    user.name, db
+                )))
+            } else {
+                Ok(())
+            }
+        };
+        let caller_can_show_grants = |target: &Option<String>| {
+            target.as_deref().is_some_and(|t| t == user.name)
+        };
+
         match stmt {
             Stmt::CreateDatabase { .. } => require_global_admin(),
             Stmt::DropDatabase { name } => require_admin_or_a_on(name),
-            Stmt::UseDatabase { name } => {
-                if user.effective(name).is_empty() {
-                    Err(ExecError::PermissionDenied(format!(
-                        "user '{}' has no grants on {}",
-                        user.name, name
-                    )))
-                } else {
-                    Ok(())
-                }
-            }
+            Stmt::UseDatabase { name } => require_any_grant(name),
             Stmt::Create { .. } => require(require_active()?, Perm::C),
             Stmt::Append { .. } | Stmt::Copy { .. } => require(require_active()?, Perm::U),
             Stmt::Derive { .. } => require(require_active()?, Perm::C),
@@ -425,11 +430,7 @@ impl Executor {
                 require_admin_or_a_on(database)
             }
             Stmt::ShowGrants { user: target } => {
-                if target.as_deref().is_some_and(|t| t == user.name) {
-                    Ok(())
-                } else {
-                    require_global_admin()
-                }
+                if caller_can_show_grants(target) { Ok(()) } else { require_global_admin() }
             }
         }
     }

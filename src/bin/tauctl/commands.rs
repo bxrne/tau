@@ -265,6 +265,16 @@ fn flush_chunk(
     Ok(())
 }
 
+fn parse_chunk_size(args: &[&str]) -> Result<usize, String> {
+    if args.len() == 3 {
+        args[2]
+            .parse()
+            .map_err(|_| format!("invalid chunk size {:?}", args[2]))
+    } else {
+        Ok(256)
+    }
+}
+
 /// Client-side bulk load.  Reads a CSV (`start,end,value` per row, `#`
 /// comments and blank lines skipped) from the **client's** filesystem and
 /// ships it to the active connection as a sequence of multi-tau `APPEND`
@@ -282,13 +292,7 @@ pub fn load_command() -> Command {
             }
             let lens = args[0];
             let path = args[1];
-            let chunk: usize = if args.len() == 3 {
-                args[2]
-                    .parse()
-                    .map_err(|_| format!("invalid chunk size {:?}", args[2]))?
-            } else {
-                256
-            };
+            let chunk: usize = parse_chunk_size(&args)?;
             if chunk == 0 {
                 return Err("chunk size must be >= 1".to_string());
             }

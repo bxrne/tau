@@ -59,7 +59,7 @@ const SIM_PASS: &str = "dst_sim_pass_1";
 const LENS: &str = "s";
 
 #[derive(Parser, Debug)]
-#[command(name = "dst", about = "Tau deterministic simulation tester")]
+#[command(name = "dst", about = "Tau deterministic simulation tester", version)]
 struct Cli {
     #[arg(long)]
     quick: bool,
@@ -187,6 +187,67 @@ fn run_embedded(seed: u64, cli: &Cli) {
 
 const EMBEDDED_LENSES: [&str; 8] = ["a", "b", "c", "d", "e", "f", "g", "h"];
 
+fn spawn_stress_reader(
+    seed: u64,
+    executor: Arc<RwLock<Executor>>,
+    stop: Arc<AtomicBool>,
+    max_cursor: Arc<AtomicI64>,
+) {
+    thread::spawn(move || {
+        let mut rng = StdRng::seed_from_u64(seed.wrapping_add(0xdead_beef));
+        while !stop.load(Ordering::Relaxed) {
+            let lens = EMBEDDED_LENSES[rng.gen_range(0..EMBEDDED_LENSES.len())];
+            let hi = max_cursor.load(Ordering::Relaxed).max(1);
+            let t = rng.gen_range(0..hi);
+            if let Ok((_, stmt)) = parse(&format!("AT LENS {lens} {t}")) {
+                let _ = executor_read_quick(&executor, &stmt);
+            }
+        }
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn embedded_do_append(
+    rng: &mut StdRng,
+    executor: &Arc<RwLock<Executor>>,
+    oracle: &mut Oracle,
+    max_cursor: &Arc<AtomicI64>,
+    lens_name: &str,
+    time_cursor: &mut i64,
+    readers: usize,
+    op_idx: u64,
+) -> bool {
+    let batch_size = rng_usize(rng, 1, 9);
+    let mut segs: Vec<(i64, i64, i64)> = Vec::with_capacity(batch_size);
+    let mut cur = *time_cursor;
+    for _ in 0..batch_size {
+        let advance = rng_range(rng, 1_000_000, 100_000_000);
+        let s = cur + advance;
+        let e = s + rng_range(rng, 1, 10_000_001);
+        let v = rng_range(rng, i32::MIN as i64, i32::MAX as i64);
+        segs.push((s, e, v));
+        cur = e;
+    }
+    *time_cursor = cur;
+    max_cursor.store(*time_cursor, Ordering::Relaxed);
+
+    let mut stmt_text = format!("APPEND LENS {lens_name}");
+    for (s, e, v) in &segs {
+        stmt_text.push_str(&format!(" {s} {e} {v},"));
+    }
+    stmt_text.pop();
+
+    let stmt = parse(&stmt_text).expect("parse").1;
+    if executor.write().expect("lock").exec(&stmt).is_err() {
+        return false;
+    }
+    oracle.append(lens_name, &segs);
+    let mid = segs[0].0;
+    let expected = oracle.at(lens_name, mid);
+    embedded_concurrent_burst(executor, lens_name, mid, expected, readers, op_idx);
+    true
+}
+
 fn embedded_sim(seed: u64, cli: &Cli) {
     let mut rng = StdRng::seed_from_u64(seed);
     let executor: Arc<RwLock<Executor>> = Arc::new(RwLock::new(Executor::with_threshold(4)));
@@ -204,26 +265,9 @@ fn embedded_sim(seed: u64, cli: &Cli) {
     }
 
     let stop = Arc::new(AtomicBool::new(false));
-    // Stress reader: continuously queries random timestamps.
     // max_cursor tracks the high-water mark so the stress reader covers real data.
     let max_cursor = Arc::new(AtomicI64::new(1));
-    {
-        let stress_stop = Arc::clone(&stop);
-        let stress_exec = Arc::clone(&executor);
-        let stress_max = Arc::clone(&max_cursor);
-        let stress_seed = seed.wrapping_add(0xdead_beef);
-        thread::spawn(move || {
-            let mut rng = StdRng::seed_from_u64(stress_seed);
-            while !stress_stop.load(Ordering::Relaxed) {
-                let lens = EMBEDDED_LENSES[rng.gen_range(0..EMBEDDED_LENSES.len())];
-                let hi = stress_max.load(Ordering::Relaxed).max(1);
-                let t = rng.gen_range(0..hi);
-                if let Ok((_, stmt)) = parse(&format!("AT LENS {lens} {t}")) {
-                    let _ = executor_read_quick(&stress_exec, &stmt);
-                }
-            }
-        });
-    }
+    spawn_stress_reader(seed, Arc::clone(&executor), Arc::clone(&stop), Arc::clone(&max_cursor));
 
     let mut total_ops: u64 = 0;
     let mut write_ops: u64 = 0;
@@ -238,7 +282,6 @@ fn embedded_sim(seed: u64, cli: &Cli) {
         let lens_name = EMBEDDED_LENSES[lens_idx];
 
         match rng.gen_range(0u8..16) {
-            // Drop a live lens.
             0 if live[lens_idx] => {
                 let stmt = parse(&format!("DROP LENS {lens_name}")).expect("parse").1;
                 executor.write().expect("lock").exec(&stmt).ok();
@@ -246,7 +289,6 @@ fn embedded_sim(seed: u64, cli: &Cli) {
                 live[lens_idx] = false;
                 write_ops += 1;
             }
-            // Recreate a dropped lens.
             1 if !live[lens_idx] => {
                 let stmt = parse(&format!("CREATE LENS {lens_name} int"))
                     .expect("parse")
@@ -255,56 +297,29 @@ fn embedded_sim(seed: u64, cli: &Cli) {
                 live[lens_idx] = true;
                 write_ops += 1;
             }
-            // AT query on a live lens.
             2..=4 if live[lens_idx] && time_cursor > 0 => {
                 let t = rng.gen_range(0..time_cursor);
                 embedded_check_at(&executor, &oracle, lens_name, t, op_idx);
             }
-            // RANGE query on a live lens.
             5..=6 if live[lens_idx] && time_cursor > 0 => {
                 let rs = rng.gen_range(0..time_cursor);
                 let re = rs + rng_range(&mut rng, 1, (time_cursor / 10).max(2));
                 embedded_check_range(&executor, lens_name, rs, re, op_idx);
             }
-            // Batch append: 1-8 non-overlapping segments, big time advances.
             _ if live[lens_idx] => {
-                let batch_size = rng_usize(&mut rng, 1, 9);
-                let mut segs: Vec<(i64, i64, i64)> = Vec::with_capacity(batch_size);
-                let mut cur = time_cursor;
-                for _ in 0..batch_size {
-                    // Each segment advances time by 1M-100M units.
-                    let advance = rng_range(&mut rng, 1_000_000, 100_000_000);
-                    let s = cur + advance;
-                    let e = s + rng_range(&mut rng, 1, 10_000_001);
-                    let v = rng_range(&mut rng, i32::MIN as i64, i32::MAX as i64);
-                    segs.push((s, e, v));
-                    cur = e;
+                if !embedded_do_append(
+                    &mut rng,
+                    &executor,
+                    &mut oracle,
+                    &max_cursor,
+                    lens_name,
+                    &mut time_cursor,
+                    cli.readers,
+                    op_idx,
+                ) {
+                    continue;
                 }
-                time_cursor = cur;
-                max_cursor.store(time_cursor, Ordering::Relaxed);
-
-                // Build the batch APPEND statement.
-                let mut stmt_text = format!("APPEND LENS {lens_name}");
-                for (s, e, v) in &segs {
-                    stmt_text.push_str(&format!(" {s} {e} {v},"));
-                }
-                stmt_text.pop(); // trailing comma
-
-                let stmt = parse(&stmt_text).expect("parse").1;
-                {
-                    let mut exec = executor.write().expect("lock");
-                    if exec.exec(&stmt).is_err() {
-                        continue;
-                    }
-                }
-
-                oracle.append(lens_name, &segs);
                 write_ops += 1;
-
-                // Concurrent burst: all readers must see the same value.
-                let mid = segs[0].0; // start of first segment
-                let expected = oracle.at(lens_name, mid);
-                embedded_concurrent_burst(&executor, lens_name, mid, expected, cli.readers, op_idx);
             }
             _ => {}
         }
@@ -559,191 +574,160 @@ fn build_grid() -> Vec<Cell> {
     cells
 }
 
-fn run_cell(cell: &Cell, cli: &Cli, scratch_root: &Path, seed: u64) -> CellResult {
-    let mut rng = StdRng::seed_from_u64(seed);
-    let mut oracle = Oracle::new();
-
-    let scratch = if cell.wal == Wal::On {
-        Some(ScratchDir::new(scratch_root))
-    } else {
-        None
-    };
-
-    let server = match Server::spawn(cell, scratch.as_ref().map(|s| s.path())) {
-        Ok(s) => s,
-        Err(_) => {
-            return CellResult {
-                cell: *cell,
-                ops: 0,
-                correctness: "SPAWN_ERR",
-                fault_injection: "SKIP",
-                metrics_ok: false,
-                ns_per_op: f64::INFINITY,
-                ops_per_sec: 0.0,
-                seed,
-            };
-        }
-    };
-
-    if server.wait_ready().is_err() {
-        return CellResult {
-            cell: *cell,
-            ops: 0,
-            correctness: "TIMEOUT",
-            fault_injection: "SKIP",
-            metrics_ok: false,
-            ns_per_op: f64::INFINITY,
-            ops_per_sec: 0.0,
-            seed,
-        };
+fn cell_error(cell: &Cell, seed: u64, correctness: &'static str) -> CellResult {
+    CellResult {
+        cell: *cell,
+        ops: 0,
+        correctness,
+        fault_injection: "SKIP",
+        metrics_ok: false,
+        ns_per_op: f64::INFINITY,
+        ops_per_sec: 0.0,
+        seed,
     }
+}
 
-    let mut conn = match Conn::open(&server.addr, cell.transport, cell.auth) {
-        Ok(c) => c,
-        Err(_) => {
-            return CellResult {
-                cell: *cell,
-                ops: 0,
-                correctness: "CONN_ERR",
-                fault_injection: "SKIP",
-                metrics_ok: false,
-                ns_per_op: f64::INFINITY,
-                ops_per_sec: 0.0,
-                seed,
-            };
-        }
-    };
-
-    let setup_cmds = [
-        "CREATE DATABASE default",
-        &format!("CREATE LENS {LENS} int"),
-    ];
-    for cmd in setup_cmds {
+fn setup_cell(cell: &Cell, scratch_path: Option<&Path>, seed: u64) -> Result<(Server, Conn), CellResult> {
+    let server = Server::spawn(cell, scratch_path)
+        .map_err(|_| cell_error(cell, seed, "SPAWN_ERR"))?;
+    server
+        .wait_ready()
+        .map_err(|_| cell_error(cell, seed, "TIMEOUT"))?;
+    let mut conn = Conn::open(&server.addr, cell.transport, cell.auth)
+        .map_err(|_| cell_error(cell, seed, "CONN_ERR"))?;
+    for cmd in ["CREATE DATABASE default", &format!("CREATE LENS {LENS} int")] {
         if conn.send(cmd).is_err() {
-            return CellResult {
-                cell: *cell,
-                ops: 0,
-                correctness: "SETUP_ERR",
-                fault_injection: "SKIP",
-                metrics_ok: false,
-                ns_per_op: f64::INFINITY,
-                ops_per_sec: 0.0,
-                seed,
-            };
+            return Err(cell_error(cell, seed, "SETUP_ERR"));
         }
     }
+    Ok((server, conn))
+}
 
+fn execute_append_and_verify(
+    conn: &mut Conn,
+    oracle: &mut Oracle,
+    rng: &mut StdRng,
+    time_cursor: &mut i64,
+    append_count: &mut u64,
+    op_idx: usize,
+) -> Option<&'static str> {
+    let batch_size = rng_usize(rng, 1, 5);
+    let mut segs: Vec<(i64, i64, i64)> = Vec::with_capacity(batch_size);
+    let mut cur = *time_cursor;
+    for _ in 0..batch_size {
+        let advance = rng_range(rng, 1_000_000, 100_000_000);
+        let s = cur + advance;
+        let e = s + rng_range(rng, 1, 10_000_001);
+        let v = rng_range(rng, i32::MIN as i64, i32::MAX as i64);
+        segs.push((s, e, v));
+        cur = e;
+    }
+    *time_cursor = cur;
+
+    let mut stmt_text = format!("APPEND LENS {LENS}");
+    for (s, e, v) in &segs {
+        stmt_text.push_str(&format!(" {s} {e} {v},"));
+    }
+    stmt_text.pop();
+
+    let resp = match conn.send(&stmt_text) {
+        Ok(r) => r,
+        Err(_) => return Some("SEND_ERR"),
+    };
+    if !resp.starts_with("OK") {
+        return Some("APPEND_FAIL");
+    }
+    oracle.append(LENS, &segs);
+    *append_count += 1;
+
+    let check_t = segs[0].0;
+    let at_resp = match conn.send(&format!("AT LENS {LENS} {check_t}")) {
+        Ok(r) => r,
+        Err(_) => return Some("AT_ERR"),
+    };
+    let oracle_val = oracle.at(LENS, check_t);
+    if !verify_at_response(&at_resp, oracle_val) {
+        error!("op {op_idx}: AT mismatch at {check_t}: resp={at_resp:?} oracle={oracle_val:?}");
+        return Some("ORACLE_MISMATCH");
+    }
+
+    let range_start = rng_range(rng, 0, *time_cursor);
+    let range_end = range_start + rng_range(rng, 1, 100_000_001);
+    let range_resp = match conn.send(&format!("RANGE LENS {LENS} {range_start} {range_end}")) {
+        Ok(r) => r,
+        Err(_) => return Some("RANGE_ERR"),
+    };
+    if !verify_range_invariants(&range_resp, range_start, range_end) {
+        error!("op {op_idx}: RANGE invariant violated: {range_resp}");
+        return Some("RANGE_INVALID");
+    }
+    None
+}
+
+fn run_ops(
+    conn: &mut Conn,
+    oracle: &mut Oracle,
+    rng: &mut StdRng,
+    server: &Server,
+    cell: &Cell,
+    cli: &Cli,
+    scratch: Option<&ScratchDir>,
+) -> (&'static str, &'static str, u64, u64) {
     let mut correctness = "PASS";
     let mut fault_result = "PASS";
     let mut successful_ops: u64 = 0;
     let mut time_cursor: i64 = 0;
     let mut append_count: u64 = 0;
 
-    let t0 = Instant::now();
-
     for op_idx in 0..cli.ops {
-        // Fault injection every fault_interval ops.
-        if op_idx > 0 && op_idx % cli.fault_interval == 0 {
-            let inject_ok =
-                inject_fault(&mut conn, &server, cell, scratch.as_ref().map(|s| s.path()));
-            if !inject_ok {
-                fault_result = "FAIL";
-            }
+        if op_idx > 0
+            && op_idx % cli.fault_interval == 0
+            && !inject_fault(conn, server, cell, scratch.map(|s| s.path()))
+        {
+            fault_result = "FAIL";
         }
-
-        // Connection drop and reconnect every 200 ops.
         if op_idx > 0 && op_idx % 200 == 0 {
-            conn = match Conn::open(&server.addr, cell.transport, cell.auth) {
-                Ok(c) => c,
+            match Conn::open(&server.addr, cell.transport, cell.auth) {
+                Ok(c) => *conn = c,
                 Err(_) => {
                     correctness = "RECONNECT_ERR";
                     break;
                 }
-            };
-        }
-
-        // Batch append: 1-4 segments, each advancing time by 1M-100M units.
-        let batch_size = rng_usize(&mut rng, 1, 5);
-        let mut segs: Vec<(i64, i64, i64)> = Vec::with_capacity(batch_size);
-        let mut cur = time_cursor;
-        for _ in 0..batch_size {
-            let advance = rng_range(&mut rng, 1_000_000, 100_000_000);
-            let s = cur + advance;
-            let e = s + rng_range(&mut rng, 1, 10_000_001);
-            let v = rng_range(&mut rng, i32::MIN as i64, i32::MAX as i64);
-            segs.push((s, e, v));
-            cur = e;
-        }
-        time_cursor = cur;
-
-        let mut stmt_text = format!("APPEND LENS {LENS}");
-        for (s, e, v) in &segs {
-            stmt_text.push_str(&format!(" {s} {e} {v},"));
-        }
-        stmt_text.pop();
-
-        let resp = match conn.send(&stmt_text) {
-            Ok(r) => r,
-            Err(_) => {
-                correctness = "SEND_ERR";
-                break;
             }
-        };
-        if !resp.starts_with("OK") {
-            correctness = "APPEND_FAIL";
+        }
+        if let Some(err) =
+            execute_append_and_verify(conn, oracle, rng, &mut time_cursor, &mut append_count, op_idx)
+        {
+            correctness = err;
             break;
         }
-
-        oracle.append(LENS, &segs);
-        append_count += 1;
-
-        // Spot-check the first segment's start timestamp.
-        let check_t = segs[0].0;
-        let at_resp = match conn.send(&format!("AT LENS {LENS} {check_t}")) {
-            Ok(r) => r,
-            Err(_) => {
-                correctness = "AT_ERR";
-                break;
-            }
-        };
-        let oracle_val = oracle.at(LENS, check_t);
-        if !verify_at_response(&at_resp, oracle_val) {
-            error!("op {op_idx}: AT mismatch at {check_t}: resp={at_resp:?} oracle={oracle_val:?}");
-            correctness = "ORACLE_MISMATCH";
-            break;
-        }
-
-        // Verify RANGE invariants on a random window.
-        let range_start = rng_range(&mut rng, 0, time_cursor);
-        let range_end = range_start + rng_range(&mut rng, 1, 100_000_001);
-        let range_resp = match conn.send(&format!("RANGE LENS {LENS} {range_start} {range_end}")) {
-            Ok(r) => r,
-            Err(_) => {
-                correctness = "RANGE_ERR";
-                break;
-            }
-        };
-        if !verify_range_invariants(&range_resp, range_start, range_end) {
-            error!("op {op_idx}: RANGE invariant violated: {range_resp}");
-            correctness = "RANGE_INVALID";
-            break;
-        }
-
         successful_ops += 1;
     }
+    (correctness, fault_result, successful_ops, append_count)
+}
 
+fn run_cell(cell: &Cell, cli: &Cli, scratch_root: &Path, seed: u64) -> CellResult {
+    let mut rng = StdRng::seed_from_u64(seed);
+    let mut oracle = Oracle::new();
+    let scratch = (cell.wal == Wal::On).then(|| ScratchDir::new(scratch_root));
+
+    let (server, mut conn) =
+        match setup_cell(cell, scratch.as_ref().map(|s| s.path()), seed) {
+            Ok(v) => v,
+            Err(result) => return result,
+        };
+
+    let t0 = Instant::now();
+    let (correctness, fault_result, successful_ops, append_count) =
+        run_ops(&mut conn, &mut oracle, &mut rng, &server, cell, cli, scratch.as_ref());
     let elapsed = t0.elapsed();
+
     let ns_per_op = if successful_ops > 0 {
         elapsed.as_nanos() as f64 / successful_ops as f64
     } else {
         f64::INFINITY
     };
-    let ops_per_sec = if ns_per_op.is_finite() {
-        1e9 / ns_per_op
-    } else {
-        0.0
-    };
-
+    let ops_per_sec = if ns_per_op.is_finite() { 1e9 / ns_per_op } else { 0.0 };
     let metrics_ok = validate_metrics(&server, append_count);
 
     CellResult {
