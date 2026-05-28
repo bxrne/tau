@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head><title>tau</title>
+    <meta http-equiv="content-type" content="text/html; charset=utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1"><meta name="description" content="A time-series database built on immutable, layered temporal intervals."/>
+    <meta property="og:title" content="tau -&nbsp;Tau" />
+    <meta property="og:type" content="website"/><meta property="og:url" content="https:&#x2F;&#x2F;tau.bxrne.com&#x2F;"/><meta property="og:description" content="A time-series database built on immutable, layered temporal intervals."/>
+    <link rel="preload" href="https://tau.bxrne.com/assets/fonts/FiraCode-Regular.woff2" as="font" type="font/woff2" crossorigin="anonymous">
+    <link rel="preload" href="https://tau.bxrne.com/assets/fonts/FiraCode-Bold.woff2" as="font" type="font/woff2" crossorigin="anonymous">
+
+    <link rel="stylesheet" href="https://tau.bxrne.com/style.css?h=97e262212a0704163528">
+    <link rel="stylesheet" href=" https://tau.bxrne.com/color/orange.css?h=a5a5d7faf9d4bc3e0b18">
+    
+</head>
+    <body>
+        <div class="container">
+<header class="header">
+    <div class="header__inner">
+        <div class="header__logo">
+            <a href="https:&#x2F;&#x2F;tau.bxrne.com">
+    <div class="logo">
+        tau
+    </div>
+</a>
+        </div>
+        <div class="menu-trigger">menu</div>
+    </div>
+    
+    <nav class="menu">
+        <ul class="menu__inner menu__inner--desktop">
+            
+            
+                    <li>
+                        <a href="
+    
+        https://tau.bxrne.com/docs
+    
+">Docs</a>
+                    </li>
+                
+                    <li>
+                        <a href="
+    
+        https://tau.bxrne.com/posts
+    
+">Blog</a>
+                    </li>
+                
+            </ul>
+
+        <ul class="menu__inner menu__inner--mobile">
+            
+        <li>
+            <a href="
+    
+        https://tau.bxrne.com/docs
+    
+">Docs</a>
+        </li>
+        <li>
+            <a href="
+    
+        https://tau.bxrne.com/posts
+    
+">Blog</a>
+        </li>
+        </ul>
+    </nav>
+
+    </header>
+<div class="content"><div class="homepage-content">
+                            <h1 id="tau-the-time-series-database-that-remembers-everything">Tau — the time-series database that remembers everything</h1>
+<p>Most databases overwrite the past. Tau never does.</p>
+<p>Every value in Tau is a <strong>temporal interval</strong>: a fact that was true from time <code>A</code> to time <code>B</code>. When that fact changes, you append a correction on top of the existing data. The old record stays intact. The new layer wins at query time. You get the full correction history for free, and write-write conflicts disappear entirely.</p>
+<pre><code>CREATE DATABASE sensors
+CREATE LENS temperature float
+APPEND LENS temperature 0 3600 18.5, 3600 7200 21.0
+AT LENS temperature 1800        → VAL f18.5
+RANGE LENS temperature 0 7200  → RANGE 2; 0:3600:f18.5; 3600:7200:f21
+REDUCE LENS temperature 0 7200 USING avg  → VAL f19.75
+</code></pre>
+<hr />
+<h2 id="why-tau">Why Tau?</h2>
+<p><strong>Correction is the natural state of real data.</strong> Sensor readings drift. Financial prices get restated. Audit logs need amendments. Traditional databases model these as mutations — you update in place and the old value is gone. Tau models them as what they are: a newer layer superseding an older one. Nothing is lost. Everything is queryable.</p>
+<p><strong>No write-write conflicts.</strong> Because every write is an append, two concurrent clients writing to the same lens at the same time will both succeed. Resolution happens lazily at query time: newest layer wins. This means you can ingest out-of-order streams without locking or coordination.</p>
+<p><strong>Derived lenses are lazy and live.</strong> <code>DERIVE LENS fahrenheit AS celsius * 9.0 / 5.0 + 32.0</code> creates a virtual lens that evaluates its expression on demand. Nothing is materialised. It stays up to date automatically because it re-evaluates on every query.</p>
+<p><strong>Rolling window aggregations in expressions.</strong> <code>avg(cpu, -600, 0)</code> inside a <code>DERIVE</code> evaluates the time-weighted average of <code>cpu</code> over the 600-unit window ending at the query point. Use it to build threshold alerts, smoothed baselines, and anomaly detectors as first-class database objects.</p>
+<hr />
+<h2 id="what-it-is-and-isn-t">What it is (and isn't)</h2>
+<p>Tau is a <strong>purpose-built temporal store</strong> for append-only, correction-heavy time series. It is not a general-purpose relational database. There are no rows, no joins, no indexes. There are lenses (named temporal functions), expressions, and a five-function aggregation vocabulary that gets surprisingly far.</p>
+<p>If your data is "the CPU load was X from time T1 to T2" and you need to query "what was the load at noon" or "what was the 10-minute rolling average at noon", Tau is a direct fit. If you need joins across entity types or ad-hoc SQL, use something else.</p>
+<hr />
+<h2 id="get-started">Get started</h2>
+<pre><code data-lang="bash">cargo install --git https://github.com/bxrne/tau tau
+tau                   # in-memory server on 127.0.0.1:7070
+</code></pre>
+<p>Or with Docker:</p>
+<pre><code data-lang="bash">docker pull ghcr.io/bxrne/tau:latest
+docker run --rm -p 7070:7070 ghcr.io/bxrne/tau:latest
+</code></pre>
+<p>Connect with any TCP client, or use the included REPL:</p>
+<pre><code data-lang="bash">ctl
+τ: connect demo 127.0.0.1:7070
+τ: CREATE DATABASE demo
+τ: CREATE LENS cpu int
+τ: APPEND LENS cpu 0 60 45, 60 120 72
+τ: AT LENS cpu 30
+VAL i45
+</code></pre>
+<p>→ <a href="/docs/tutorials/local/">Full quick-start tutorial</a></p>
+<hr />
+<h2 id="key-features">Key features</h2>
+<table><thead><tr><th>Feature</th><th>What it means</th></tr></thead><tbody>
+<tr><td><strong>Immutable layers</strong></td><td>Corrections append; old data is never overwritten</td></tr>
+<tr><td><strong>Newest-layer-wins</strong></td><td>Query resolution is deterministic: the most recent layer covering a timestamp always wins</td></tr>
+<tr><td><strong>Derived lenses</strong></td><td>Lazy computed views over any expression; cycles detected at <code>DERIVE</code> time</td></tr>
+<tr><td><strong>Rolling aggregations</strong></td><td><code>avg</code>, <code>min</code>, <code>max</code>, <code>sum</code>, <code>count</code> over relative windows, first-class in expressions</td></tr>
+<tr><td><strong>TLS + auth</strong></td><td>Optional TLS (PEM or ephemeral self-signed) and Argon2id authentication with per-database CRUDA grants</td></tr>
+<tr><td><strong>WAL durability</strong></td><td>Per-statement fsync, AES-256-GCM encryption at rest</td></tr>
+<tr><td><strong>Prometheus metrics</strong></td><td>Per-statement counters, latency histograms, process gauges</td></tr>
+<tr><td><strong>DST tested</strong></td><td>Deterministic simulation tester covers compaction, WAL replay, auth, and fault injection across hundreds of millions of simulated operations</td></tr>
+</tbody></table>
+<hr />
+<h2 id="explore">Explore</h2>
+<ul>
+<li><a href="/docs/overview/">Overview</a> — data model, architecture, and design philosophy</li>
+<li><a href="/docs/tauql/">TauQL Reference</a> — complete language reference</li>
+<li><a href="/docs/examples/">Examples</a> — worked queries against real datasets</li>
+<li><a href="/docs/tutorials/local/">Tutorials</a> — step-by-step for local, Docker, and embedded use</li>
+<li><a href="/docs/configuration/">Configuration</a> — all server flags and environment variables</li>
+<li><a href="/docs/containers/">Containers</a> — Docker stack with Prometheus and Grafana</li>
+</ul>
+<hr />
+<p><em>Tau is open source under the <a rel="external" href="https://github.com/bxrne/tau/blob/master/LICENSE">PolyForm Noncommercial License</a>. Free for personal use, research, and education.</em></p>
+
+                        </div>
+<section class="posts"></section>
+</div>
+    <div class="pagination">
+        <div class="pagination__buttons">
+            </div>
+    </div>
+<footer class="footer">
+                    <div class="footer__inner"><div class="copyright copyright--user">Copyright Adam Byrne (https://github.com/bxrne/tau)</div>
+    <script type="text/javascript" src="https://tau.bxrne.com/assets/js/main.js"></script>
+</div>
+                    
+
+                </footer></div>
+    </body>
+</html>

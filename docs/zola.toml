@@ -1,0 +1,42 @@
+base_url = "https://tau.bxrne.com"
+title = "tau"
+description = "A time-series database built on immutable, layered temporal intervals."
+default_language = "en"
+theme = "zerm"
+compile_sass = true
+build_search_index = false
+taxonomies = [
+           {name = "tags"},
+           {name = "categories"},
+]
+
+[extra]
+author = "Adam Byrne"
+show_author = false
+show_categories = true
+show_tags = true
+theme_color = "orange"
+show_menu_items = 5
+
+full_width = false
+center = false
+
+# favicon = ""
+# og_preview_img = ""
+
+version = "0.0.0"  # injected by CI: scripts/inject-version.sh
+
+copyright = "Copyright Adam Byrne (https://github.com/bxrne/tau)"
+logo_text = "tau"
+logo_home_link = ""
+main_menu = [
+          {url="/docs/", name="Docs"},
+          {url="/posts/", name="Blog"},
+]
+
+menu_more = "show more"
+read_more = "read more"
+read_other_posts = "read other posts"
+enable_katex = false
+disqus = { enabled=false, short_name="" }
+ToC = true

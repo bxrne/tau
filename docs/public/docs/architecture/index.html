@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+    <title>Architecture - Adam Byrne</title>
+    
+    
+    <meta http-equiv="content-type" content="text/html; charset=utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1"><meta name="description" content="A time-series database built on immutable, layered temporal intervals. Architecture "/>
+    <meta property="og:title" content="tau -&nbsp;Architecture" />
+    <meta property="og:type" content="website"/><meta property="og:url" content="https:&#x2F;&#x2F;tau.bxrne.com&#x2F;docs&#x2F;architecture&#x2F;"/><meta property="og:description" content="A time-series database built on immutable, layered temporal intervals."/>
+    <link rel="preload" href="https://tau.bxrne.com/assets/fonts/FiraCode-Regular.woff2" as="font" type="font/woff2" crossorigin="anonymous">
+    <link rel="preload" href="https://tau.bxrne.com/assets/fonts/FiraCode-Bold.woff2" as="font" type="font/woff2" crossorigin="anonymous">
+
+    <link rel="stylesheet" href="https://tau.bxrne.com/style.css?h=97e262212a0704163528">
+    <link rel="stylesheet" href=" https://tau.bxrne.com/color/orange.css?h=a5a5d7faf9d4bc3e0b18">
+    
+</head>
+    <body>
+        <div class="container">
+<header class="header">
+    <div class="header__inner">
+        <div class="header__logo">
+            <a href="https:&#x2F;&#x2F;tau.bxrne.com">
+    <div class="logo">
+        tau
+    </div>
+</a>
+        </div>
+        <div class="menu-trigger">menu</div>
+    </div>
+    
+    <nav class="menu">
+        <ul class="menu__inner menu__inner--desktop">
+            
+            
+                    <li>
+                        <a href="
+    
+        https://tau.bxrne.com/docs
+    
+">Docs</a>
+                    </li>
+                
+                    <li>
+                        <a href="
+    
+        https://tau.bxrne.com/posts
+    
+">Blog</a>
+                    </li>
+                
+            </ul>
+
+        <ul class="menu__inner menu__inner--mobile">
+            
+        <li>
+            <a href="
+    
+        https://tau.bxrne.com/docs
+    
+">Docs</a>
+        </li>
+        <li>
+            <a href="
+    
+        https://tau.bxrne.com/posts
+    
+">Blog</a>
+        </li>
+        </ul>
+    </nav>
+
+    </header>
+<div class="content"><article class="post">
+        <header>
+            <h1 class="post-title">
+                <a href="https:&#x2F;&#x2F;tau.bxrne.com&#x2F;docs&#x2F;architecture&#x2F;">Architecture</a>
+            </h1>
+            
+    <div class="post-meta">
+        <span class="post-date">2024.01.06
+                </span>
+
+        <span class="post-author"></span>
+
+        
+
+    
+    </div>
+
+            
+    
+
+
+<div class="toc" id="nav-container">
+	<p class="toc-head">Table of Contents</p>
+		<div id="nav-content" >
+		<ul>
+		
+			<li>
+				<a href="https://tau.bxrne.com/docs/architecture/#architecture">Architecture</a>
+				
+					<ul>
+						
+							<li>
+								<a href="https://tau.bxrne.com/docs/architecture/#the-problem">The Problem</a>
+							</li>
+							
+						
+							<li>
+								<a href="https://tau.bxrne.com/docs/architecture/#primitives">Primitives</a>
+							</li>
+							
+								<ul>
+								
+									<li>
+										<a href="https://tau.bxrne.com/docs/architecture/#tau-v">Tau&lt;V&gt;</a>
+										
+									</li>
+								
+									<li>
+										<a href="https://tau.bxrne.com/docs/architecture/#layer-v">Layer&lt;V&gt;</a>
+										
+									</li>
+								
+									<li>
+										<a href="https://tau.bxrne.com/docs/architecture/#lens-v">Lens&lt;V&gt;</a>
+										
+									</li>
+								
+								</ul>
+							
+						
+							<li>
+								<a href="https://tau.bxrne.com/docs/architecture/#storage">Storage</a>
+							</li>
+							
+								<ul>
+								
+									<li>
+										<a href="https://tau.bxrne.com/docs/architecture/#backends">Backends</a>
+										
+									</li>
+								
+									<li>
+										<a href="https://tau.bxrne.com/docs/architecture/#write-ahead-log">Write-Ahead Log</a>
+										
+									</li>
+								
+									<li>
+										<a href="https://tau.bxrne.com/docs/architecture/#compaction">Compaction</a>
+										
+									</li>
+								
+								</ul>
+							
+						
+							<li>
+								<a href="https://tau.bxrne.com/docs/architecture/#database-and-executor">Database and Executor</a>
+							</li>
+							
+								<ul>
+								
+									<li>
+										<a href="https://tau.bxrne.com/docs/architecture/#database-v">Database&lt;V&gt;</a>
+										
+									</li>
+								
+									<li>
+										<a href="https://tau.bxrne.com/docs/architecture/#executor">Executor</a>
+										
+									</li>
+								
+								</ul>
+							
+						
+							<li>
+								<a href="https://tau.bxrne.com/docs/architecture/#query-language">Query Language</a>
+							</li>
+							
+						
+							<li>
+								<a href="https://tau.bxrne.com/docs/architecture/#server">Server</a>
+							</li>
+							
+								<ul>
+								
+									<li>
+										<a href="https://tau.bxrne.com/docs/architecture/#protocol">Protocol</a>
+										
+									</li>
+								
+									<li>
+										<a href="https://tau.bxrne.com/docs/architecture/#concurrency">Concurrency</a>
+										
+									</li>
+								
+									<li>
+										<a href="https://tau.bxrne.com/docs/architecture/#connection-capacity">Connection capacity</a>
+										
+									</li>
+								
+								</ul>
+							
+						
+							<li>
+								<a href="https://tau.bxrne.com/docs/architecture/#design-decisions">Design Decisions</a>
+							</li>
+							
+								<ul>
+								
+									<li>
+										<a href="https://tau.bxrne.com/docs/architecture/#immutable-layers-over-in-place-mutation">Immutable layers over in-place mutation</a>
+										
+									</li>
+								
+									<li>
+										<a href="https://tau.bxrne.com/docs/architecture/#no-transaction-syntax">No transaction syntax</a>
+										
+									</li>
+								
+									<li>
+										<a href="https://tau.bxrne.com/docs/architecture/#exec-vs-exec-as-split">exec vs exec_as split</a>
+										
+									</li>
+								
+									<li>
+										<a href="https://tau.bxrne.com/docs/architecture/#arc-backed-layers">Arc-backed layers</a>
+										
+									</li>
+								
+									<li>
+										<a href="https://tau.bxrne.com/docs/architecture/#wal-first-ordering">WAL-first ordering</a>
+										
+									</li>
+								
+									<li>
+										<a href="https://tau.bxrne.com/docs/architecture/#thread-per-connection-instead-of-async">Thread-per-connection instead of async</a>
+										
+									</li>
+								
+									<li>
+										<a href="https://tau.bxrne.com/docs/architecture/#two-modes-in-dst">Two modes in dst</a>
+										
+									</li>
+								
+								</ul>
+							
+						
+					</ul>
+				
+			</li>
+		
+		</ul>
+		</div>
+</div>
+
+</header><h1 id="architecture">Architecture</h1>
+<p>Tau is a time-series database for recording how values change over time. It is not a general-purpose relational store — no rows, no tables, no indexes. Only temporal intervals, a query language built around them, and a storage model that makes correction cheap.</p>
+<p>This document describes <em>why</em> Tau is built the way it is, not just how it works. Decisions that might look odd from the outside have reasons. Knowing the reasons lets you contribute without fighting the grain of the design.</p>
+<hr />
+<h2 id="the-problem">The Problem</h2>
+<p>Most databases assume a row represents current truth. To record history you add timestamps, but the model stays mutation-oriented: an update replaces the old value.</p>
+<p>Tau starts from the opposite assumption. Every fact has a time range over which it was true. A measurement saying "temperature was 22 °C from noon to 1 pm" is a first-class value, not a derived view. Updating it means appending a correction: a new layer covering some or all of the same range with a newer value. The old layer is never touched.</p>
+<p>This makes Tau correct by default for append-only workloads:</p>
+<ul>
+<li>Sensor streams where values arrive out of order</li>
+<li>Financial time series where prices are restated</li>
+<li>Audit trails where the history of corrections is itself interesting</li>
+</ul>
+<p>The cost is that every query must resolve which layer wins at each point in time. That resolution logic is the sweep-line compaction algorithm and the layered query model.</p>
+<hr />
+<h2 id="primitives">Primitives</h2>
+<h3 id="tau-v"><code>Tau&lt;V&gt;</code></h3>
+<p>An atomic temporal fact: value <code>V</code> is true over the half-open interval <code>[start, end)</code>.</p>
+<pre><code>Tau { start: i64, end: i64, value: V }
+</code></pre>
+<p>The half-open interval is intentional. Adjacent intervals tile cleanly: <code>[0, 10)</code> and <code>[10, 20)</code> cover <code>[0, 20)</code> with no overlap and no gap. Equality on the boundary belongs unambiguously to the later interval.</p>
+<p><code>Tau::new</code> asserts <code>start &lt; end</code>. There are no zero-width taus.</p>
+<p>Timestamps are <code>i64</code> — nanoseconds, milliseconds, or any other unit the caller agrees on. Tau treats them as opaque ordered integers.</p>
+<h3 id="layer-v"><code>Layer&lt;V&gt;</code></h3>
+<p>A batch of taus that arrived together: a sorted, non-overlapping <code>Arc&lt;[Tau&lt;V&gt;]&gt;</code>.</p>
+<pre><code>Layer { id: u64, min_start: i64, max_end: i64, taus: Arc&lt;[Tau&lt;V&gt;]&gt; }
+</code></pre>
+<p>Layers are immutable once created. Cloning a layer is an atomic reference-count bump.</p>
+<p><code>min_start</code> and <code>max_end</code> are skip-check bounds. A point query for timestamp <code>t</code> can skip an entire layer with two comparisons (<code>t &lt; min_start || t &gt;= max_end</code>) before touching the data.</p>
+<p>Within the slice, a binary search — <code>partition_point</code> on <code>tau.end &lt;= t</code> — locates the candidate in O(log n).</p>
+<h3 id="lens-v"><code>Lens&lt;V&gt;</code></h3>
+<p>A named temporal function: either a <code>Base</code> lens backed by a store, or a <code>Derived</code> lens backed by a lazy closure.</p>
+<pre><code>Lens::Base          -- delegates to the store layer stack
+Lens::Derived(f)    -- f: Arc&lt;dyn Fn(Timestamp) -&gt; Option&lt;V&gt;&gt;
+</code></pre>
+<p>Derived lenses are closures compiled at <code>DERIVE</code> time. At query time they call <code>f(t)</code>. The closure captures references to other lenses so derivations chain: <code>DERIVE c AS a + b</code> compiles into a closure that calls the closures of <code>a</code> and <code>b</code>.</p>
+<p>Cycle detection runs at <code>DERIVE</code> time by walking the dependency graph.</p>
+<hr />
+<h2 id="storage">Storage</h2>
+<h3 id="backends">Backends</h3>
+<p><strong><code>InMemory</code></strong> — a <code>HashMap&lt;name, Vec&lt;Layer&lt;V&gt;&gt;&gt;</code> with no I/O. Used for tests and ephemeral workloads.</p>
+<p><strong><code>Disk</code></strong> — a binary file:</p>
+<pre><code>magic (3 bytes)  &quot;TAU&quot; (plaintext) or &quot;TAUE&quot; (encrypted)
+[entries...]
+  length (u32 LE)
+  crc32 (u32 LE) or nonce+tag (encrypted)
+  payload bytes
+</code></pre>
+<p>On open, the file is read entry by entry, integrity-checked, and replayed into the in-memory layer stack. The file handle stays open in append mode.</p>
+<p>Encryption is AES-256-GCM with a random 12-byte nonce per entry. The key is never stored — it must be supplied via <code>TAU_ENCRYPTION_KEY</code> at startup. The <code>TAUE</code> magic prevents accidentally opening an encrypted file without a key.</p>
+<h3 id="write-ahead-log">Write-Ahead Log</h3>
+<p>The WAL sits between the caller and the store. Every mutation writes to the WAL first, fsyncs, then writes to the store. On startup the WAL is replayed before the store is opened.</p>
+<p>WAL entries are line-oriented text:</p>
+<pre><code>&lt;crc32hex&gt; &lt;base64-payload&gt;        -- data entry
+S:&lt;checksum&gt; &lt;CREATE LENS ...&gt;     -- schema DDL
+SE:&lt;crc32hex&gt; &lt;base64-encrypted&gt;   -- encrypted schema DDL
+</code></pre>
+<p>Schema entries carry the raw TauQL text of <code>CREATE LENS</code> and <code>DERIVE LENS</code>. On replay, these are re-parsed and executed with <code>in_replay = true</code>, which suppresses re-appending them to the WAL.</p>
+<p>The WAL is checkpointed after compaction: a fresh snapshot of in-memory state is written to a new file and swapped in, bounding disk usage.</p>
+<h3 id="compaction">Compaction</h3>
+<p>Each base lens accumulates layers over time. A point query must walk layers newest-first until it finds a covering tau. With many layers this is linear in the layer count.</p>
+<p>Auto-compaction fires when a lens exceeds a threshold (default: 4 layers). It runs a sweep-line algorithm over all layers:</p>
+<ol>
+<li>Build a list of start/end events, one pair per tau across all layers.</li>
+<li>Sort events by timestamp; ends before starts at ties.</li>
+<li>Walk events. A max-heap keyed by <code>(layer_idx, tau_idx)</code> tracks which layers are active at each point. The layer with the highest index (newest) wins.</li>
+<li>Emit a merged segment whenever the winning value changes.</li>
+</ol>
+<p>This is O(E log E) where E is the total number of taus. After compaction, the lens has exactly one layer.</p>
+<p><code>Store::append</code> returns a <code>bool</code> indicating whether compaction fired. The <code>Database</code> layer uses this to decide whether to WAL-checkpoint.</p>
+<hr />
+<h2 id="database-and-executor">Database and Executor</h2>
+<h3 id="database-v"><code>Database&lt;V&gt;</code></h3>
+<p><code>Database&lt;V&gt;</code> owns a <code>Store&lt;V&gt;</code> behind <code>RwLock</code> and an optional <code>Wal</code> behind <code>Mutex</code>. Append order is always:</p>
+<pre><code>WAL.write(entry) → WAL.fsync() → Store.append(layer)
+</code></pre>
+<p>A WAL fsync failure leaves the in-memory store unchanged — the entry is not committed. No partial-write window is visible to readers.</p>
+<h3 id="executor"><code>Executor</code></h3>
+<p><code>Executor</code> is the top-level query processor. It owns a <code>HashMap&lt;String, DbState&gt;</code> of named databases, an active-database pointer, and a <code>UserStore</code>.</p>
+<p>Each <code>DbState</code> carries:</p>
+<ul>
+<li>A <code>Database&lt;Value&gt;</code> (live store + WAL)</li>
+<li>A <code>HashMap&lt;name, Type&gt;</code> for base lens declarations</li>
+<li>A <code>HashMap&lt;name, Expr&gt;</code> for derived lens ASTs</li>
+<li>A monotonic <code>next_layer_id</code> counter</li>
+</ul>
+<p><strong>Two entry-point pairs:</strong></p>
+<p><code>exec</code> / <code>exec_read</code> — unrestricted. Used by library consumers, tests, and schema replay (<code>in_replay = true</code> prevents DDL from being re-appended).</p>
+<p><code>exec_as(stmt, caller)</code> / <code>exec_read_as(stmt, caller)</code> — looks up <code>caller</code> in <code>self.users</code>, calls <code>check_permission</code>, then delegates. Used by the TCP server for every authenticated session. <code>SHOW DATABASES</code> is post-filtered to only databases the caller holds any grant on.</p>
+<p>The split is intentional: embedding Tau as a library bypasses auth entirely. Auth is a server concern, not an engine concern.</p>
+<hr />
+<h2 id="query-language">Query Language</h2>
+<p>TauQL is a line-oriented command language: one statement in, one response line out. The grammar is minimal — no implicit join, no subquery, no transaction syntax.</p>
+<p>The parser is a <code>nom</code> combinator in <code>libtau::ql::parser</code>. Adding a new statement requires changes to four files: <code>ast.rs</code> (new variant + <code>Display</code>), <code>parser.rs</code> (production + <code>alt</code> entry), <code>executor.rs</code> (handler + <code>check_permission</code> arm), and <code>bin/tau/main.rs</code> (output formatter).</p>
+<p>Operator precedence from low to high: <code>||</code>, <code>&amp;&amp;</code>, comparison, additive, multiplicative, unary, primary.</p>
+<hr />
+<h2 id="server">Server</h2>
+<h3 id="protocol">Protocol</h3>
+<p>Line-oriented text: one TauQL statement per line in, one response line out.</p>
+<h3 id="concurrency">Concurrency</h3>
+<p>Each accepted connection runs on its own OS thread. All threads share one <code>Arc&lt;RwLock&lt;Executor&gt;&gt;</code>. Read-only statements take the read lock and run concurrently. Write statements take the exclusive write lock.</p>
+<p>This is simple and correct. The tradeoff: a slow write (e.g. WAL fsync on a slow disk) blocks all concurrent reads. For write-heavy workloads this can be a bottleneck; a per-database lock would improve write-read concurrency but adds complexity.</p>
+<h3 id="connection-capacity">Connection capacity</h3>
+<p><code>--max-connections N</code> (default 1024) caps concurrent client threads. Connections beyond the cap receive <code>ERR server at connection limit</code>. The accept loop tracks in-flight work with a single <code>AtomicUsize</code>.</p>
+<p><code>--idle-timeout-secs SECS</code> (default 300) installs a per-socket read/write timeout.</p>
+<hr />
+<h2 id="design-decisions">Design Decisions</h2>
+<h3 id="immutable-layers-over-in-place-mutation">Immutable layers over in-place mutation</h3>
+<p>Mutation would require finding and splitting or replacing existing taus. With immutable layers, a correction is an append. The WAL writes one new entry. The in-memory state gains one new layer. The old data is untouched.</p>
+<p>The tradeoff is query cost: O(log n) per layer rather than O(log n) total. Compaction restores O(log n) by collapsing layers.</p>
+<h3 id="no-transaction-syntax">No transaction syntax</h3>
+<p>Tau does not expose transactions. The WAL provides durability; compaction provides space reclamation. Both happen automatically. Multi-statement atomicity would require locking, MVCC, or 2PC, none of which fit the single-writer append-only model cheaply.</p>
+<p>If multiple appends must land atomically, batch them: <code>APPEND LENS x 0 10 1, 10 20 2</code> is a single layer and a single WAL entry.</p>
+<h3 id="exec-vs-exec-as-split"><code>exec</code> vs <code>exec_as</code> split</h3>
+<p>Auth is a transport concern. A Tau binary embedded in another process, reading sensor data directly, has no need for network authentication. Keeping the auth check out of <code>exec</code> means embedded use never pays the overhead or requires a dummy user.</p>
+<h3 id="arc-backed-layers">Arc-backed layers</h3>
+<p>Layer data is immutable once created. Sharing it across the read path without copying is safe. A compacted layer replaces the old stack atomically; concurrent readers holding references to old layers read consistent data until they finish.</p>
+<h3 id="wal-first-ordering">WAL-first ordering</h3>
+<p>Writing to the WAL before writing to the store means a crash between the two leaves an entry that replays on next startup, completing the write. The only risk is a duplicate replay, which the idempotent <code>append</code> semantics handle: replaying a layer that already exists adds it again, but the query result is identical (newest-layer-wins picks the same value either way).</p>
+<h3 id="thread-per-connection-instead-of-async">Thread-per-connection instead of async</h3>
+<p>The server uses <code>std::thread</code> rather than Tokio or async-std. For a database server where each connection is long-lived and query processing is CPU-bound (compaction, expression evaluation) rather than I/O-bound, synchronous threads are simpler to reason about. Async would complicate the <code>RwLock</code> usage without a clear throughput gain for the expected connection counts.</p>
+<h3 id="two-modes-in-dst">Two modes in <code>dst</code></h3>
+<p><code>dst</code> serves as both the correctness tester and the performance measurement tool. In full mode it spawns real server processes across all config combinations. In embedded mode (<code>--quick</code>) it uses the library executor directly, covering centuries of simulated time without I/O overhead. The same seed printed at startup makes any failure reproducible from a single flag.</p>
+
+
+        
+    
+
+        
+        
+    </article></div>
+    <div class="pagination">
+        <div class="pagination__buttons">
+            </div>
+    </div>
+<footer class="footer">
+                    <div class="footer__inner"><div class="copyright copyright--user">Copyright Adam Byrne (https://github.com/bxrne/tau)</div>
+    <script type="text/javascript" src="https://tau.bxrne.com/assets/js/main.js"></script>
+</div>
+                    
+
+                </footer></div>
+    </body>
+</html>

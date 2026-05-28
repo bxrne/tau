@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+    <title>Docker Tutorial - Adam Byrne</title>
+    
+    
+    <meta http-equiv="content-type" content="text/html; charset=utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1"><meta name="description" content="A time-series database built on immutable, layered temporal intervals. Docker Tutorial "/>
+    <meta property="og:title" content="tau -&nbsp;Docker Tutorial" />
+    <meta property="og:type" content="website"/><meta property="og:url" content="https:&#x2F;&#x2F;tau.bxrne.com&#x2F;docs&#x2F;tutorials&#x2F;docker&#x2F;"/><meta property="og:description" content="A time-series database built on immutable, layered temporal intervals."/>
+    <link rel="preload" href="https://tau.bxrne.com/assets/fonts/FiraCode-Regular.woff2" as="font" type="font/woff2" crossorigin="anonymous">
+    <link rel="preload" href="https://tau.bxrne.com/assets/fonts/FiraCode-Bold.woff2" as="font" type="font/woff2" crossorigin="anonymous">
+
+    <link rel="stylesheet" href="https://tau.bxrne.com/style.css?h=97e262212a0704163528">
+    <link rel="stylesheet" href=" https://tau.bxrne.com/color/orange.css?h=a5a5d7faf9d4bc3e0b18">
+    
+</head>
+    <body>
+        <div class="container">
+<header class="header">
+    <div class="header__inner">
+        <div class="header__logo">
+            <a href="https:&#x2F;&#x2F;tau.bxrne.com">
+    <div class="logo">
+        tau
+    </div>
+</a>
+        </div>
+        <div class="menu-trigger">menu</div>
+    </div>
+    
+    <nav class="menu">
+        <ul class="menu__inner menu__inner--desktop">
+            
+            
+                    <li>
+                        <a href="
+    
+        https://tau.bxrne.com/docs
+    
+">Docs</a>
+                    </li>
+                
+                    <li>
+                        <a href="
+    
+        https://tau.bxrne.com/posts
+    
+">Blog</a>
+                    </li>
+                
+            </ul>
+
+        <ul class="menu__inner menu__inner--mobile">
+            
+        <li>
+            <a href="
+    
+        https://tau.bxrne.com/docs
+    
+">Docs</a>
+        </li>
+        <li>
+            <a href="
+    
+        https://tau.bxrne.com/posts
+    
+">Blog</a>
+        </li>
+        </ul>
+    </nav>
+
+    </header>
+<div class="content"><article class="post">
+        <header>
+            <h1 class="post-title">
+                <a href="https:&#x2F;&#x2F;tau.bxrne.com&#x2F;docs&#x2F;tutorials&#x2F;docker&#x2F;">Docker Tutorial</a>
+            </h1>
+            
+    <div class="post-meta">
+        <span class="post-date">2024.01.09
+                </span>
+
+        <span class="post-author"></span>
+
+        
+
+    
+    </div>
+
+            
+    
+
+
+<div class="toc" id="nav-container">
+	<p class="toc-head">Table of Contents</p>
+		<div id="nav-content" >
+		<ul>
+		
+			<li>
+				<a href="https://tau.bxrne.com/docs/tutorials/docker/#docker-tutorial">Docker Tutorial</a>
+				
+					<ul>
+						
+							<li>
+								<a href="https://tau.bxrne.com/docs/tutorials/docker/#1-get-the-stack">1. Get the stack</a>
+							</li>
+							
+						
+							<li>
+								<a href="https://tau.bxrne.com/docs/tutorials/docker/#2-configure-secrets">2. Configure secrets</a>
+							</li>
+							
+						
+							<li>
+								<a href="https://tau.bxrne.com/docs/tutorials/docker/#3-start-the-stack">3. Start the stack</a>
+							</li>
+							
+						
+							<li>
+								<a href="https://tau.bxrne.com/docs/tutorials/docker/#4-connect-and-query">4. Connect and query</a>
+							</li>
+							
+						
+							<li>
+								<a href="https://tau.bxrne.com/docs/tutorials/docker/#5-load-example-data">5. Load example data</a>
+							</li>
+							
+						
+							<li>
+								<a href="https://tau.bxrne.com/docs/tutorials/docker/#6-open-grafana">6. Open Grafana</a>
+							</li>
+							
+						
+							<li>
+								<a href="https://tau.bxrne.com/docs/tutorials/docker/#7-enable-tls">7. Enable TLS</a>
+							</li>
+							
+						
+							<li>
+								<a href="https://tau.bxrne.com/docs/tutorials/docker/#8-enable-encryption-at-rest">8. Enable encryption at rest</a>
+							</li>
+							
+						
+							<li>
+								<a href="https://tau.bxrne.com/docs/tutorials/docker/#9-stop-and-reset">9. Stop and reset</a>
+							</li>
+							
+						
+							<li>
+								<a href="https://tau.bxrne.com/docs/tutorials/docker/#troubleshooting">Troubleshooting</a>
+							</li>
+							
+						
+					</ul>
+				
+			</li>
+		
+		</ul>
+		</div>
+</div>
+
+</header><h1 id="docker-tutorial">Docker Tutorial</h1>
+<p>Run Tau with Prometheus and Grafana using Docker Compose. This tutorial produces a production-ready observability stack in under five minutes.</p>
+<p><strong>Prerequisites:</strong> Docker 24+, Docker Compose v2.</p>
+<hr />
+<h2 id="1-get-the-stack">1. Get the stack</h2>
+<pre><code data-lang="bash">git clone https://github.com/bxrne/tau
+cd tau/container
+</code></pre>
+<p>Or just pull the image directly:</p>
+<pre><code data-lang="bash">docker pull ghcr.io/bxrne/tau:latest
+</code></pre>
+<hr />
+<h2 id="2-configure-secrets">2. Configure secrets</h2>
+<pre><code data-lang="bash">cp .env.example .env
+</code></pre>
+<p>Edit <code>.env</code> and set at minimum:</p>
+<pre><code data-lang="env">TAU_PASSWORD=your_strong_password_here
+GRAFANA_PASSWORD=another_strong_password
+</code></pre>
+<p>Other useful settings:</p>
+<pre><code data-lang="env">TAU_IMAGE_TAG=latest          # or pin to a release: v0.1.0
+TAU_ENCRYPTION_KEY=           # 64 hex chars for encryption at rest
+TAU_LOG_LEVEL=info
+</code></pre>
+<hr />
+<h2 id="3-start-the-stack">3. Start the stack</h2>
+<pre><code data-lang="bash">docker compose up -d
+</code></pre>
+<p>This starts:</p>
+<table><thead><tr><th>service</th><th>port</th><th>purpose</th></tr></thead><tbody>
+<tr><td><code>tau</code></td><td><code>7070</code></td><td>TCP query server</td></tr>
+<tr><td><code>tau</code></td><td><code>9090</code></td><td>Prometheus metrics</td></tr>
+<tr><td><code>prometheus</code></td><td><code>19090</code></td><td>Prometheus UI</td></tr>
+<tr><td><code>grafana</code></td><td><code>3000</code></td><td>Grafana dashboards</td></tr>
+</tbody></table>
+<p>Check everything is running:</p>
+<pre><code data-lang="bash">docker compose ps
+curl http://localhost:9090/healthz    # → ok
+</code></pre>
+<hr />
+<h2 id="4-connect-and-query">4. Connect and query</h2>
+<p>Install and run tauctl, or build from source:</p>
+<pre><code data-lang="bash">cargo run --release --bin ctl
+
+τ: connect prod 127.0.0.1:7070 admin &lt;your TAU_PASSWORD&gt;
+connected to 127.0.0.1:7070 as prod (plain)
+[ok in 8ms]
+
+τ: CREATE DATABASE sensors
+τ: CREATE LENS temperature float
+τ: APPEND LENS temperature 0 3600 18.5, 3600 7200 21.0
+τ: AT LENS temperature 1800
+VAL f18.5
+</code></pre>
+<hr />
+<h2 id="5-load-example-data">5. Load example data</h2>
+<p>Ship a CSV from your local machine into the containerised server:</p>
+<pre><code data-lang="bash">τ: CREATE DATABASE metrics
+τ: CREATE LENS cpu int
+τ: load cpu examples/data/cpu-load.csv
+loaded 1440 rows into cpu (6 chunks)
+</code></pre>
+<p>The <code>load</code> command reads the file from your local filesystem and ships it as batched <code>APPEND</code> statements over the active TCP connection — no file access required on the server side.</p>
+<p>Alternatively, copy the file into the Docker volume and use server-side <code>COPY</code>:</p>
+<pre><code data-lang="bash">docker run --rm \
+  -v container_tau_data:/data \
+  -v &quot;$PWD/examples/data:/src:ro&quot; \
+  alpine cp /src/cpu-load.csv /data/cpu-load.csv
+
+# then:
+τ: COPY LENS cpu FROM &quot;/data/cpu-load.csv&quot;
+</code></pre>
+<hr />
+<h2 id="6-open-grafana">6. Open Grafana</h2>
+<p>Visit <code>http://localhost:3000</code> and log in with <code>admin</code> / <code>&lt;your GRAFANA_PASSWORD&gt;</code>.</p>
+<p>The provisioned dashboard (<code>tau-db-prod</code>) shows:</p>
+<ul>
+<li>Statement throughput by type</li>
+<li>Latency histograms (p50/p95/p99)</li>
+<li>Error rates and auth failure rates</li>
+<li>Memory, file descriptors, uptime</li>
+</ul>
+<hr />
+<h2 id="7-enable-tls">7. Enable TLS</h2>
+<p>Create a <code>certs/</code> directory inside <code>container/</code> and place your PEM files there:</p>
+<pre><code data-lang="bash">mkdir container/certs
+cp server.crt server.key container/certs/
+</code></pre>
+<p>In <code>.env</code>:</p>
+<pre><code data-lang="env">TAU_TLS=--tls --tls-cert /certs/server.crt --tls-key /certs/server.key
+</code></pre>
+<p>Restart:</p>
+<pre><code data-lang="bash">docker compose up -d tau
+</code></pre>
+<p>Connect with TLS:</p>
+<pre><code>τ: connect prod 127.0.0.1:7070 tls admin &lt;pass&gt;
+</code></pre>
+<p>For dev without a real cert, <code>TAU_TLS=--tls</code> generates an ephemeral self-signed cert. tauctl accepts it by design.</p>
+<hr />
+<h2 id="8-enable-encryption-at-rest">8. Enable encryption at rest</h2>
+<p>Generate a key:</p>
+<pre><code data-lang="bash">openssl rand -hex 32
+</code></pre>
+<p>Add to <code>.env</code>:</p>
+<pre><code data-lang="env">TAU_ENCRYPTION_KEY=&lt;64-char hex string&gt;
+</code></pre>
+<p>Restart Tau:</p>
+<pre><code data-lang="bash">docker compose up -d tau
+</code></pre>
+<p>All subsequent WAL entries are AES-256-GCM encrypted. Keep the key in a secrets manager — a WAL written with the key cannot be read without it.</p>
+<hr />
+<h2 id="9-stop-and-reset">9. Stop and reset</h2>
+<pre><code data-lang="bash"># Stop and keep data
+docker compose down
+
+# Stop and remove all data volumes
+docker compose down -v
+</code></pre>
+<hr />
+<h2 id="troubleshooting">Troubleshooting</h2>
+<p><strong>Tau fails to start:</strong></p>
+<pre><code data-lang="bash">docker compose logs tau
+</code></pre>
+<p>Most common causes: port 7070 already in use, <code>.env</code> file missing, malformed <code>TAU_ENCRYPTION_KEY</code>.</p>
+<p><strong>Cannot connect from tauctl:</strong></p>
+<ul>
+<li>Verify port mapping: <code>docker compose ps</code> should show <code>0.0.0.0:7070-&gt;7070/tcp</code></li>
+<li>Check auth: use the password from <code>.env</code></li>
+</ul>
+<p><strong>Grafana shows no data:</strong></p>
+<ul>
+<li>Confirm Prometheus is scraping: <code>http://localhost:19090/targets</code></li>
+<li>Wait 30 seconds after first connection for metrics to accumulate</li>
+</ul>
+
+
+        
+    
+
+        
+        
+    </article></div>
+    <div class="pagination">
+        <div class="pagination__buttons">
+            </div>
+    </div>
+<footer class="footer">
+                    <div class="footer__inner"><div class="copyright copyright--user">Copyright Adam Byrne (https://github.com/bxrne/tau)</div>
+    <script type="text/javascript" src="https://tau.bxrne.com/assets/js/main.js"></script>
+</div>
+                    
+
+                </footer></div>
+    </body>
+</html>
