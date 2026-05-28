@@ -50,7 +50,7 @@ cargo run --release --bin dst -- --scratch /var/tmp/tau --out results.csv
 | `--scratch DIR` | $TMPDIR | WAL scratch directory (use a real disk path for accurate fsync timing) |
 | `--out PATH` | none | Write CSV results to path |
 | `--label NAME` | run | Tag attached to every CSV row |
-| `--verbose` | off | Print every operation |
+| `--log-level LEVEL` | info | `tracing` log level (error, warn, info, debug, trace) |
 
 ## Oracle
 

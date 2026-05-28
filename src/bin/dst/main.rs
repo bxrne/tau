@@ -25,7 +25,8 @@
 //!   --scratch DIR        Directory for WAL files (default: $TMPDIR)
 //!   --out PATH           Write CSV results to PATH
 //!   --label NAME         Tag every CSV row (default: "run")
-//!   --verbose            Print every operation
+//!   --log-level LEVEL      Log level for tracing (default: info; options: error, warn, info,
+//!   debug, trace)
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -50,8 +51,8 @@ use rustls::StreamOwned;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, SignatureScheme};
-
 use tau::{Executor, Output, Value, parse};
+use tracing::{error, info, trace};
 
 const SIM_USER: &str = "dst";
 const SIM_PASS: &str = "dst_sim_pass_1";
@@ -87,12 +88,17 @@ struct Cli {
     #[arg(long, default_value = "run")]
     label: String,
 
-    #[arg(long)]
-    verbose: bool,
+    // log level: for tracing
+    #[arg(long, default_value = "info", value_enum)]
+    log_level: tracing::Level,
 }
 
 fn main() {
     let cli = Cli::parse();
+    tracing_subscriber::fmt()
+        .with_max_level(cli.log_level)
+        .with_target(false)
+        .init();
     let seed = cli.seed.unwrap_or_else(|| {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -158,22 +164,22 @@ fn rng_usize(rng: &mut StdRng, lo: usize, hi: usize) -> usize {
 // Embedded simulation (quick mode)
 
 fn run_embedded(seed: u64, cli: &Cli) {
-    println!(
+    info!(
         "dst embedded: seed={seed:#018x} duration={}s readers={}",
         cli.duration, cli.readers
     );
 
     let result = std::panic::catch_unwind(|| embedded_sim(seed, cli));
     match result {
-        Ok(()) => println!("dst embedded: PASS"),
+        Ok(()) => info!("dst embedded: PASS"),
         Err(e) => {
             let msg = e
                 .downcast_ref::<String>()
                 .map(|s| s.as_str())
                 .or_else(|| e.downcast_ref::<&str>().copied())
                 .unwrap_or("unknown panic");
-            eprintln!("dst embedded: FAIL  seed={seed:#018x}  {msg}");
-            eprintln!("Reproduce: cargo run --release --bin dst -- --quick --seed {seed}");
+            error!("dst embedded: FAIL  seed={seed:#018x}  {msg}");
+            error!("Reproduce: cargo run --release --bin dst -- --quick --seed {seed}");
             process::exit(1);
         }
     }
@@ -252,13 +258,13 @@ fn embedded_sim(seed: u64, cli: &Cli) {
             // AT query on a live lens.
             2..=4 if live[lens_idx] && time_cursor > 0 => {
                 let t = rng.gen_range(0..time_cursor);
-                embedded_check_at(&executor, &oracle, lens_name, t, cli.verbose, op_idx);
+                embedded_check_at(&executor, &oracle, lens_name, t, op_idx);
             }
             // RANGE query on a live lens.
             5..=6 if live[lens_idx] && time_cursor > 0 => {
                 let rs = rng.gen_range(0..time_cursor);
                 let re = rs + rng_range(&mut rng, 1, (time_cursor / 10).max(2));
-                embedded_check_range(&executor, lens_name, rs, re, cli.verbose, op_idx);
+                embedded_check_range(&executor, lens_name, rs, re, op_idx);
             }
             // Batch append: 1-8 non-overlapping segments, big time advances.
             _ if live[lens_idx] => {
@@ -310,7 +316,7 @@ fn embedded_sim(seed: u64, cli: &Cli) {
 
     let simulated_years = (time_cursor as f64) / (365.25 * 24.0 * 3600.0 * 1_000.0);
     let segments = oracle.total_segments();
-    println!(
+    info!(
         "dst embedded: {total_ops} ops ({write_ops} writes), \
          {segments} segments stored, simulated {simulated_years:.0} years"
     );
@@ -328,7 +334,6 @@ fn embedded_check_at(
     oracle: &Oracle,
     lens: &str,
     t: i64,
-    verbose: bool,
     op_idx: u64,
 ) {
     let stmt = parse(&format!("AT LENS {lens} {t}")).expect("parse").1;
@@ -338,23 +343,14 @@ fn embedded_check_at(
         Output::Value(Some(Value::Int(i))) => Some(*i),
         _ => None,
     };
-    if verbose {
-        println!("  AT {lens} {t}: exec={exec_val:?} oracle={oracle_val:?}");
-    }
+    trace!("  AT {lens} {t}: exec={exec_val:?} oracle={oracle_val:?}");
     assert_eq!(
         exec_val, oracle_val,
         "op {op_idx}: AT LENS {lens} {t} diverged: executor={exec_val:?} oracle={oracle_val:?}"
     );
 }
 
-fn embedded_check_range(
-    exec: &Arc<RwLock<Executor>>,
-    lens: &str,
-    rs: i64,
-    re: i64,
-    verbose: bool,
-    op_idx: u64,
-) {
+fn embedded_check_range(exec: &Arc<RwLock<Executor>>, lens: &str, rs: i64, re: i64, op_idx: u64) {
     let stmt = parse(&format!("RANGE LENS {lens} {rs} {re}"))
         .expect("parse")
         .1;
@@ -387,9 +383,7 @@ fn embedded_check_range(
         }
         prev_end = Some(e);
     }
-    if verbose {
-        println!("  RANGE {lens} {rs}..{re}: {} segments", segs.len());
-    }
+    trace!("  RANGE {lens} {rs}..{re}: {} segments", segs.len());
 }
 
 fn embedded_concurrent_burst(
@@ -497,19 +491,19 @@ fn run_full(seed: u64, cli: &Cli) {
 
     let tau_bin = tau_binary();
     if !tau_bin.exists() {
-        eprintln!("error: tau binary not found at {tau_bin:?}. Build with: cargo build --release");
+        error!("error: tau binary not found at {tau_bin:?}. Build with: cargo build --release");
         process::exit(1);
     }
 
     let cells = build_grid();
 
-    println!(
+    info!(
         "dst full: seed={seed:#018x} cells={} ops={} fault-interval={}",
         cells.len(),
         cli.ops,
         cli.fault_interval
     );
-    println!(
+    info!(
         "{:<8} {:<10} {:<5} {:<14} {:<14} {:<8} {:<14} {:<14}",
         "transp", "auth", "wal", "correctness", "faults", "metrics", "ns/op", "ops/s"
     );
@@ -521,7 +515,7 @@ fn run_full(seed: u64, cli: &Cli) {
             (cell.transport as u64) << 16 | (cell.auth as u64) << 8 | (cell.wal as u64),
         );
         let result = run_cell(cell, cli, &scratch_root, cell_seed);
-        println!(
+        trace!(
             "{:<8} {:<10} {:<5} {:<14} {:<14} {:<8} {:<14.1} {:<14.0}",
             cell.transport.to_string(),
             cell.auth.to_string(),
@@ -538,7 +532,7 @@ fn run_full(seed: u64, cli: &Cli) {
     let pass = rows
         .iter()
         .all(|r| r.correctness == "PASS" && r.fault_injection == "PASS");
-    println!("\ndst full: {}", if pass { "PASS" } else { "FAIL" });
+    info!("\ndst full: {}", if pass { "PASS" } else { "FAIL" });
 
     if let Some(path) = &cli.out {
         write_csv(path, &rows, &cli.label);
@@ -650,13 +644,8 @@ fn run_cell(cell: &Cell, cli: &Cli, scratch_root: &Path, seed: u64) -> CellResul
     for op_idx in 0..cli.ops {
         // Fault injection every fault_interval ops.
         if op_idx > 0 && op_idx % cli.fault_interval == 0 {
-            let inject_ok = inject_fault(
-                &mut conn,
-                &server,
-                cell,
-                scratch.as_ref().map(|s| s.path()),
-                cli.verbose,
-            );
+            let inject_ok =
+                inject_fault(&mut conn, &server, cell, scratch.as_ref().map(|s| s.path()));
             if !inject_ok {
                 fault_result = "FAIL";
             }
@@ -719,11 +708,7 @@ fn run_cell(cell: &Cell, cli: &Cli, scratch_root: &Path, seed: u64) -> CellResul
         };
         let oracle_val = oracle.at(LENS, check_t);
         if !verify_at_response(&at_resp, oracle_val) {
-            if cli.verbose {
-                eprintln!(
-                    "op {op_idx}: AT mismatch at {check_t}: resp={at_resp:?} oracle={oracle_val:?}"
-                );
-            }
+            error!("op {op_idx}: AT mismatch at {check_t}: resp={at_resp:?} oracle={oracle_val:?}");
             correctness = "ORACLE_MISMATCH";
             break;
         }
@@ -739,9 +724,7 @@ fn run_cell(cell: &Cell, cli: &Cli, scratch_root: &Path, seed: u64) -> CellResul
             }
         };
         if !verify_range_invariants(&range_resp, range_start, range_end) {
-            if cli.verbose {
-                eprintln!("op {op_idx}: RANGE invariant violated: {range_resp}");
-            }
+            error!("op {op_idx}: RANGE invariant violated: {range_resp}");
             correctness = "RANGE_INVALID";
             break;
         }
@@ -821,20 +804,12 @@ fn verify_range_invariants(resp: &str, rs: i64, re: i64) -> bool {
     true
 }
 
-fn inject_fault(
-    conn: &mut Conn,
-    server: &Server,
-    cell: &Cell,
-    wal_dir: Option<&Path>,
-    verbose: bool,
-) -> bool {
+fn inject_fault(conn: &mut Conn, server: &Server, cell: &Cell, wal_dir: Option<&Path>) -> bool {
     // Fault 1: connection drop -- reconnect.
     *conn = match Conn::open(&server.addr, cell.transport, cell.auth) {
         Ok(c) => c,
         Err(e) => {
-            if verbose {
-                eprintln!("fault: reconnect failed: {e}");
-            }
+            error!("fault: reconnect failed: {e}");
             return false;
         }
     };
