@@ -1,8 +1,13 @@
 # Tau
 
+[![Build](https://github.com/bxrne/tau/actions/workflows/sonar.yml/badge.svg)](https://github.com/bxrne/tau/actions/workflows/sonar.yml)
 [![CI](https://github.com/bxrne/tau/actions/workflows/ci.yml/badge.svg)](https://github.com/bxrne/tau/actions/workflows/ci.yml)
+[![DST](https://github.com/bxrne/tau/actions/workflows/bench.yml/badge.svg)](https://github.com/bxrne/tau/actions/workflows/bench.yml)
 [![Release](https://github.com/bxrne/tau/actions/workflows/release.yml/badge.svg)](https://github.com/bxrne/tau/actions/workflows/release.yml)
+
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=bxrne_tau&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=bxrne_tau)
+[![CodeQL](https://github.com/bxrne/tau/actions/workflows/github-code-scanning/codeql/badge.svg)](https://github.com/bxrne/tau/actions/workflows/github-code-scanning/codeql)
+[![Dependabot Updates](https://github.com/bxrne/tau/actions/workflows/dependabot/dependabot-updates/badge.svg)](https://github.com/bxrne/tau/actions/workflows/dependabot/dependabot-updates)
 
 **A time-series database built on algebraically precise temporal intervals, verified by property-based tests and deterministic simulation.**
 
