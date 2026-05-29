@@ -34,7 +34,7 @@ rcgen = "0.13"
 rustyline = { version = "18.0", default-features = false, features = ["with-file-history"] }
 
 [dev-dependencies]
-hegeltest = "0.14.12"
+hegeltest = "0.14.16"
 hegeltest-macros = "0.14.12"
 pretty_assertions = "1.4"
 tempfile = "3.27.0"
