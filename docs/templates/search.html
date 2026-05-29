@@ -1,0 +1,77 @@
+{% extends "index.html" -%}
+
+{%- block title %}
+    <title>{{ page.title }} - {{ config.title }}</title>
+{%- endblock title -%}
+
+{%- block main -%}
+    <article class="post">
+        <header>
+            <h1 class="post-title">
+                <a href="{{ page.permalink }}">{{ page.title }}</a>
+            </h1>
+        </header>
+
+        <p id="search-query-line" class="search-query-line" hidden>
+            Results for <strong id="search-query"></strong>
+            (<span id="search-count">0</span>)
+        </p>
+
+        <p id="search-empty" class="search-empty" hidden>
+            No results.
+        </p>
+
+        <ul id="search-page-results" class="search-page-results"></ul>
+    </article>
+
+    <script defer>
+        document.addEventListener('DOMContentLoaded', function () {
+            var params = new URLSearchParams(window.location.search);
+            var q = (params.get('q') || '').trim();
+            var input = document.getElementById('search-input');
+            if (input) input.value = q;
+            if (!q) return;
+
+            function render() {
+                if (typeof elasticlunr === 'undefined' || typeof window.searchIndex === 'undefined') {
+                    setTimeout(render, 50);
+                    return;
+                }
+                var idx = elasticlunr.Index.load(window.searchIndex);
+                var hits = idx.search(q, { bool: 'AND', expand: true });
+                var queryLine = document.getElementById('search-query-line');
+                var queryEl = document.getElementById('search-query');
+                var countEl = document.getElementById('search-count');
+                var emptyEl = document.getElementById('search-empty');
+                var list = document.getElementById('search-page-results');
+                queryEl.textContent = q;
+                countEl.textContent = hits.length;
+                queryLine.hidden = false;
+                if (hits.length === 0) {
+                    emptyEl.hidden = false;
+                    return;
+                }
+                hits.forEach(function (hit) {
+                    var doc = idx.documentStore.getDoc(hit.ref);
+                    var li = document.createElement('li');
+                    li.className = 'search-page-result';
+                    var a = document.createElement('a');
+                    a.href = hit.ref;
+                    a.className = 'search-page-result__title';
+                    a.textContent = (doc && doc.title) ? doc.title : hit.ref;
+                    li.appendChild(a);
+                    if (doc && doc.body) {
+                        var snippet = doc.body.slice(0, 240).trim();
+                        if (doc.body.length > 240) snippet += '...';
+                        var p = document.createElement('p');
+                        p.className = 'search-page-result__body';
+                        p.textContent = snippet;
+                        li.appendChild(p);
+                    }
+                    list.appendChild(li);
+                });
+            }
+            render();
+        });
+    </script>
+{%- endblock main -%}

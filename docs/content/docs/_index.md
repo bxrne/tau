@@ -6,20 +6,23 @@ template = "section.html"
 page_template = "page.html"
 +++
 
-Complete reference for Tau — the data model, query language, storage internals, and operational guide.
+Complete reference for Tau. The data model, query language, storage internals, the deterministic simulation tester and the operational guide.
 
-- [Overview](/docs/overview/): the algebraic interval model, layers, lenses, compaction, and concurrency
-- [TauQL Reference](/docs/tauql/): every statement, operator, and response code
-- [How it works](/docs/how-it-works/): storage internals, WAL, compaction algorithm, design decisions
-- [Testing](/docs/testing/): property-based tests, the deterministic simulation tester, and what each layer catches
-- [Examples](/docs/examples/): worked queries against the bundled real datasets
-- [Configuration](/docs/configuration/): all server flags and environment variables
-- [Containers](/docs/containers/): Docker compose stack with Prometheus and Grafana
-- [Roadmap](/docs/roadmap/): what shipped in v0.1.0 and what v1.0 requires
-- [Changelog](/docs/changelog/): release history
+- [Overview](/docs/overview/). The bitemporal interval model, layers, lenses, compaction and concurrency.
+- [How it works](/docs/how-it-works/). Storage internals, WAL, compaction algorithm, design decisions.
+- [TauQL Reference](/docs/tauql/). Every statement, operator and response code.
+- [DST](/docs/dst/). The deterministic simulation tester. Inspired by FoundationDB and TigerBeetle.
+- [Testing](/docs/testing/). Property based tests and unit anchors. How the three layers fit together.
+- [Examples](/docs/examples/). Worked queries against the bundled real datasets.
+- [Configuration](/docs/configuration/). All server flags and environment variables.
+- [Containers](/docs/containers/). The Docker stack with Prometheus and Grafana.
+- [Roadmap](/docs/roadmap/). What shipped in v0.1 and what v0.2 and v0.3 require.
+- [Changelog](/docs/changelog/). Release history.
 
-**Tutorials — step by step:**
+**Tutorials.** Step by step.
 
-- [Local](/docs/tutorials/local/): build from source and run the server
-- [Docker](/docs/tutorials/docker/): full observability stack in under five minutes
-- [Embedded](/docs/tutorials/embedded/): use Tau as a Rust library with no server process
+- [Local](/docs/tutorials/local/). Build from source and run the server.
+- [Docker](/docs/tutorials/docker/). The full observability stack in under five minutes.
+- [Embedded](/docs/tutorials/embedded/). Use Tau as a Rust library with no server process.
+
+**Long form.** See the [blog](/blog/), starting with [Introducing Tau](/blog/introducing-tau/).

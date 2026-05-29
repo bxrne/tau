@@ -4,7 +4,7 @@ description = "A time-series database built on immutable, layered temporal inter
 default_language = "en"
 theme = "zerm"
 compile_sass = true
-build_search_index = false
+build_search_index = true
 taxonomies = [
            {name = "tags"},
            {name = "categories"},
@@ -34,12 +34,14 @@ main_menu = [
           {url="/docs/overview/", name="Overview"},
           {url="/docs/how-it-works/", name="How it works"},
           {url="/docs/tauql/", name="TauQL"},
+          {url="/docs/dst/", name="DST"},
           {url="/docs/tutorials/", name="Tutorials"},
           {url="/docs/examples/", name="Examples"},
           {url="/docs/configuration/", name="Configuration"},
           {url="/docs/containers/", name="Containers"},
           {url="/docs/testing/", name="Testing"},
           {url="/docs/roadmap/", name="Roadmap"},
+          {url="/blog/", name="Blog"},
           {url="/docs/changelog/", name="Changelog"},
 ]
 

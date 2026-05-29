@@ -71,7 +71,6 @@
                             {{ section.content | safe }}
                         </div>
                     {%- endif -%}
-                    {{ lists::list_pages() }}
                 {%- endblock main -%}
             </div>
             {#-
@@ -92,6 +91,36 @@
 
                         {%- block script -%}
                             {{ footer::script() }}
+                            <script defer src="https://cdn.jsdelivr.net/npm/elasticlunr@0.9.5/elasticlunr.min.js"></script>
+                            <script defer src="{{ get_url(path='search_index.en.js') }}"></script>
+                            <script defer>
+                                document.addEventListener('DOMContentLoaded', function () {
+                                    if (typeof elasticlunr === 'undefined' || typeof window.searchIndex === 'undefined') return;
+                                    var idx = elasticlunr.Index.load(window.searchIndex);
+                                    var input = document.getElementById('search-input');
+                                    var results = document.getElementById('search-results');
+                                    if (!input || !results) return;
+                                    function clear() { results.innerHTML = ''; results.hidden = true; }
+                                    input.addEventListener('input', function () {
+                                        var q = input.value.trim();
+                                        clear();
+                                        if (q.length < 2) return;
+                                        var hits = idx.search(q, { bool: 'AND', expand: true }).slice(0, 8);
+                                        if (hits.length === 0) return;
+                                        results.hidden = false;
+                                        hits.forEach(function (hit) {
+                                            var doc = idx.documentStore.getDoc(hit.ref);
+                                            var li = document.createElement('li');
+                                            var a = document.createElement('a');
+                                            a.href = hit.ref;
+                                            a.textContent = (doc && doc.title) ? doc.title : hit.ref;
+                                            li.appendChild(a);
+                                            results.appendChild(li);
+                                        });
+                                    });
+                                    input.addEventListener('blur', function () { setTimeout(clear, 150); });
+                                });
+                            </script>
                         {%- endblock script -%}
                     </div>
                     {{ extended_footer::extended_footer() }}
