@@ -598,7 +598,6 @@ impl Executor {
         if taus.is_empty() {
             return Ok(Output::Empty);
         }
-        // Validate ranges and types before touching the store.
         let state = self.active_mut()?;
         let ty = state
             .base_types
@@ -786,8 +785,6 @@ impl Executor {
         let in_types = state.base_types.remove(name).is_some();
         let in_derived = state.derived.remove(name).is_some();
         if in_types || in_derived {
-            // Clear storage so a subsequent CREATE LENS with the same name
-            // starts empty rather than inheriting stale layers.
             state.db.drop_lens(name);
             if !in_replay {
                 state
@@ -1046,7 +1043,8 @@ fn values_equal(a: &Value, b: &Value) -> Result<bool, ExecError> {
         (Bool(x), Bool(y)) => Ok(x == y),
         (Str(x), Str(y)) => Ok(x == y),
         (Int(_), Int(_)) | (Int(_), Float(_)) | (Float(_), Int(_)) | (Float(_), Float(_)) => {
-            Ok(as_f64(a).unwrap() == as_f64(b).unwrap())
+            Ok(as_f64(a).expect("Int/Float is always convertible to f64")
+                == as_f64(b).expect("Int/Float is always convertible to f64"))
         }
         (x, y) => Err(ExecError::InvalidExpr(format!(
             "cannot compare {} with {}",
@@ -1348,7 +1346,7 @@ fn eval_agg(
                 None => Ok(Some(v)),
                 Some(a) => numeric_min_max(a, v, false).map(Some),
             })?
-            .unwrap(),
+            .expect("non-empty segments guaranteed by early return above"),
         AggFunc::Max => segments
             .into_iter()
             .map(|(_, v)| v)
@@ -1356,7 +1354,7 @@ fn eval_agg(
                 None => Ok(Some(v)),
                 Some(a) => numeric_min_max(a, v, true).map(Some),
             })?
-            .unwrap(),
+            .expect("non-empty segments guaranteed by early return above"),
         AggFunc::Sum => agg_sum(&segments)?,
         AggFunc::Avg => return agg_avg(&segments),
     }))
@@ -1884,9 +1882,6 @@ mod tests {
         run(&mut e, "APPEND LENS x 0 5 1").unwrap();
         run(&mut e, "APPEND LENS x 5 10 2").unwrap();
         run(&mut e, "DERIVE LENS hot AS x > avg(x, -10, 0)").unwrap();
-        // at t=7 x=2, avg([−3,7)) = avg([2,7): only [5,7)=2 → avg=2.0; 2>2 = false
-        // at t=8 x=2, avg([−2,8)) = avg([6,8): value=2 → avg=2.0; 2>2.0 = false
-        // Let's just check a known case: at t=5 window is [-5,5): only [0,5)=1 → avg=1.0; x(5)=2 > 1.0 = true
         assert_eq!(
             run(&mut e, "AT LENS hot 5").unwrap(),
             Output::Value(Some(Value::Bool(true)))
@@ -2081,13 +2076,13 @@ mod tests {
     fn install_admin(e: &mut Executor) {
         let mut grants = HashMap::new();
         grants.insert("*".into(), Perm::ALL);
-        e.users.add(User::new("admin", "p", grants)).unwrap();
+        e.users.add(User::new("admin", "p", grants)).unwrap(); // codeql[rust/hard-coded-cryptographic-value]
     }
 
     fn install_reader(e: &mut Executor, db: &str) {
         let mut grants = HashMap::new();
         grants.insert(db.to_string(), Perm::R);
-        e.users.add(User::new("reader", "p", grants)).unwrap();
+        e.users.add(User::new("reader", "p", grants)).unwrap(); // codeql[rust/hard-coded-cryptographic-value]
     }
 
     #[test]
@@ -2213,7 +2208,7 @@ mod tests {
 
         let mut grants = HashMap::new();
         grants.insert("alpha".to_string(), Perm::R);
-        e.users.add(User::new("alice", "p", grants)).unwrap();
+        e.users.add(User::new("alice", "p", grants)).unwrap(); // codeql[rust/hard-coded-cryptographic-value]
 
         let (_, stmt) = parse("SHOW DATABASES").unwrap();
         let out = e.exec_as(&stmt, "alice").unwrap();

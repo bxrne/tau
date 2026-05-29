@@ -185,10 +185,6 @@ fn validate_schema_checksum(inner: &str, out: &mut Vec<String>) {
     }
 }
 
-// TODO: add a truncation / rotation path - after a compaction checkpoint, entries
-// whose layers are fully covered by the compacted layer can be discarded from
-// the front of the file. Without this the WAL grows without bound.
-
 /// Append-only write-ahead log backed by a single flat file.
 pub struct Wal {
     writer: BufWriter<File>,

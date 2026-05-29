@@ -719,7 +719,7 @@ fn write_csv(path: &Path, rows: &[CellResult], label: &str) {
         f,
         "label,transport,auth,wal,ops,correctness,faults,metrics_ok,ns_per_op,ops_per_sec,seed"
     )
-    .unwrap();
+    .expect("write csv header");
     for r in rows {
         writeln!(
             f,
@@ -736,6 +736,6 @@ fn write_csv(path: &Path, rows: &[CellResult], label: &str) {
             r.ops_per_sec,
             r.seed,
         )
-        .unwrap();
+        .expect("write csv row");
     }
 }

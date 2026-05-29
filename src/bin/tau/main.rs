@@ -184,7 +184,7 @@ fn setup_auth(config: &Config, executor: &Arc<RwLock<Executor>>) -> io::Result<(
         ));
     }
     info!(users = store.names().len(), "authentication enabled");
-    executor.write().unwrap().users = store;
+    executor.write().expect("executor lock poisoned").users = store;
     Ok(())
 }
 
@@ -204,7 +204,11 @@ fn accept_loop(
                     .peer_addr()
                     .map(|a| a.to_string())
                     .unwrap_or_else(|_| "?".into());
-                let metrics = executor.read().unwrap().metrics.clone();
+                let metrics = executor
+                    .read()
+                    .expect("executor lock poisoned")
+                    .metrics
+                    .clone();
                 let in_flight = active_connections.fetch_add(1, Ordering::AcqRel) + 1;
                 if in_flight > connection_limit {
                     metrics.record_rejected_connection();
@@ -267,7 +271,11 @@ fn main() -> io::Result<()> {
     };
 
     if let Some(port) = config.metrics_port {
-        let metrics = executor.read().unwrap().metrics.clone();
+        let metrics = executor
+            .read()
+            .expect("executor lock poisoned")
+            .metrics
+            .clone();
         thread::Builder::new()
             .name("tau-metrics".into())
             .spawn(move || serve_metrics_http(port, metrics))
@@ -467,7 +475,13 @@ fn handle_auth_attempt<S: Read + Write>(
     match parse_auth_line(trimmed) {
         Some((u, p)) => {
             metrics.record_auth_attempt();
-            if exec.read().unwrap().users.verify(&u, &p).is_some() {
+            if exec
+                .read()
+                .expect("executor lock poisoned")
+                .users
+                .verify(&u, &p)
+                .is_some()
+            {
                 reader.get_mut().write_all(b"OK\n")?;
                 reader.get_mut().flush()?;
                 info!(%peer, user = %u, "authenticated");
@@ -509,7 +523,7 @@ fn run_query_loop<S: Read + Write>(
     exec: &Arc<RwLock<Executor>>,
     auth_enabled: bool,
 ) -> io::Result<()> {
-    let metrics = exec.read().unwrap().metrics.clone();
+    let metrics = exec.read().expect("executor lock poisoned").metrics.clone();
     let mut authenticated_user: Option<String> = None;
     let mut line_buf = String::new();
 
@@ -601,10 +615,19 @@ fn handle_query(query: &str, exec: &Arc<RwLock<Executor>>, caller: Option<&str>)
         Err(e) => return format!("ERR parse: {e}"),
     };
     let result = match (stmt.is_read_only(), caller) {
-        (true, Some(u)) => exec.read().unwrap().exec_read_as(&stmt, u),
-        (true, None) => exec.read().unwrap().exec_read(&stmt),
-        (false, Some(u)) => exec.write().unwrap().exec_as(&stmt, u),
-        (false, None) => exec.write().unwrap().exec(&stmt),
+        (true, Some(u)) => exec
+            .read()
+            .expect("executor lock poisoned")
+            .exec_read_as(&stmt, u),
+        (true, None) => exec
+            .read()
+            .expect("executor lock poisoned")
+            .exec_read(&stmt),
+        (false, Some(u)) => exec
+            .write()
+            .expect("executor lock poisoned")
+            .exec_as(&stmt, u),
+        (false, None) => exec.write().expect("executor lock poisoned").exec(&stmt),
     };
     match result {
         Ok(o) => format_output(&o),

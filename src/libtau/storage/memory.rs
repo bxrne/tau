@@ -202,10 +202,6 @@ mod tests {
 
     #[hegel::test]
     fn compaction_merges_adjacent_equal_values(tc: TestCase) {
-        // compact_layers short-circuits when there's ≤ 1 layer (the input is
-        // already canonical from the caller's perspective).  The
-        // adjacent-merge invariant only holds when the sweep-line actually
-        // runs - i.e. on stacks with ≥ 2 layers.
         let stack = tc.draw(layer_stack_gen().filter(|v| v.len() >= 2));
         let mut compacted = stack;
         compact_layers(&mut compacted);

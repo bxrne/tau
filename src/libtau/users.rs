@@ -507,7 +507,7 @@ mod tests {
     fn user_effective_equals_direct_union_wildcard(tc: TestCase) {
         let grants = tc.draw(grants_gen());
         let db = tc.draw(name_gen());
-        let u = User::new("u", "p", grants.clone());
+        let u = User::new("u", "p", grants.clone()); // codeql[rust/hard-coded-cryptographic-value]
 
         let direct = grants.get(&db).copied().unwrap_or_default();
         let wildcard = grants.get("*").copied().unwrap_or_default();
@@ -519,7 +519,7 @@ mod tests {
     #[hegel::test]
     fn user_is_global_admin_iff_admin_on_wildcard(tc: TestCase) {
         let grants = tc.draw(grants_gen());
-        let u = User::new("u", "p", grants.clone());
+        let u = User::new("u", "p", grants.clone()); // codeql[rust/hard-coded-cryptographic-value]
         let expected = grants
             .get("*")
             .map(|p| p.contains(Perm::A))
@@ -530,7 +530,7 @@ mod tests {
     #[hegel::test]
     fn user_is_admin_anywhere_iff_any_grant_has_admin(tc: TestCase) {
         let grants = tc.draw(grants_gen());
-        let u = User::new("u", "p", grants.clone());
+        let u = User::new("u", "p", grants.clone()); // codeql[rust/hard-coded-cryptographic-value]
         let expected = grants.values().any(|p| p.contains(Perm::A));
         assert_eq!(u.is_admin_anywhere(), expected);
     }
@@ -553,16 +553,16 @@ mod tests {
     fn store_add_then_get_returns_user(tc: TestCase) {
         let name = tc.draw(name_gen());
         let mut s = UserStore::new();
-        s.add(User::new(&name, "p", HashMap::new())).unwrap();
+        s.add(User::new(&name, "p", HashMap::new())).unwrap(); // codeql[rust/hard-coded-cryptographic-value]
         assert!(s.get(&name).is_some());
-        assert!(s.add(User::new(&name, "p", HashMap::new())).is_err());
+        assert!(s.add(User::new(&name, "p", HashMap::new())).is_err()); // codeql[rust/hard-coded-cryptographic-value]
     }
 
     #[hegel::test]
     fn store_remove_then_get_returns_none(tc: TestCase) {
         let name = tc.draw(name_gen());
         let mut s = UserStore::new();
-        s.add(User::new(&name, "p", HashMap::new())).unwrap();
+        s.add(User::new(&name, "p", HashMap::new())).unwrap(); // codeql[rust/hard-coded-cryptographic-value]
         s.remove(&name).unwrap();
         assert!(s.get(&name).is_none());
         assert!(s.remove(&name).is_err());
@@ -575,7 +575,7 @@ mod tests {
         let to_add = tc.draw(perm_gen());
 
         let mut s = UserStore::new();
-        s.add(User::new(&name, "p", HashMap::new())).unwrap();
+        s.add(User::new(&name, "p", HashMap::new())).unwrap(); // codeql[rust/hard-coded-cryptographic-value]
         let before = s.get(&name).unwrap().effective(&db);
         s.grant(&name, &db, to_add).unwrap();
         s.revoke(&name, &db, to_add).unwrap();
@@ -590,7 +590,7 @@ mod tests {
         let p2 = tc.draw(perm_gen());
 
         let mut s = UserStore::new();
-        s.add(User::new(&name, "p", HashMap::new())).unwrap();
+        s.add(User::new(&name, "p", HashMap::new())).unwrap(); // codeql[rust/hard-coded-cryptographic-value]
         s.grant(&name, &db, p1).unwrap();
         let result = s.grant(&name, &db, p2).unwrap();
         assert_eq!(result, p1 | p2);

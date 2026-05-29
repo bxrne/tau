@@ -194,7 +194,11 @@ fn verify_disk_header<R: Read>(reader: &mut R) -> io::Result<()> {
     reader.read_exact(&mut header)?;
     let magic = &header[0..3];
     let version = header[3];
-    let stored_checksum = u32::from_le_bytes(header[4..8].try_into().unwrap());
+    let stored_checksum = u32::from_le_bytes(
+        header[4..8]
+            .try_into()
+            .expect("header slice is exactly 4 bytes"),
+    );
     if magic != MAGIC {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -339,7 +343,6 @@ impl<V: Clone + Codec> Disk<V> {
 
     /// Flush all in-memory state to disk.
     pub fn flush(&self) -> io::Result<()> {
-        // Build the standard unencrypted payload in memory.
         let mut payload = Vec::new();
 
         let mut header = Vec::new();
@@ -533,8 +536,7 @@ mod tests {
         let lens = tc.draw(lens_name_gen());
         let layer = Layer::new(1, tc.draw(taus_gen()));
         let probe = tc.draw(gs::integers::<i64>().min_value(-10).max_value(2000));
-        let mut key = [0u8; 32];
-        key.copy_from_slice(&key_bytes);
+        let key: [u8; 32] = key_bytes.try_into().expect("exactly 32 bytes");
         let tmp = NamedTempFile::new().unwrap();
         {
             let mut store = Disk::create(tmp.path(), Some(key)).unwrap();
@@ -559,8 +561,7 @@ mod tests {
         let key_bytes = tc.draw(gs::vecs(gs::integers::<u8>()).min_size(32).max_size(32));
         let lens = tc.draw(lens_name_gen());
         let layer = Layer::new(1, tc.draw(taus_gen()));
-        let mut key = [0u8; 32];
-        key.copy_from_slice(&key_bytes);
+        let key: [u8; 32] = key_bytes.try_into().expect("exactly 32 bytes");
         let tmp = NamedTempFile::new().unwrap();
         {
             let mut store = Disk::create(tmp.path(), Some(key)).unwrap();
@@ -575,8 +576,10 @@ mod tests {
     fn encrypted_file_rejects_open_with_wrong_key(tc: TestCase) {
         let lens = tc.draw(lens_name_gen());
         let layer = Layer::new(1, tc.draw(taus_gen()));
-        let key_a = [0xAAu8; 32];
-        let key_b = [0xBBu8; 32];
+        let key_bytes = tc.draw(gs::vecs(gs::integers::<u8>()).min_size(32).max_size(32));
+        let key_a: [u8; 32] = key_bytes.try_into().expect("exactly 32 bytes");
+        let mut key_b = key_a;
+        key_b[0] ^= 1;
         let tmp = NamedTempFile::new().unwrap();
         {
             let mut store = Disk::create(tmp.path(), Some(key_a)).unwrap();
