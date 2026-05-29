@@ -4,7 +4,7 @@ date = 2026-05-28
 template = "page.html"
 +++
 
-Tau is in active development. The current release is **v0.1.0**. Future versions are marked **(soft)** — they describe intent and scope, not a committed schedule.
+Tau is in active development. The current release is **v0.1.2**. Future versions are marked **(soft)** — they describe intent and scope, not a committed schedule.
 
 ---
 
@@ -34,7 +34,6 @@ The core engine and server are feature-complete and shipping. The data model, qu
 - [x] `DERIVE LENS AS <expr>`: lazy computed lenses with composable closures
 - [x] `AT`, `RANGE [WHERE <expr>]`, `REDUCE USING (min|max|avg|sum|count)`
 - [x] Full expression grammar: arithmetic, comparison, logical, unary, rolling aggregations
-- [x] `START TRANSACTION` / `COMMIT` / `ROLLBACK`: per-connection atomic transactions — mutations buffered and invisible until `COMMIT`; `ROLLBACK` discards the buffer
 
 **Server**
 - [x] Line-oriented TCP protocol with shared/exclusive locking
@@ -64,7 +63,8 @@ The engine is correct. v0.2.0 makes it fast enough to benchmark honestly, operab
 - [ ] Write throughput profiling and targeted optimisation of the WAL path
 
 **Transactions and batch ingest**
-- [x] `START TRANSACTION` / `COMMIT` / `ROLLBACK`: atomic multi-statement transactions — mutations buffered per-connection, invisible until `COMMIT`, discarded on `ROLLBACK`; shipped in v0.1.0
+- [x] `START TRANSACTION` / `COMMIT` / `ROLLBACK`: atomic multi-statement transactions — mutations buffered per-connection, invisible until `COMMIT`, discarded on `ROLLBACK`
+- [x] `load` sends the entire batch inside a transaction — partial loads are rolled back automatically on any error
 - [ ] `BATCH APPEND LENS <name> { ... }`: single-statement bulk ingest for one lens — a list of intervals inside a block, committed as one layer without round-trip overhead; optimised for high-volume ingest paths
 
 **Layer introspection and audit**
