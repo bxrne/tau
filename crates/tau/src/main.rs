@@ -49,7 +49,7 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 use libtau::crypto;
-use libtau::{Codec, ExecError, Executor, Metrics, Output, Perm, User, UserStore, parse};
+use libtau::{Executor, Metrics, Perm, Response, User, UserStore, parse};
 use rcgen::generate_simple_self_signed;
 use rustls::ServerConfig;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
@@ -557,7 +557,7 @@ fn run_query_loop<S: Read + Write>(
         let started = Instant::now();
         let response = handle_query(trimmed, exec, authenticated_user.as_deref());
         let elapsed = started.elapsed();
-        let is_err = response.starts_with("ERR ");
+        let is_err = response.is_err();
         if is_err {
             metrics.record_error();
         }
@@ -608,11 +608,11 @@ fn handle(
 /// lock; everything else takes the exclusive lock.  When `caller` is `Some`,
 /// the statement is executed via `exec_as` so per-user CRUDA permissions are
 /// enforced.
-fn handle_query(query: &str, exec: &Arc<RwLock<Executor>>, caller: Option<&str>) -> String {
+fn handle_query(query: &str, exec: &Arc<RwLock<Executor>>, caller: Option<&str>) -> Response {
     let stmt = match parse(query) {
         Ok((rest, s)) if rest.trim().is_empty() => s,
-        Ok((rest, _)) => return format!("ERR trailing input: {rest:?}"),
-        Err(e) => return format!("ERR parse: {e}"),
+        Ok((rest, _)) => return Response::Err(format!("trailing input: {rest:?}")),
+        Err(e) => return Response::Err(format!("parse: {e}")),
     };
     let result = match (stmt.is_read_only(), caller) {
         (true, Some(u)) => exec
@@ -629,85 +629,7 @@ fn handle_query(query: &str, exec: &Arc<RwLock<Executor>>, caller: Option<&str>)
             .exec_as(&stmt, u),
         (false, None) => exec.write().expect("executor lock poisoned").exec(&stmt),
     };
-    match result {
-        Ok(o) => format_output(&o),
-        Err(e) => format!("ERR {}", format_error(&e)),
-    }
-}
-
-fn format_output(o: &Output) -> String {
-    match o {
-        Output::Empty => "OK".into(),
-        Output::Value(None) => "VAL NIL".into(),
-        Output::Value(Some(v)) => format!("VAL {}", v.encode()),
-        Output::Range(segments) => {
-            let mut out = String::with_capacity(16 + segments.len() * 24);
-            out.push_str(&format!("RANGE {}", segments.len()));
-            for (s, e, v) in segments {
-                out.push_str(&format!("; {}:{}:{}", s, e, v.encode()));
-            }
-            out
-        }
-        Output::Names(names) => {
-            let mut out = format!("NAMES {}", names.len());
-            for n in names {
-                out.push(';');
-                out.push(' ');
-                out.push_str(n);
-            }
-            out
-        }
-        Output::Grants(rows) => {
-            let mut out = format!("GRANTS {}", rows.len());
-            for (user, grants) in rows {
-                out.push(';');
-                out.push(' ');
-                out.push_str(user);
-                for (db, perm) in grants {
-                    out.push(' ');
-                    out.push_str(&format!("{}:{}", db, perm));
-                }
-            }
-            out
-        }
-        Output::LayerHistory(layers) => {
-            let mut out = format!("LAYERS {}", layers.len());
-            for l in layers {
-                out.push_str(&format!(
-                    "; {}:{}:{}:{}",
-                    l.id, l.written_at, l.min_start, l.max_end
-                ));
-            }
-            out
-        }
-    }
-}
-
-fn format_error(e: &ExecError) -> String {
-    match e {
-        ExecError::NoActiveDatabase => "no active database".into(),
-        ExecError::UnknownDatabase(n) => format!("unknown database: {n}"),
-        ExecError::DuplicateDatabase(n) => format!("duplicate database: {n}"),
-        ExecError::UnknownLens(n) => format!("unknown lens: {n}"),
-        ExecError::DuplicateLens(n) => format!("duplicate lens: {n}"),
-        ExecError::TypeMismatch {
-            lens,
-            expected,
-            got,
-        } => {
-            format!("type mismatch on {lens}: expected {expected:?}, got {got}")
-        }
-        ExecError::InvalidExpr(m) => format!("invalid expression: {m}"),
-        ExecError::InvalidRange => "invalid range (start >= end)".into(),
-        ExecError::Io(m) => format!("storage error: {m}"),
-        ExecError::CycleDetected(n) => format!("cycle detected in derived lens: {n}"),
-        ExecError::PermissionDenied(m) => format!("permission denied: {m}"),
-        ExecError::DuplicateUser(n) => format!("duplicate user: {n}"),
-        ExecError::UnknownUser(n) => format!("unknown user: {n}"),
-        ExecError::TransactionAlreadyActive => "transaction already active".into(),
-        ExecError::NoActiveTransaction => "no active transaction".into(),
-        ExecError::DatabaseAlreadyExists(n) => format!("database already exists: {n}"),
-    }
+    Response::from_result(&result)
 }
 
 #[cfg(test)]
