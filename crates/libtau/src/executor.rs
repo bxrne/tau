@@ -1,7 +1,7 @@
 //! Query-language executor.
 //!
-//! Wires the [`Stmt`](crate::libtau::ql::ast::Stmt) AST to a runtime registry
-//! of [`Database<Value>`](crate::libtau::database::Database) instances.
+//! Wires the [`Stmt`](crate::ql::ast::Stmt) AST to a runtime registry
+//! of [`Database<Value>`](crate::database::Database) instances.
 //!
 //! # Model
 //!
@@ -33,14 +33,14 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::libtau::database::Database;
-use crate::libtau::metrics::Metrics;
-use crate::libtau::model::{Layer, LayerId, Tau, Timestamp};
-use crate::libtau::ql::ast::{AggFunc, BinOp, Expr, Stmt, Type, UnOp};
-use crate::libtau::storage::wal::{Wal, WalEntry};
-use crate::libtau::storage::{InMemory, sweep_range};
-use crate::libtau::users::{Perm, User, UserStore};
-use crate::libtau::value::Value;
+use crate::database::Database;
+use crate::metrics::Metrics;
+use crate::model::{Layer, LayerId, Tau, Timestamp};
+use crate::ql::ast::{AggFunc, BinOp, Expr, Stmt, Type, UnOp};
+use crate::storage::wal::{Wal, WalEntry};
+use crate::storage::{InMemory, sweep_range};
+use crate::users::{Perm, User, UserStore};
+use crate::value::Value;
 
 /// Metadata about a single layer returned by `HISTORY LENS`.
 #[derive(Debug, Clone, PartialEq)]
@@ -193,7 +193,7 @@ pub struct Executor {
 
 impl Default for Executor {
     fn default() -> Self {
-        Self::with_threshold(crate::libtau::storage::COMPACT_THRESHOLD)
+        Self::with_threshold(crate::storage::COMPACT_THRESHOLD)
     }
 }
 
@@ -217,7 +217,7 @@ impl Executor {
 
     /// Open a WAL-backed executor with the default compaction threshold.
     pub fn with_wal(path: impl AsRef<Path>, key: Option<[u8; 32]>) -> io::Result<Self> {
-        Self::with_wal_threshold(path, crate::libtau::storage::COMPACT_THRESHOLD, key)
+        Self::with_wal_threshold(path, crate::storage::COMPACT_THRESHOLD, key)
     }
 
     /// Open a WAL-backed executor with a custom compaction threshold.
@@ -226,7 +226,7 @@ impl Executor {
         compact_threshold: usize,
         key: Option<[u8; 32]>,
     ) -> io::Result<Self> {
-        use crate::libtau::ql::parser::parse;
+        use crate::ql::parser::parse;
 
         let mut executor = Self::with_threshold(compact_threshold);
         let (db_state, schema_stmts) = DbState::with_wal(path, compact_threshold, key)?;
@@ -679,7 +679,7 @@ impl Executor {
     }
 
     fn copy_lens(&mut self, name: &str, path: &str) -> Result<Output, ExecError> {
-        use crate::libtau::ql::parser::parse as ql_parse;
+        use crate::ql::parser::parse as ql_parse;
         let content = fs::read_to_string(path).map_err(|e| ExecError::Io(e.to_string()))?;
         // Validate the lens exists and get its type before parsing all rows.
         {
@@ -860,7 +860,7 @@ impl Executor {
     fn batch_append_lens(
         &mut self,
         name: &str,
-        taus: &[(i64, i64, crate::libtau::ql::ast::Literal)],
+        taus: &[(i64, i64, crate::ql::ast::Literal)],
     ) -> Result<Output, ExecError> {
         let taus: Vec<(Timestamp, Timestamp, Value)> =
             taus.iter().map(|(s, e, v)| (*s, *e, v.into())).collect();
@@ -1019,7 +1019,7 @@ impl Executor {
         self.active = Some(name.into());
         self.in_replay = true;
         for stmt_text in &schema_stmts {
-            match crate::libtau::ql::parser::parse(stmt_text) {
+            match crate::ql::parser::parse(stmt_text) {
                 Ok((_, stmt)) => {
                     if let Err(e) = self.exec(&stmt) {
                         tracing::warn!(stmt = %stmt_text, error = ?e, "restore: schema replay failed");
@@ -1619,7 +1619,7 @@ fn numeric_min_max(a: Value, b: Value, want_max: bool) -> Result<Value, ExecErro
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::libtau::ql::parse;
+    use crate::ql::parse;
     use hegel::TestCase;
     use hegel::generators as gs;
     use pretty_assertions::assert_eq;
@@ -2260,7 +2260,7 @@ mod tests {
     fn show_lenses_requires_active_database() {
         let e = Executor::new();
         assert_eq!(
-            e.exec_read(&crate::libtau::ql::parse("SHOW LENSES").unwrap().1),
+            e.exec_read(&crate::ql::parse("SHOW LENSES").unwrap().1),
             Err(ExecError::NoActiveDatabase)
         );
     }

@@ -6,9 +6,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 use std::{env, fs};
 
+use libtau::{Executor, Output, Value, parse};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use tau::{Executor, Output, Value, parse};
 use tracing::{error, info, trace, warn};
 
 use crate::oracle::Oracle;
@@ -453,7 +453,7 @@ fn embedded_do_tx_rollback(
     );
 }
 
-fn executor_read_quick(exec: &Arc<RwLock<Executor>>, stmt: &tau::Stmt) -> Output {
+fn executor_read_quick(exec: &Arc<RwLock<Executor>>, stmt: &libtau::Stmt) -> Output {
     exec.read()
         .expect("lock")
         .exec_read(stmt)
@@ -527,9 +527,9 @@ fn embedded_check_range(
     // have its midpoint covered by some executor segment.
     for (os, oe, ov) in oracle.range(lens, rs, re) {
         let mid = os + (oe - os) / 2;
-        let found = segs
-            .iter()
-            .any(|(s, e, v)| *s <= mid && mid < *e && matches!(v, tau::Value::Int(i) if *i == ov));
+        let found = segs.iter().any(|(s, e, v)| {
+            *s <= mid && mid < *e && matches!(v, libtau::Value::Int(i) if *i == ov)
+        });
         if !found {
             warn!(
                 "op {op_idx}: RANGE {lens} [{rs},{re}): oracle segment [{os},{oe})={ov} \

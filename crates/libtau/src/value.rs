@@ -1,6 +1,6 @@
 //! Dynamic runtime value used by the query-language executor.
 //!
-//! A `Value` is the executor's analogue of [`crate::libtau::ql::ast::Literal`].
+//! A `Value` is the executor's analogue of [`crate::ql::ast::Literal`].
 //! Every base lens in an executor-managed database stores `Value`s, so a
 //! single `Database<Value>` can back any declared lens type (`int`, `float`,
 //! `str`, `bool`, `bytes`). The executor enforces, per lens, that appended
@@ -23,8 +23,8 @@
 
 use std::sync::Arc;
 
-use crate::libtau::ql::ast::{Literal, Type};
-use crate::libtau::storage::Codec;
+use crate::ql::ast::{Literal, Type};
+use crate::storage::Codec;
 
 /// Dynamic value carried by every executor lens.
 ///

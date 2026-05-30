@@ -1,0 +1,23 @@
+[package]
+name = "tauctl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description.workspace = true
+publish = false
+
+[[bin]]
+name = "ctl"
+path = "src/main.rs"
+
+[dependencies]
+libtau.workspace = true
+clap.workspace = true
+rustls.workspace = true
+rustyline.workspace = true
+
+[dev-dependencies]
+hegeltest.workspace = true
+hegeltest-macros.workspace = true
+pretty_assertions.workspace = true
+tempfile.workspace = true

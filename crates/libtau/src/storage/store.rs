@@ -1,4 +1,4 @@
-use crate::libtau::model::{Layer, Tau, Timestamp};
+use crate::model::{Layer, Tau, Timestamp};
 use std::collections::{BinaryHeap, HashSet};
 use std::io;
 

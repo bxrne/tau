@@ -1,6 +1,6 @@
-use crate::libtau::model::{Eval, Layer, LayerId, Lens, LensKind, Timestamp};
-use crate::libtau::storage::wal::Codec;
-use crate::libtau::storage::{Store, Wal, WalEntry};
+use crate::model::{Eval, Layer, LayerId, Lens, LensKind, Timestamp};
+use crate::storage::wal::Codec;
+use crate::storage::{Store, Wal, WalEntry};
 use std::io;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -355,8 +355,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::libtau::model::Tau;
-    use crate::libtau::storage::{Disk, InMemory, Wal};
+    use crate::model::Tau;
+    use crate::storage::{Disk, InMemory, Wal};
 
     fn db() -> Database<i64> {
         Database::new(InMemory::new())
@@ -501,7 +501,7 @@ mod tests {
 
     #[test]
     fn checkpoint_rewrites_wal_after_compaction() {
-        use crate::libtau::storage::store::COMPACT_THRESHOLD;
+        use crate::storage::store::COMPACT_THRESHOLD;
         let tmp_dir = tempfile::tempdir().unwrap();
         let wal_path = tmp_dir.path().join("test.wal");
 

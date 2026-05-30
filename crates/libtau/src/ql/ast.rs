@@ -240,14 +240,14 @@ pub enum Stmt {
     /// `GRANT <perms> ON <db|*> TO <user>` - grant per-database permissions.
     /// Requires admin on the target database (or global).
     Grant {
-        perms: crate::libtau::users::Perm,
+        perms: crate::users::Perm,
         database: String,
         user: String,
     },
     /// `REVOKE <perms> ON <db|*> FROM <user>` - strip per-database permissions.
     /// Requires admin on the target database (or global).
     Revoke {
-        perms: crate::libtau::users::Perm,
+        perms: crate::users::Perm,
         database: String,
         user: String,
     },

@@ -1,5 +1,5 @@
-use crate::libtau::model::Layer;
-use crate::libtau::storage::store::{COMPACT_THRESHOLD, Store, compact_layers};
+use crate::model::Layer;
+use crate::storage::store::{COMPACT_THRESHOLD, Store, compact_layers};
 use std::collections::HashMap;
 use std::io;
 
@@ -66,8 +66,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::libtau::model::{Tau, Timestamp};
-    use crate::libtau::storage::store::compact_layers;
+    use crate::model::{Tau, Timestamp};
+    use crate::storage::store::compact_layers;
     use hegel::TestCase;
     use hegel::generators as gs;
     use hegel::generators::Generator;

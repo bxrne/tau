@@ -30,9 +30,9 @@
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use crc32fast::Hasher;
 
-use crate::libtau::crypto;
-use crate::libtau::model::{Layer, LayerId, Tau, Timestamp};
-use crate::libtau::storage::Store;
+use crate::crypto;
+use crate::model::{Layer, LayerId, Tau, Timestamp};
+use crate::storage::Store;
 #[cfg(test)]
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
@@ -303,7 +303,7 @@ impl Wal {
     pub fn append_layer<V: Codec + Clone>(
         &mut self,
         lens: &str,
-        layer: &crate::libtau::model::Layer<V>,
+        layer: &crate::model::Layer<V>,
     ) -> io::Result<()> {
         use std::fmt::Write as _;
 
@@ -553,7 +553,7 @@ impl Wal {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::libtau::storage::memory::InMemory;
+    use crate::storage::memory::InMemory;
     use hegel::TestCase;
     use hegel::generators as gs;
     use hegel::generators::Generator;
