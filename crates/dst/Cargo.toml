@@ -1,0 +1,20 @@
+[package]
+name = "dst"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description.workspace = true
+publish = false
+
+[[bin]]
+name = "dst"
+path = "src/main.rs"
+
+[dependencies]
+libtau.workspace = true
+libharness.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+rustls.workspace = true
+rand.workspace = true

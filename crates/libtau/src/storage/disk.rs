@@ -10,9 +10,9 @@
 
 use crc32fast::Hasher;
 
-use crate::libtau::crypto;
-use crate::libtau::model::{Layer, LayerId, Tau};
-use crate::libtau::storage::store::{COMPACT_THRESHOLD, Store, compact_layers};
+use crate::crypto;
+use crate::model::{Layer, LayerId, Tau};
+use crate::storage::store::{COMPACT_THRESHOLD, Store, compact_layers};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, BufWriter, Cursor, Read, Write};
@@ -454,7 +454,7 @@ impl<V: Clone + PartialEq + Codec + Send + Sync + 'static> Store<V> for Disk<V> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::libtau::model::Tau;
+    use crate::model::Tau;
     use hegel::TestCase;
     use hegel::generators as gs;
     use hegel::generators::Generator;

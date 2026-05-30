@@ -48,12 +48,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use clap::Parser;
+use libtau::crypto;
+use libtau::{Codec, ExecError, Executor, Metrics, Output, Perm, User, UserStore, parse};
 use rcgen::generate_simple_self_signed;
 use rustls::ServerConfig;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::server::ServerConnection;
-use tau::libtau::crypto;
-use tau::{Codec, ExecError, Executor, Metrics, Output, Perm, User, UserStore, parse};
 use tracing::{debug, error, info, trace, warn};
 
 /// Tau time-series database TCP server.
@@ -716,8 +716,8 @@ mod tests {
     use hegel::TestCase;
     use hegel::generators as gs;
     use hegel::generators::Generator;
+    use libtau::Stmt;
     use pretty_assertions::assert_eq;
-    use tau::Stmt;
 
     fn exec() -> Arc<RwLock<Executor>> {
         Arc::new(RwLock::new(Executor::new()))

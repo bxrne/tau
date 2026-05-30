@@ -1,0 +1,18 @@
+[package]
+name = "libharness"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared simulation + benchmark harness for tau: backends, oracle, generators, reporting."
+publish = false
+
+[lib]
+name = "libharness"
+path = "src/lib.rs"
+
+[dependencies]
+libtau.workspace = true
+rand.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true
