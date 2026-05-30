@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.3](https://github.com/bxrne/tau/compare/tau-v0.1.2...tau-v0.1.3) (2026-05-30)
+
+
+### Features
+
+* dst tidy, batch/bkp/restore/layer ops added to ql, updated docs ([3af738b](https://github.com/bxrne/tau/commit/3af738b39e791fd23ade83494ba8e7b1a32c4817))
+
 ## [0.1.2](https://github.com/bxrne/tau/compare/tau-v0.1.1...tau-v0.1.2) (2026-05-28)
 
 
