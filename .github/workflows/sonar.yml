@@ -1,20 +1,47 @@
-name: Build
+name: Coverage + Sonar
+
 on:
   push:
     branches:
       - master
   pull_request:
     types: [opened, synchronize, reopened]
+
 jobs:
   sonarqube:
-    name: SonarQube
+    name: Coverage + SonarQube
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          fetch-depth: 0  # Shallow clones should be disabled for a better relevancy of analysis
+          fetch-depth: 0 # Shallow clones should be disabled for a better relevancy of analysis
+
+      # Pinned toolchain (matches rust-toolchain.toml) plus the LLVM tools that
+      # source-based instrumentation coverage needs.
+      - uses: dtolnay/rust-toolchain@1.94.1
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: coverage
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest,cargo-llvm-cov
+
+      # Hegel property tests shell out to Python/Hypothesis for input generation,
+      # but the Rust property closures run in-process, so they are counted by the
+      # instrumented build exactly like any other test. Python is present on the
+      # runner, so no extra setup is required.
+      - name: Generate coverage (Cobertura)
+        run: >-
+          cargo llvm-cov nextest
+          --workspace
+          --cobertura
+          --output-path cobertura.xml
+          --ignore-filename-regex '(crates/dst/|/main\.rs$|/mod\.rs$|crates/libtau/src/lib\.rs$|crates/libharness/src/lib\.rs$)'
+
       - name: SonarQube Scan
         uses: SonarSource/sonarqube-scan-action@7006c4492b2e0ee0f816d36501671557c97f5995 # v8.1.0
         env:
