@@ -12,6 +12,8 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
 
+use libtau::Response;
+
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, ClientConnection, DigitallySignedStruct, SignatureScheme, StreamOwned};
@@ -93,10 +95,8 @@ impl Connection {
         self.tls
     }
 
-    /// Send `line` (a `\n` is appended) and return the first response line.
-    /// Trailing newline is stripped.  Returns `Err(UnexpectedEof)` if the
-    /// server closed the connection without replying.
-    pub fn send(&mut self, line: &str) -> io::Result<String> {
+    /// Send `line` and return the raw response string (trailing newline stripped).
+    pub fn send_raw(&mut self, line: &str) -> io::Result<String> {
         self.backend.write_all(line.as_bytes())?;
         self.backend.write_all(b"\n")?;
         self.backend.flush()?;
@@ -110,6 +110,13 @@ impl Connection {
             ));
         }
         Ok(resp.trim_end_matches(['\r', '\n']).to_string())
+    }
+
+    /// Send `line` and return a typed [`Response`]. Parse errors surface as
+    /// `io::ErrorKind::InvalidData` so callers never need to sniff the string.
+    pub fn send(&mut self, line: &str) -> io::Result<Response> {
+        let raw = self.send_raw(line)?;
+        Response::parse(&raw).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
     }
 }
 
@@ -399,7 +406,7 @@ mod tests {
     fn connection_send_round_trips_against_echo_server() {
         let (addr, _h) = echo_listener();
         let mut c = Connection::open(&addr.to_string()).unwrap();
-        let resp = c.send("hello").unwrap();
+        let resp = c.send_raw("hello").unwrap();
         assert_eq!(resp, "RESP: hello");
     }
 

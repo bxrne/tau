@@ -99,4 +99,23 @@ mod tests {
         let cipher = encrypt(&key_a, &plaintext);
         assert!(decrypt(&key_b, &cipher).is_err());
     }
+
+    #[test]
+    fn decode_hex_valid() {
+        assert_eq!(decode_hex("deadbeef"), Some(vec![0xde, 0xad, 0xbe, 0xef]));
+        assert_eq!(decode_hex("00ff"), Some(vec![0x00, 0xff]));
+        assert_eq!(decode_hex(""), Some(vec![]));
+    }
+
+    #[test]
+    fn decode_hex_odd_length_returns_none() {
+        assert_eq!(decode_hex("abc"), None);
+        assert_eq!(decode_hex("f"), None);
+    }
+
+    #[test]
+    fn decode_hex_invalid_chars_returns_none() {
+        assert_eq!(decode_hex("zz"), None);
+        assert_eq!(decode_hex("gg"), None);
+    }
 }

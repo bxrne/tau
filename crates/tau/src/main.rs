@@ -638,18 +638,24 @@ mod tests {
     use hegel::TestCase;
     use hegel::generators as gs;
     use hegel::generators::Generator;
-    use libtau::Stmt;
+    use libtau::{ExecError, Stmt};
     use pretty_assertions::assert_eq;
 
     fn exec() -> Arc<RwLock<Executor>> {
         Arc::new(RwLock::new(Executor::new()))
     }
 
+    /// Run a query and render the response to its wire line, for assertions
+    /// against the protocol's exact string output.
+    fn q(query: &str, e: &Arc<RwLock<Executor>>, caller: Option<&str>) -> String {
+        handle_query(query, e, caller).to_string()
+    }
+
     #[hegel::test]
     fn handle_query_never_panics(tc: TestCase) {
         let input = tc.draw(gs::text().max_size(256));
         let e = exec();
-        let _ = handle_query(&input, &e, None);
+        let _ = q(&input, &e, None);
     }
 
     #[hegel::test]
@@ -661,14 +667,11 @@ mod tests {
         );
         let probe = tc.draw(gs::integers::<i64>().min_value(0).max_value(99));
         let e = exec();
-        handle_query("CREATE DATABASE main", &e, None);
-        handle_query("CREATE LENS x int", &e, None);
+        q("CREATE DATABASE main", &e, None);
+        q("CREATE LENS x int", &e, None);
+        assert_eq!(q(&format!("APPEND LENS x 0 100 {v}"), &e, None), "OK");
         assert_eq!(
-            handle_query(&format!("APPEND LENS x 0 100 {v}"), &e, None),
-            "OK"
-        );
-        assert_eq!(
-            handle_query(&format!("AT LENS x {probe}"), &e, None),
+            q(&format!("AT LENS x {probe}"), &e, None),
             format!("VAL i{v}")
         );
     }
@@ -677,13 +680,10 @@ mod tests {
     fn at_uncovered_timestamp_yields_nil(tc: TestCase) {
         let probe = tc.draw(gs::integers::<i64>().min_value(101).max_value(1_000_000));
         let e = exec();
-        handle_query("CREATE DATABASE main", &e, None);
-        handle_query("CREATE LENS x int", &e, None);
-        handle_query("APPEND LENS x 0 100 42", &e, None);
-        assert_eq!(
-            handle_query(&format!("AT LENS x {probe}"), &e, None),
-            "VAL NIL"
-        );
+        q("CREATE DATABASE main", &e, None);
+        q("CREATE LENS x int", &e, None);
+        q("APPEND LENS x 0 100 42", &e, None);
+        assert_eq!(q(&format!("AT LENS x {probe}"), &e, None), "VAL NIL");
     }
 
     #[hegel::test]
@@ -708,54 +708,51 @@ mod tests {
             )
         }));
         let line = format!("{junk} something");
-        let r = handle_query(&line, &exec(), None);
+        let r = q(&line, &exec(), None);
         assert!(r.starts_with("ERR "), "expected ERR, got {r:?}");
     }
 
     #[hegel::test]
     fn trailing_input_is_reported(tc: TestCase) {
         let extra = tc.draw(gs::from_regex("[A-Z][A-Z]+").fullmatch(true));
-        let r = handle_query(&format!("CREATE DATABASE a {extra}"), &exec(), None);
+        let r = q(&format!("CREATE DATABASE a {extra}"), &exec(), None);
         assert!(r.starts_with("ERR trailing input"), "got: {r}");
     }
 
     #[test]
     fn empty_response_for_ddl() {
         let e = exec();
-        assert_eq!(handle_query("CREATE DATABASE main", &e, None), "OK");
-        assert_eq!(handle_query("CREATE LENS x int", &e, None), "OK");
+        assert_eq!(q("CREATE DATABASE main", &e, None), "OK");
+        assert_eq!(q("CREATE LENS x int", &e, None), "OK");
     }
 
     #[test]
     fn range_response_lists_segments() {
         let e = exec();
-        handle_query("CREATE DATABASE main", &e, None);
-        handle_query("CREATE LENS x int", &e, None);
-        handle_query("APPEND LENS x 0 5 1", &e, None);
-        handle_query("APPEND LENS x 5 10 2", &e, None);
-        assert_eq!(
-            handle_query("RANGE LENS x 0 10", &e, None),
-            "RANGE 2; 0:5:i1; 5:10:i2"
-        );
+        q("CREATE DATABASE main", &e, None);
+        q("CREATE LENS x int", &e, None);
+        q("APPEND LENS x 0 5 1", &e, None);
+        q("APPEND LENS x 5 10 2", &e, None);
+        assert_eq!(q("RANGE LENS x 0 10", &e, None), "RANGE 2; 0:5:i1; 5:10:i2");
     }
 
     #[test]
     fn execution_error_is_reported() {
-        let r = handle_query("CREATE LENS x int", &exec(), None);
+        let r = q("CREATE LENS x int", &exec(), None);
         assert!(r.starts_with("ERR no active database"), "got: {r}");
     }
 
     #[test]
     fn read_only_router_picks_shared_lock() {
         let e = exec();
-        handle_query("CREATE DATABASE main", &e, None);
-        handle_query("CREATE LENS x int", &e, None);
-        handle_query("APPEND LENS x 0 100 7", &e, None);
+        q("CREATE DATABASE main", &e, None);
+        q("CREATE LENS x int", &e, None);
+        q("APPEND LENS x 0 100 7", &e, None);
         let mut handles = vec![];
         for _ in 0..8 {
             let e = e.clone();
             handles.push(thread::spawn(move || {
-                assert_eq!(handle_query("AT LENS x 50", &e, None), "VAL i7");
+                assert_eq!(q("AT LENS x 50", &e, None), "VAL i7");
             }));
         }
         for h in handles {
