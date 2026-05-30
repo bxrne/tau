@@ -86,8 +86,12 @@ connected to 127.0.0.1:7070 as prod (plain)
 τ: CREATE DATABASE sensors
 τ: CREATE LENS temperature float
 τ: APPEND LENS temperature 0 3600 18.5, 3600 7200 21.0
+τ: BATCH APPEND LENS temperature { 7200 10800 19.0 ; 10800 14400 23.5 }
 τ: AT LENS temperature 1800
 VAL f18.5
+
+τ: HISTORY LENS temperature
+LAYERS 2; 1:0:0:7200:2 2:0:7200:14400:2
 ```
 
 ---
@@ -132,7 +136,22 @@ The provisioned dashboard (`tau-db-prod`) shows:
 
 ---
 
-## 7. Enable TLS
+## 7. Manage permissions
+
+Create users and grant access with the running server:
+
+```
+τ: CREATE USER analyst PASSWORD "readonly123"
+τ: GRANT R ON sensors TO analyst
+τ: SHOW GRANTS analyst
+GRANTS 1; analyst sensors:R
+```
+
+See [Permissions](/docs/permissions/) for the full CRUDA bitmap and per-statement requirements.
+
+---
+
+## 8. Enable TLS
 
 Create a `certs/` directory inside `container/` and place your PEM files there:
 
@@ -163,7 +182,7 @@ For dev without a real cert, `TAU_TLS=--tls` generates an ephemeral self-signed 
 
 ---
 
-## 8. Enable encryption at rest
+## 9. Enable encryption at rest
 
 Generate a key:
 
@@ -187,7 +206,7 @@ All subsequent WAL entries are AES-256-GCM encrypted. Keep the key in a secrets 
 
 ---
 
-## 9. Stop and reset
+## 10. Stop and reset
 
 ```bash
 # Stop and keep data

@@ -32,6 +32,33 @@ impl Oracle {
         self.lenses.remove(lens);
     }
 
+    /// Returns midpoints of the first `n` stored segments — useful for spot-checks.
+    pub(crate) fn sample_midpoints(&self, lens: &str, n: usize) -> Vec<i64> {
+        let Some(map) = self.lenses.get(lens) else {
+            return vec![];
+        };
+        map.iter()
+            .take(n)
+            .map(|(&s, &(e, _))| s + (e - s) / 2)
+            .collect()
+    }
+
+    /// Returns all `(start, end, value)` segments overlapping `[rs, re)`,
+    /// clipped to that window.  Since the oracle uses a monotonic time cursor,
+    /// each start key is unique and segments never overlap.
+    pub(crate) fn range(&self, lens: &str, rs: i64, re: i64) -> Vec<(i64, i64, i64)> {
+        let Some(map) = self.lenses.get(lens) else {
+            return vec![];
+        };
+        let mut result = Vec::new();
+        for (&s, &(e, v)) in map.range(..re) {
+            if e > rs {
+                result.push((s.max(rs), e.min(re), v));
+            }
+        }
+        result
+    }
+
     pub(crate) fn total_segments(&self) -> usize {
         self.lenses.values().map(|m| m.len()).sum()
     }

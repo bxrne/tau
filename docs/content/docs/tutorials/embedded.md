@@ -6,7 +6,7 @@ template = "page.html"
 
 Use Tau as a Rust library with no server process, no TCP, and no authentication overhead. This is the fastest way to use Tau and the right choice for applications that own their data directly.
 
-**Prerequisites:** Rust 1.81+, `Cargo.toml` for your project.
+**Prerequisites:** Rust 1.94.1, `Cargo.toml` for your project.
 
 ---
 
@@ -40,6 +40,12 @@ fn main() {
     // Append some temporal intervals
     executor.exec(
         &parse("APPEND LENS temperature 0 3600 18.5, 3600 7200 21.0")
+            .unwrap().1
+    ).unwrap();
+
+    // Block-syntax bulk ingest: equivalent to APPEND but easier to generate
+    executor.exec(
+        &parse("BATCH APPEND LENS temperature { 7200 10800 19.0 ; 10800 14400 23.5 }")
             .unwrap().1
     ).unwrap();
 
@@ -100,18 +106,47 @@ The `Executor::new()` and `Executor::with_threshold(n)` constructors create in-m
 
 ```rust
 match executor.exec_read(&stmt)? {
-    Output::Value(Some(v)) => println!("value: {v:?}"),
-    Output::Value(None)    => println!("no value at that timestamp"),
-    Output::Range(segs)    => println!("{} segments", segs.len()),
-    Output::Names(names)   => println!("names: {names:?}"),
-    Output::Empty          => println!("ok (DDL)"),
-    Output::Grants(g)      => println!("grants: {g:?}"),
+    Output::Value(Some(v))     => println!("value: {v:?}"),
+    Output::Value(None)        => println!("no value at that timestamp"),
+    Output::Range(segs)        => println!("{} segments", segs.len()),
+    Output::Names(names)       => println!("names: {names:?}"),
+    Output::Empty              => println!("ok (DDL)"),
+    Output::Grants(g)          => println!("grants: {g:?}"),
+    Output::LayerHistory(layers) => println!("{} layers", layers.len()),
 }
 ```
 
 ---
 
-## 6. Using exec vs exec_read
+## 6. Layer audit and temporal queries
+
+`HISTORY LENS` returns layer metadata; `AT LENS … AS OF` and `AT LENS … LAYER` provide point-in-time and layer-specific lookups.
+
+```rust
+use tau::LayerInfo;
+
+// Audit layers
+let (_, stmt) = parse("HISTORY LENS temperature").unwrap();
+if let Output::LayerHistory(layers) = executor.exec_read(&stmt).unwrap() {
+    for LayerInfo { id, written_at, min_start, max_end, tau_count } in &layers {
+        println!("layer {id}: {tau_count} taus [{min_start}, {max_end}) written_at={written_at}");
+    }
+    // Query a specific layer by its ID
+    if let Some(first) = layers.first() {
+        let q = format!("AT LENS temperature 1800 LAYER {}", first.id);
+        let (_, stmt) = parse(&q).unwrap();
+        println!("{:?}", executor.exec_read(&stmt).unwrap());
+    }
+}
+
+// Time-travel: what did the lens look like at a specific wall-clock time?
+let (_, stmt) = parse("AT LENS temperature 1800 AS OF 1717000000000").unwrap();
+println!("{:?}", executor.exec_read(&stmt).unwrap());
+```
+
+---
+
+## 7. Using exec vs exec_read
 
 Two entry points with the same semantics but different lock behaviour:
 
@@ -124,7 +159,7 @@ Neither entry point performs any permission check; auth is a server concern. Emb
 
 ---
 
-## 7. Concurrent access
+## 8. Concurrent access
 
 Wrap the executor in `Arc<RwLock<Executor>>` for multi-threaded use:
 
@@ -156,7 +191,7 @@ let executor = Arc::new(RwLock::new(Executor::new()));
 
 ---
 
-## 8. WAL durability
+## 9. WAL durability
 
 ```rust
 use tau::{Database, Executor, Wal, storage::disk::Disk};
@@ -172,14 +207,14 @@ For most embedded use cases, in-memory storage is sufficient. The WAL is primari
 
 ---
 
-## 9. Performance considerations
+## 10. Performance considerations
 
 The embedded executor skips all network overhead. Performance is bounded by:
 
 - **Write path:** WAL fsync (if enabled), in-memory append, optional compaction
 - **Read path:** layer scan with skip-check bounds, binary search per layer
 
-For bulk ingestion, batch multiple intervals in one `APPEND` statement to create one layer rather than many. This reduces compaction pressure and speeds up subsequent queries.
+For bulk ingestion, use `BATCH APPEND LENS name { s e v ; ... }` or batch multiple intervals in one `APPEND` to create one layer rather than many. This reduces compaction pressure and speeds up subsequent queries.
 
 Disable per-fsync durability for bulk loads:
 
@@ -195,6 +230,7 @@ db.set_auto_checkpoint(false);
 
 ## Next steps
 
-- [TauQL Reference](/docs/tauql/): all statement syntax
+- [TauQL Reference](/docs/tauql/): all statement syntax including BATCH APPEND, HISTORY LENS, AT AS OF, BACKUP/RESTORE
+- [Permissions](/docs/permissions/): CRUDA bitmap (auth is bypassed in embedded mode but good to know)
 - [How it works](/docs/how-it-works/): how the executor and storage layer work
 - [Testing](/docs/testing/): using the DST embedded mode for correctness validation

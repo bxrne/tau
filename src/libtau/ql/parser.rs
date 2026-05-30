@@ -19,7 +19,7 @@ use nom::{
     bytes::complete::{is_not, tag, tag_no_case, take_while1},
     character::complete::{alpha1, alphanumeric1, char, digit1, multispace0, multispace1},
     combinator::{map, map_res, opt, recognize, value},
-    multi::many0,
+    multi::{many0, separated_list0},
     sequence::{delimited, pair, preceded},
 };
 
@@ -32,6 +32,7 @@ pub fn parse(input: &str) -> IResult<&str, Stmt> {
     let (input, _) = multispace0(input)?;
     let (input, s) = alt((
         stmt_create,
+        stmt_batch_append,
         stmt_append,
         stmt_copy,
         stmt_derive,
@@ -46,6 +47,9 @@ pub fn parse(input: &str) -> IResult<&str, Stmt> {
         stmt_start_tx,
         stmt_commit,
         stmt_rollback,
+        stmt_history,
+        stmt_backup,
+        stmt_restore,
     ))
     .parse(input)?;
     let (input, _) = multispace0(input)?;
@@ -173,6 +177,40 @@ fn stmt_at(i: &str) -> IResult<&str, Stmt> {
     let (i, name) = ident(i)?;
     let (i, _) = multispace1(i)?;
     let (i, t) = integer(i)?;
+
+    // Try "AS OF <timestamp>".
+    let (i, as_of) = opt(preceded(
+        (
+            multispace1,
+            tag_no_case("AS"),
+            multispace1,
+            tag_no_case("OF"),
+            multispace1,
+        ),
+        integer,
+    ))
+    .parse(i)?;
+    if let Some(ts) = as_of {
+        return Ok((i, Stmt::AtAsOf { name, t, as_of: ts }));
+    }
+
+    // Try "LAYER <id>".
+    let (i, layer_id) = opt(preceded(
+        (multispace1, tag_no_case("LAYER"), multispace1),
+        unsigned_integer,
+    ))
+    .parse(i)?;
+    if let Some(lid) = layer_id {
+        return Ok((
+            i,
+            Stmt::AtLayer {
+                name,
+                t,
+                layer_id: lid,
+            },
+        ));
+    }
+
     Ok((i, Stmt::At { name, t }))
 }
 
@@ -531,6 +569,11 @@ fn type_name(i: &str) -> IResult<&str, Type> {
     .parse(i)
 }
 
+/// An unsigned 64-bit integer literal (no leading sign).  Used for layer IDs.
+fn unsigned_integer(i: &str) -> IResult<&str, u64> {
+    map_res(digit1, |s: &str| s.parse::<u64>()).parse(i)
+}
+
 /// An integer literal, optionally preceded by a `-` for negative numbers.
 fn integer(i: &str) -> IResult<&str, i64> {
     map_res(recognize(pair(opt(char('-')), digit1)), |s: &str| {
@@ -581,6 +624,71 @@ fn literal(i: &str) -> IResult<&str, Literal> {
         map(integer, Literal::Int),
     ))
     .parse(i)
+}
+
+/// `BATCH APPEND LENS <name> { <s> <e> <v> [; <s> <e> <v> …] }` -
+/// block-syntax bulk ingest.  Taus are separated by `;` (plus optional
+/// surrounding whitespace).  The block may span multiple lines when the
+/// caller has already joined them with a space.
+fn stmt_batch_append(i: &str) -> IResult<&str, Stmt> {
+    let (i, _) = kw("BATCH").parse(i)?;
+    let (i, _) = kw("APPEND").parse(i)?;
+    let (i, _) = kw("LENS").parse(i)?;
+    let (i, name) = ident(i)?;
+    let (i, _) = multispace0(i)?;
+    let (i, _) = char('{')(i)?;
+    let (i, _) = multispace0(i)?;
+    // Taus inside the block are separated by optional whitespace + ';' +
+    // optional whitespace.  An empty block `{}` yields zero taus.
+    let (i, taus) =
+        separated_list0(delimited(multispace0, char(';'), multispace0), tau_triple).parse(i)?;
+    let (i, _) = multispace0(i)?;
+    // Allow a trailing semicolon before `}`.
+    let (i, _) = opt(char(';')).parse(i)?;
+    let (i, _) = multispace0(i)?;
+    let (i, _) = char('}')(i)?;
+    Ok((i, Stmt::BatchAppend { name, taus }))
+}
+
+/// `HISTORY LENS <name> [<start> <end>]` - list layers (optionally filtered
+/// to those that overlap `[start, end)`).
+fn stmt_history(i: &str) -> IResult<&str, Stmt> {
+    let (i, _) = kw("HISTORY").parse(i)?;
+    let (i, _) = kw("LENS").parse(i)?;
+    let (i, name) = ident(i)?;
+    let (i, range) = opt(map(
+        pair(
+            preceded(multispace1, integer),
+            preceded(multispace1, integer),
+        ),
+        |(start, end)| (start, end),
+    ))
+    .parse(i)?;
+    Ok((i, Stmt::HistoryLens { name, range }))
+}
+
+/// `BACKUP DATABASE <name> TO "<path>"` - snapshot to a file.
+fn stmt_backup(i: &str) -> IResult<&str, Stmt> {
+    let (i, _) = kw("BACKUP").parse(i)?;
+    let (i, _) = kw("DATABASE").parse(i)?;
+    let (i, name) = ident(i)?;
+    let (i, _) = multispace1(i)?;
+    let (i, _) = tag_no_case("TO")(i)?;
+    let (i, _) = multispace1(i)?;
+    let (i, path) = string_lit(i)?;
+    Ok((i, Stmt::BackupDatabase { name, path }))
+}
+
+/// `RESTORE DATABASE <name> FROM "<path>"` - replay a backup snapshot.
+fn stmt_restore(i: &str) -> IResult<&str, Stmt> {
+    let (i, _) = kw("RESTORE").parse(i)?;
+    let (i, _) = kw("DATABASE").parse(i)?;
+    let (i, name) = ident(i)?;
+    let (i, _) = multispace1(i)?;
+    let (i, _) = tag_no_case("FROM")(i)?;
+    let (i, _) = multispace1(i)?;
+    let (i, path) = string_lit(i)?;
+    Ok((i, Stmt::RestoreDatabase { name, path }))
 }
 
 #[cfg(test)]
@@ -808,6 +916,7 @@ mod tests {
                     | "DROP"
                     | "USE"
                     | "APPEND"
+                    | "BATCH"
                     | "COPY"
                     | "DERIVE"
                     | "SHOW"
@@ -818,6 +927,9 @@ mod tests {
                     | "REVOKE"
                     | "COMMIT"
                     | "ROLLBACK"
+                    | "HISTORY"
+                    | "BACKUP"
+                    | "RESTORE"
             )
         }));
         assert!(parse(&format!("{junk} LENS x 1")).is_err());

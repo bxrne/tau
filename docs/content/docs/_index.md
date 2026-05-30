@@ -14,6 +14,7 @@ Complete reference for Tau. The data model, query language, storage internals, t
 - [DST](/docs/dst/). The deterministic simulation tester. Inspired by FoundationDB and TigerBeetle.
 - [Testing](/docs/testing/). Property based tests and unit anchors. How the three layers fit together.
 - [Examples](/docs/examples/). Worked queries against the bundled real datasets.
+- [Permissions](/docs/permissions/). The CRUDA bitmap, per-statement requirements, grants and wildcards.
 - [Configuration](/docs/configuration/). All server flags and environment variables.
 - [Containers](/docs/containers/). The Docker stack with Prometheus and Grafana.
 - [Roadmap](/docs/roadmap/). What shipped in v0.1 and what v0.2 and v0.3 require.

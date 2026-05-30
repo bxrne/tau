@@ -35,11 +35,28 @@ use std::time::Instant;
 
 use crate::libtau::database::Database;
 use crate::libtau::metrics::Metrics;
-use crate::libtau::model::{Layer, Tau, Timestamp};
+use crate::libtau::model::{Layer, LayerId, Tau, Timestamp};
 use crate::libtau::ql::ast::{AggFunc, BinOp, Expr, Stmt, Type, UnOp};
-use crate::libtau::storage::InMemory;
+use crate::libtau::storage::wal::{Wal, WalEntry};
+use crate::libtau::storage::{InMemory, sweep_range};
 use crate::libtau::users::{Perm, User, UserStore};
 use crate::libtau::value::Value;
+
+/// Metadata about a single layer returned by `HISTORY LENS`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayerInfo {
+    /// Monotonic layer identifier assigned at write time.
+    pub id: LayerId,
+    /// Wall-clock write time (milliseconds since Unix epoch).
+    /// `0` for layers replayed from WAL files that predate the timestamp field.
+    pub written_at: i64,
+    /// Earliest tau start in this layer.
+    pub min_start: Timestamp,
+    /// Latest tau end in this layer.
+    pub max_end: Timestamp,
+    /// Number of taus in this layer.
+    pub tau_count: usize,
+}
 
 /// Output of a single executed statement.
 #[derive(Debug, Clone, PartialEq)]
@@ -54,6 +71,8 @@ pub enum Output {
     Names(Vec<String>),
     /// `SHOW GRANTS` result: lines of `<user> <db>:<perms> <db>:<perms> …`.
     Grants(Vec<(String, Vec<(String, Perm)>)>),
+    /// `HISTORY LENS` result: metadata for each layer covering the queried range.
+    LayerHistory(Vec<LayerInfo>),
 }
 
 /// All errors the executor can produce.
@@ -93,6 +112,8 @@ pub enum ExecError {
     TransactionAlreadyActive,
     /// `COMMIT` or `ROLLBACK` issued without a preceding `START TRANSACTION`.
     NoActiveTransaction,
+    /// `RESTORE DATABASE` targeted a name that already exists.
+    DatabaseAlreadyExists(String),
 }
 
 /// Per-database executor state.
@@ -255,6 +276,9 @@ impl Executor {
         let t0 = Instant::now();
         let result = match stmt {
             Stmt::At { name, t } => self.at_lens(name, *t),
+            Stmt::AtAsOf { name, t, as_of } => self.at_as_of_lens(name, *t, *as_of),
+            Stmt::AtLayer { name, t, layer_id } => self.at_layer_lens(name, *t, *layer_id),
+            Stmt::HistoryLens { name, range } => self.history_lens(name, *range),
             Stmt::Range {
                 name,
                 start,
@@ -271,15 +295,19 @@ impl Executor {
             Stmt::ShowLenses => self.show_lenses(),
             Stmt::ShowUsers => self.show_users(),
             Stmt::ShowGrants { user } => self.show_grants(user.as_deref()),
+            Stmt::BackupDatabase { name, path } => self.backup_database(name, path),
             _ => Err(ExecError::InvalidExpr(
                 "exec_read called on a mutating statement".into(),
             )),
         };
         let ns = t0.elapsed().as_nanos() as u64;
         match stmt {
-            Stmt::At { .. } => self.metrics.record_at(ns),
+            Stmt::At { .. } | Stmt::AtAsOf { .. } | Stmt::AtLayer { .. } => {
+                self.metrics.record_at(ns)
+            }
             Stmt::Range { .. } => self.metrics.record_range(ns),
             Stmt::Reduce { .. } => self.metrics.record_reduce(ns),
+            Stmt::HistoryLens { .. } => self.metrics.record_history(ns),
             _ => {}
         }
         result
@@ -341,13 +369,24 @@ impl Executor {
             } => self.revoke(*perms, database, user),
             Stmt::ShowUsers => self.show_users(),
             Stmt::ShowGrants { user } => self.show_grants(user.as_deref()),
+            Stmt::BatchAppend { name, taus } => self.batch_append_lens(name, taus),
+            Stmt::AtAsOf { name, t, as_of } => self.at_as_of_lens(name, *t, *as_of),
+            Stmt::AtLayer { name, t, layer_id } => self.at_layer_lens(name, *t, *layer_id),
+            Stmt::HistoryLens { name, range } => self.history_lens(name, *range),
+            Stmt::BackupDatabase { name, path } => self.backup_database(name, path),
+            Stmt::RestoreDatabase { name, path } => self.restore_database(name, path),
         };
         let ns = t0.elapsed().as_nanos() as u64;
         match stmt {
-            Stmt::Append { .. } | Stmt::Copy { .. } => self.metrics.record_append(ns),
-            Stmt::At { .. } => self.metrics.record_at(ns),
+            Stmt::Append { .. } | Stmt::Copy { .. } | Stmt::BatchAppend { .. } => {
+                self.metrics.record_append(ns)
+            }
+            Stmt::At { .. } | Stmt::AtAsOf { .. } | Stmt::AtLayer { .. } => {
+                self.metrics.record_at(ns)
+            }
             Stmt::Range { .. } => self.metrics.record_range(ns),
             Stmt::Reduce { .. } => self.metrics.record_reduce(ns),
+            Stmt::HistoryLens { .. } => self.metrics.record_history(ns),
             _ => self.metrics.record_ddl(ns),
         }
         result
@@ -453,6 +492,12 @@ impl Executor {
                 require_global_admin()
             }
             Stmt::StartTransaction | Stmt::Commit | Stmt::Rollback => Ok(()),
+            Stmt::BatchAppend { .. } => require(require_active()?, Perm::U),
+            Stmt::AtAsOf { .. } | Stmt::AtLayer { .. } | Stmt::HistoryLens { .. } => {
+                require(require_active()?, Perm::R)
+            }
+            Stmt::BackupDatabase { name, .. } => require(name, Perm::R),
+            Stmt::RestoreDatabase { .. } => require_global_admin(),
         }
     }
 
@@ -739,6 +784,20 @@ impl Executor {
         if !state.base_types.contains_key(name) && !state.derived.contains_key(name) {
             return Err(ExecError::UnknownLens(name.into()));
         }
+        // Fast path for unfiltered base-lens queries: single-pass O(E log E) sweep
+        // instead of N sequential layer scans.
+        if filter.is_none() && state.base_types.contains_key(name) {
+            let layers = state.db.layers(name).unwrap_or_default();
+            let raw = sweep_range(&layers, start, end);
+            let mut out: Vec<(Timestamp, Timestamp, Value)> = Vec::with_capacity(raw.len());
+            for tau in raw {
+                match out.last_mut() {
+                    Some(last) if last.1 == tau.start && last.2 == tau.value => last.1 = tau.end,
+                    _ => out.push((tau.start, tau.end, tau.value)),
+                }
+            }
+            return Ok(Output::Range(out));
+        }
         let (bounds, layers_snap) = collect_range_bounds(state, name, start, end, filter)?;
         let out = build_range_segments(state, name, &bounds, layers_snap.as_deref(), filter)?;
         Ok(Output::Range(out))
@@ -798,6 +857,184 @@ impl Executor {
         }
     }
 
+    fn batch_append_lens(
+        &mut self,
+        name: &str,
+        taus: &[(i64, i64, crate::libtau::ql::ast::Literal)],
+    ) -> Result<Output, ExecError> {
+        let taus: Vec<(Timestamp, Timestamp, Value)> =
+            taus.iter().map(|(s, e, v)| (*s, *e, v.into())).collect();
+        self.append_lens(name, taus)
+    }
+
+    fn at_as_of_lens(&self, name: &str, t: Timestamp, as_of: i64) -> Result<Output, ExecError> {
+        let state = self.active_state()?;
+        if state.base_types.contains_key(name) {
+            let filtered: Vec<Layer<Value>> = state
+                .db
+                .layers(name)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|l| l.written_at == 0 || l.written_at <= as_of)
+                .collect();
+            Ok(Output::Value(if filtered.is_empty() {
+                None
+            } else {
+                at_layers(&filtered, t)
+            }))
+        } else if state.derived.contains_key(name) {
+            Err(ExecError::InvalidExpr(
+                "AT AS OF is only supported for base lenses".into(),
+            ))
+        } else {
+            Err(ExecError::UnknownLens(name.into()))
+        }
+    }
+
+    fn at_layer_lens(&self, name: &str, t: Timestamp, layer_id: u64) -> Result<Output, ExecError> {
+        let state = self.active_state()?;
+        if !state.base_types.contains_key(name) {
+            return if state.derived.contains_key(name) {
+                Err(ExecError::InvalidExpr(
+                    "AT LAYER is only supported for base lenses".into(),
+                ))
+            } else {
+                Err(ExecError::UnknownLens(name.into()))
+            };
+        }
+        let result = state
+            .db
+            .layers(name)
+            .as_deref()
+            .and_then(|ls| ls.iter().find(|l| l.id == layer_id))
+            .and_then(|l| l.at(t))
+            .cloned();
+        Ok(Output::Value(result))
+    }
+
+    fn history_lens(&self, name: &str, range: Option<(i64, i64)>) -> Result<Output, ExecError> {
+        let state = self.active_state()?;
+        if !state.base_types.contains_key(name) && !state.derived.contains_key(name) {
+            return Err(ExecError::UnknownLens(name.into()));
+        }
+        let layers = state.db.layers(name).unwrap_or_default();
+        let infos = layers
+            .iter()
+            .filter(|l| match range {
+                Some((start, end)) => l.max_end > start && l.min_start < end,
+                None => true,
+            })
+            .map(|l| LayerInfo {
+                id: l.id,
+                written_at: l.written_at,
+                min_start: l.min_start,
+                max_end: l.max_end,
+                tau_count: l.taus.len(),
+            })
+            .collect();
+        Ok(Output::LayerHistory(infos))
+    }
+
+    fn backup_database(&self, name: &str, path: &str) -> Result<Output, ExecError> {
+        let state = self
+            .databases
+            .get(name)
+            .ok_or_else(|| ExecError::UnknownDatabase(name.into()))?;
+
+        // Build schema DDL from executor in-memory state so backup works even
+        // when no WAL is attached to the source database.
+        let mut schema_stmts: Vec<String> = Vec::new();
+        for (lens_name, lens_type) in &state.base_types {
+            schema_stmts.push(format!("CREATE LENS {lens_name} {lens_type}"));
+        }
+        for (lens_name, expr) in &state.derived {
+            schema_stmts.push(format!("DERIVE LENS {lens_name} AS {expr}"));
+        }
+
+        let bk_path = Path::new(path);
+        if bk_path.exists() {
+            fs::remove_file(bk_path).map_err(|e| ExecError::Io(e.to_string()))?;
+        }
+
+        let mut wal = Wal::open(path, None).map_err(|e| ExecError::Io(e.to_string()))?;
+        for stmt in &schema_stmts {
+            wal.append_schema(stmt)
+                .map_err(|e| ExecError::Io(e.to_string()))?;
+        }
+        let raw_schema = wal
+            .raw_schema_lines()
+            .map_err(|e| ExecError::Io(e.to_string()))?;
+
+        let all_layers = state.db.export_layers();
+        let entries: Vec<WalEntry<Value>> = all_layers
+            .iter()
+            .flat_map(|(lens_name, layers)| {
+                layers.iter().map(move |layer| WalEntry {
+                    layer_id: layer.id,
+                    written_at: layer.written_at,
+                    lens: lens_name.clone(),
+                    taus: layer
+                        .taus
+                        .iter()
+                        .map(|t| (t.start, t.end, t.value.clone()))
+                        .collect(),
+                })
+            })
+            .collect();
+
+        wal.rewrite(&raw_schema, &entries)
+            .map_err(|e| ExecError::Io(e.to_string()))?;
+        Ok(Output::Empty)
+    }
+
+    fn restore_database(&mut self, name: &str, path: &str) -> Result<Output, ExecError> {
+        if self.databases.contains_key(name) {
+            return Err(ExecError::DatabaseAlreadyExists(name.into()));
+        }
+        if !Path::new(path).exists() {
+            return Err(ExecError::Io(format!("backup file not found: {path}")));
+        }
+
+        let wal = Wal::open(path, None).map_err(|e| ExecError::Io(e.to_string()))?;
+        let mut store = InMemory::<Value>::with_threshold(self.compact_threshold);
+        wal.replay(&mut store)
+            .map_err(|e| ExecError::Io(e.to_string()))?;
+        let schema_stmts = wal
+            .replay_schemas()
+            .map_err(|e| ExecError::Io(e.to_string()))?;
+
+        let db = Database::new(store);
+        let next_layer_id = db.max_layer_id() + 1;
+        self.databases.insert(
+            name.into(),
+            DbState {
+                db,
+                base_types: HashMap::new(),
+                next_layer_id,
+                derived: HashMap::new(),
+            },
+        );
+
+        let prev_active = self.active.clone();
+        self.active = Some(name.into());
+        self.in_replay = true;
+        for stmt_text in &schema_stmts {
+            match crate::libtau::ql::parser::parse(stmt_text) {
+                Ok((_, stmt)) => {
+                    if let Err(e) = self.exec(&stmt) {
+                        tracing::warn!(stmt = %stmt_text, error = ?e, "restore: schema replay failed");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(stmt = %stmt_text, error = %e, "restore: schema parse error");
+                }
+            }
+        }
+        self.in_replay = false;
+        self.active = prev_active;
+        Ok(Output::Empty)
+    }
+
     fn active_state(&self) -> Result<&DbState, ExecError> {
         let name = self.active.as_deref().ok_or(ExecError::NoActiveDatabase)?;
         self.databases
@@ -823,6 +1060,7 @@ fn is_transactable(stmt: &Stmt) -> bool {
         stmt,
         Stmt::Create { .. }
             | Stmt::Append { .. }
+            | Stmt::BatchAppend { .. }
             | Stmt::Copy { .. }
             | Stmt::Derive { .. }
             | Stmt::Drop { .. }
@@ -2427,6 +2665,348 @@ mod tests {
         assert_eq!(
             run(&mut e, "AT LENS x 5").unwrap(),
             Output::Value(Some(Value::Int(7)))
+        );
+    }
+
+    // --- BATCH APPEND tests ---
+
+    #[test]
+    fn batch_append_produces_same_at_result_as_append() {
+        let mut e = setup();
+        run(&mut e, "CREATE LENS x int").unwrap();
+        run(&mut e, "BATCH APPEND LENS x { 0 10 42 ; 20 30 99 }").unwrap();
+        assert_eq!(
+            run(&mut e, "AT LENS x 5").unwrap(),
+            Output::Value(Some(Value::Int(42)))
+        );
+        assert_eq!(
+            run(&mut e, "AT LENS x 25").unwrap(),
+            Output::Value(Some(Value::Int(99)))
+        );
+        assert_eq!(run(&mut e, "AT LENS x 15").unwrap(), Output::Value(None));
+    }
+
+    #[test]
+    fn batch_append_empty_block_succeeds() {
+        let mut e = setup();
+        run(&mut e, "CREATE LENS x int").unwrap();
+        assert_eq!(
+            run(&mut e, "BATCH APPEND LENS x {}").unwrap(),
+            Output::Empty
+        );
+    }
+
+    #[hegel::test]
+    fn batch_append_matches_regular_append(tc: TestCase) {
+        let n = tc.draw(gs::integers::<usize>().min_value(1).max_value(6));
+        let mut segs: Vec<(i64, i64, i64)> = Vec::new();
+        let mut cursor: i64 = 0;
+        for _ in 0..n {
+            let gap = tc.draw(gs::integers::<i64>().min_value(1).max_value(1_000));
+            let len = tc.draw(gs::integers::<i64>().min_value(1).max_value(1_000));
+            let val = tc.draw(gs::integers::<i64>().min_value(-10_000).max_value(10_000));
+            let s = cursor + gap;
+            let e = s + len;
+            segs.push((s, e, val));
+            cursor = e;
+        }
+
+        let mut direct = setup();
+        run(&mut direct, "CREATE LENS x int").unwrap();
+        let mut append_stmt = "APPEND LENS x".to_string();
+        for (i, &(s, e, v)) in segs.iter().enumerate() {
+            if i > 0 {
+                append_stmt.push(',');
+            }
+            append_stmt.push_str(&format!(" {s} {e} {v}"));
+        }
+        run(&mut direct, &append_stmt).unwrap();
+
+        let mut batch = setup();
+        run(&mut batch, "CREATE LENS x int").unwrap();
+        let body = segs
+            .iter()
+            .map(|(s, e, v)| format!("{s} {e} {v}"))
+            .collect::<Vec<_>>()
+            .join(" ; ");
+        run(&mut batch, &format!("BATCH APPEND LENS x {{ {body} }}")).unwrap();
+
+        for &(s, e, v) in &segs {
+            let mid = s + (e - s) / 2;
+            assert_eq!(
+                run(&mut direct, &format!("AT LENS x {mid}")).unwrap(),
+                run(&mut batch, &format!("AT LENS x {mid}")).unwrap(),
+                "segment [{s},{e}) value {v} diverged between APPEND and BATCH APPEND"
+            );
+        }
+    }
+
+    // --- HISTORY LENS tests ---
+
+    #[test]
+    fn history_lens_returns_one_layer_after_append() {
+        let mut e = setup();
+        run(&mut e, "CREATE LENS x int").unwrap();
+        run(&mut e, "APPEND LENS x 0 10 42").unwrap();
+        let (_, stmt) = parse("HISTORY LENS x").unwrap();
+        let out = e.exec_read(&stmt).unwrap();
+        let layers = match out {
+            Output::LayerHistory(l) => l,
+            other => panic!("expected LayerHistory, got {other:?}"),
+        };
+        assert_eq!(layers.len(), 1);
+        assert_eq!(layers[0].tau_count, 1);
+        assert_eq!(layers[0].min_start, 0);
+        assert_eq!(layers[0].max_end, 10);
+    }
+
+    #[test]
+    fn history_lens_empty_on_no_data() {
+        let mut e = setup();
+        run(&mut e, "CREATE LENS x int").unwrap();
+        let (_, stmt) = parse("HISTORY LENS x").unwrap();
+        let out = e.exec_read(&stmt).unwrap();
+        assert_eq!(out, Output::LayerHistory(vec![]));
+    }
+
+    #[test]
+    fn history_lens_time_filter_excludes_non_overlapping_layers() {
+        let mut e = setup();
+        run(&mut e, "CREATE LENS x int").unwrap();
+        run(&mut e, "APPEND LENS x 0 10 1").unwrap();
+        run(&mut e, "APPEND LENS x 100 200 2").unwrap();
+        let (_, stmt) = parse("HISTORY LENS x 50 150").unwrap();
+        let out = e.exec_read(&stmt).unwrap();
+        let layers = match out {
+            Output::LayerHistory(l) => l,
+            other => panic!("expected LayerHistory, got {other:?}"),
+        };
+        // Only the second layer (100..200) overlaps [50, 150).
+        assert_eq!(layers.len(), 1);
+        assert_eq!(layers[0].min_start, 100);
+    }
+
+    #[hegel::test]
+    fn history_lens_layer_count_matches_appends(tc: TestCase) {
+        let n = tc.draw(gs::integers::<usize>().min_value(1).max_value(8));
+        let mut e = setup();
+        run(&mut e, "CREATE LENS x int").unwrap();
+        for i in 0..n {
+            let s = (i as i64) * 100;
+            run(&mut e, &format!("APPEND LENS x {s} {} {i}", s + 50)).unwrap();
+        }
+        let (_, stmt) = parse("HISTORY LENS x").unwrap();
+        let layers = match e.exec_read(&stmt).unwrap() {
+            Output::LayerHistory(l) => l,
+            other => panic!("expected LayerHistory, got {other:?}"),
+        };
+        // Each APPEND creates one layer (assuming no compaction at threshold 4; n <= 8 may
+        // trigger one compaction round, so check >= 1 and <= n).
+        assert!(
+            !layers.is_empty(),
+            "expected at least one layer after {n} appends"
+        );
+        assert!(
+            layers.len() <= n,
+            "layer count {} > append count {n} (compaction should only reduce)",
+            layers.len()
+        );
+    }
+
+    // --- AT AS OF tests ---
+
+    #[test]
+    fn at_as_of_with_max_timestamp_includes_all_data() {
+        let mut e = setup();
+        run(&mut e, "CREATE LENS x int").unwrap();
+        run(&mut e, "APPEND LENS x 0 10 42").unwrap();
+        // written_at=0 for in-memory appends, so any as_of value includes them.
+        let (_, stmt) = parse("AT LENS x 5 AS OF 9999999999999").unwrap();
+        assert_eq!(
+            e.exec_read(&stmt).unwrap(),
+            Output::Value(Some(Value::Int(42)))
+        );
+    }
+
+    #[test]
+    fn at_as_of_derived_lens_errors() {
+        let mut e = setup();
+        run(&mut e, "CREATE LENS x int").unwrap();
+        run(&mut e, "DERIVE LENS y AS x").unwrap();
+        let (_, stmt) = parse("AT LENS y 5 AS OF 0").unwrap();
+        assert!(
+            e.exec_read(&stmt).is_err(),
+            "AT AS OF on a derived lens should error"
+        );
+    }
+
+    // --- AT LAYER tests ---
+
+    #[test]
+    fn at_layer_returns_value_from_correct_layer() {
+        let mut e = setup();
+        run(&mut e, "CREATE LENS x int").unwrap();
+        run(&mut e, "APPEND LENS x 0 10 42").unwrap();
+        let (_, hist_stmt) = parse("HISTORY LENS x").unwrap();
+        let layer_id = match e.exec_read(&hist_stmt).unwrap() {
+            Output::LayerHistory(layers) => layers[0].id,
+            other => panic!("expected LayerHistory, got {other:?}"),
+        };
+        let (_, stmt) = parse(&format!("AT LENS x 5 LAYER {layer_id}")).unwrap();
+        assert_eq!(
+            e.exec_read(&stmt).unwrap(),
+            Output::Value(Some(Value::Int(42)))
+        );
+    }
+
+    #[test]
+    fn at_layer_nonexistent_layer_returns_nil() {
+        let mut e = setup();
+        run(&mut e, "CREATE LENS x int").unwrap();
+        run(&mut e, "APPEND LENS x 0 10 42").unwrap();
+        let (_, stmt) = parse("AT LENS x 5 LAYER 99999").unwrap();
+        assert_eq!(e.exec_read(&stmt).unwrap(), Output::Value(None));
+    }
+
+    // --- BACKUP / RESTORE tests ---
+
+    #[test]
+    fn backup_restore_roundtrip_preserves_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let bak = dir.path().join("x.bak").display().to_string();
+
+        let mut e = setup();
+        run(&mut e, "CREATE LENS x int").unwrap();
+        run(&mut e, "APPEND LENS x 0 10 42").unwrap();
+        run(&mut e, "APPEND LENS x 10 20 99").unwrap();
+        run(&mut e, &format!("BACKUP DATABASE main TO \"{bak}\"")).unwrap();
+
+        let mut e2 = Executor::new();
+        run(&mut e2, "CREATE DATABASE other").unwrap();
+        run(&mut e2, &format!("RESTORE DATABASE main FROM \"{bak}\"")).unwrap();
+        run(&mut e2, "USE DATABASE main").unwrap();
+        assert_eq!(
+            run(&mut e2, "AT LENS x 5").unwrap(),
+            Output::Value(Some(Value::Int(42)))
+        );
+        assert_eq!(
+            run(&mut e2, "AT LENS x 15").unwrap(),
+            Output::Value(Some(Value::Int(99)))
+        );
+    }
+
+    #[hegel::test]
+    fn at_as_of_with_large_timestamp_matches_at(tc: TestCase) {
+        let n = tc.draw(gs::integers::<usize>().min_value(1).max_value(6));
+        let mut segs: Vec<(i64, i64, i64)> = Vec::new();
+        let mut cursor: i64 = 0;
+        for _ in 0..n {
+            let gap = tc.draw(gs::integers::<i64>().min_value(1).max_value(1_000));
+            let len = tc.draw(gs::integers::<i64>().min_value(1).max_value(1_000));
+            let val = tc.draw(gs::integers::<i64>().min_value(-10_000).max_value(10_000));
+            let s = cursor + gap;
+            let e = s + len;
+            segs.push((s, e, val));
+            cursor = e;
+        }
+        let mut ex = setup();
+        run(&mut ex, "CREATE LENS x int").unwrap();
+        for &(s, end, v) in &segs {
+            run(&mut ex, &format!("APPEND LENS x {s} {end} {v}")).unwrap();
+        }
+        for &(s, end, _) in &segs {
+            let mid = s + (end - s) / 2;
+            let at_result = run(&mut ex, &format!("AT LENS x {mid}")).unwrap();
+            let (_, stmt) = parse(&format!("AT LENS x {mid} AS OF 9999999999999")).unwrap();
+            let as_of_result = ex.exec_read(&stmt).unwrap();
+            assert_eq!(
+                at_result, as_of_result,
+                "AT and AT AS OF diverged at t={mid}"
+            );
+        }
+    }
+
+    #[hegel::test]
+    fn at_layer_for_single_layer_matches_at(tc: TestCase) {
+        let s = tc.draw(gs::integers::<i64>().min_value(0).max_value(1_000));
+        let len = tc.draw(gs::integers::<i64>().min_value(1).max_value(1_000));
+        let val = tc.draw(gs::integers::<i64>().min_value(-10_000).max_value(10_000));
+        let end = s + len;
+        let mid = s + len / 2;
+        let mut ex = setup();
+        run(&mut ex, "CREATE LENS x int").unwrap();
+        run(&mut ex, &format!("APPEND LENS x {s} {end} {val}")).unwrap();
+        let (_, hist_stmt) = parse("HISTORY LENS x").unwrap();
+        let layer_id = match ex.exec_read(&hist_stmt).unwrap() {
+            Output::LayerHistory(layers) => {
+                assert_eq!(layers.len(), 1, "expected exactly one layer");
+                layers[0].id
+            }
+            other => panic!("expected LayerHistory, got {other:?}"),
+        };
+        let at_result = run(&mut ex, &format!("AT LENS x {mid}")).unwrap();
+        let (_, stmt) = parse(&format!("AT LENS x {mid} LAYER {layer_id}")).unwrap();
+        let layer_result = ex.exec_read(&stmt).unwrap();
+        assert_eq!(
+            at_result, layer_result,
+            "AT and AT LAYER diverged with single layer at t={mid}"
+        );
+    }
+
+    #[hegel::test]
+    fn backup_restore_at_matches_original(tc: TestCase) {
+        let n = tc.draw(gs::integers::<usize>().min_value(1).max_value(6));
+        let mut segs: Vec<(i64, i64, i64)> = Vec::new();
+        let mut cursor: i64 = 0;
+        for _ in 0..n {
+            let gap = tc.draw(gs::integers::<i64>().min_value(1).max_value(1_000));
+            let len = tc.draw(gs::integers::<i64>().min_value(1).max_value(1_000));
+            let val = tc.draw(gs::integers::<i64>().min_value(-10_000).max_value(10_000));
+            let s = cursor + gap;
+            let e = s + len;
+            segs.push((s, e, val));
+            cursor = e;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let bak = dir.path().join("prop.bak").display().to_string();
+        let mut original = setup();
+        run(&mut original, "CREATE LENS x int").unwrap();
+        for &(s, end, v) in &segs {
+            run(&mut original, &format!("APPEND LENS x {s} {end} {v}")).unwrap();
+        }
+        run(&mut original, &format!("BACKUP DATABASE main TO \"{bak}\"")).unwrap();
+        let mut restored = Executor::new();
+        run(&mut restored, "CREATE DATABASE anchor").unwrap();
+        run(
+            &mut restored,
+            &format!("RESTORE DATABASE main FROM \"{bak}\""),
+        )
+        .unwrap();
+        run(&mut restored, "USE DATABASE main").unwrap();
+        for &(s, end, _) in &segs {
+            let mid = s + (end - s) / 2;
+            assert_eq!(
+                run(&mut original, &format!("AT LENS x {mid}")).unwrap(),
+                run(&mut restored, &format!("AT LENS x {mid}")).unwrap(),
+                "backup/restore diverged at t={mid}"
+            );
+        }
+    }
+
+    #[test]
+    fn restore_existing_database_name_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let bak = dir.path().join("x.bak").display().to_string();
+
+        let mut e = setup();
+        run(&mut e, "CREATE LENS x int").unwrap();
+        run(&mut e, "APPEND LENS x 0 10 1").unwrap();
+        run(&mut e, &format!("BACKUP DATABASE main TO \"{bak}\"")).unwrap();
+
+        let err = run(&mut e, &format!("RESTORE DATABASE main FROM \"{bak}\""));
+        assert!(
+            matches!(err, Err(ExecError::DatabaseAlreadyExists(_))),
+            "expected DatabaseAlreadyExists, got {err:?}"
         );
     }
 }

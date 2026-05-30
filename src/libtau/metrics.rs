@@ -71,18 +71,21 @@ pub struct Metrics {
     pub at_count: AtomicU64,
     pub range_count: AtomicU64,
     pub reduce_count: AtomicU64,
+    pub history_count: AtomicU64,
     pub ddl_count: AtomicU64,
 
     pub append_ns: AtomicU64,
     pub at_ns: AtomicU64,
     pub range_ns: AtomicU64,
     pub reduce_ns: AtomicU64,
+    pub history_ns: AtomicU64,
     pub ddl_ns: AtomicU64,
 
     pub append_hist: Histogram,
     pub at_hist: Histogram,
     pub range_hist: Histogram,
     pub reduce_hist: Histogram,
+    pub history_hist: Histogram,
     pub ddl_hist: Histogram,
 
     /// Total TCP connections accepted by the server.
@@ -110,16 +113,19 @@ impl Metrics {
             at_count: AtomicU64::new(0),
             range_count: AtomicU64::new(0),
             reduce_count: AtomicU64::new(0),
+            history_count: AtomicU64::new(0),
             ddl_count: AtomicU64::new(0),
             append_ns: AtomicU64::new(0),
             at_ns: AtomicU64::new(0),
             range_ns: AtomicU64::new(0),
             reduce_ns: AtomicU64::new(0),
+            history_ns: AtomicU64::new(0),
             ddl_ns: AtomicU64::new(0),
             append_hist: Histogram::new(),
             at_hist: Histogram::new(),
             range_hist: Histogram::new(),
             reduce_hist: Histogram::new(),
+            history_hist: Histogram::new(),
             ddl_hist: Histogram::new(),
             connections: AtomicU64::new(0),
             rejected_connections: AtomicU64::new(0),
@@ -155,6 +161,13 @@ impl Metrics {
         self.reduce_count.fetch_add(1, Ordering::Relaxed);
         self.reduce_ns.fetch_add(ns, Ordering::Relaxed);
         self.reduce_hist.observe_ns(ns);
+    }
+
+    #[inline]
+    pub fn record_history(&self, ns: u64) {
+        self.history_count.fetch_add(1, Ordering::Relaxed);
+        self.history_ns.fetch_add(ns, Ordering::Relaxed);
+        self.history_hist.observe_ns(ns);
     }
 
     #[inline]
@@ -202,6 +215,7 @@ impl Metrics {
             ("at", &self.at_count),
             ("range", &self.range_count),
             ("reduce", &self.reduce_count),
+            ("history", &self.history_count),
             ("ddl", &self.ddl_count),
         ] {
             let _ = writeln!(
@@ -222,6 +236,7 @@ impl Metrics {
             ("at", &self.at_ns),
             ("range", &self.range_ns),
             ("reduce", &self.reduce_ns),
+            ("history", &self.history_ns),
             ("ddl", &self.ddl_ns),
         ] {
             let _ = writeln!(
@@ -242,6 +257,7 @@ impl Metrics {
             ("at", &self.at_hist),
             ("range", &self.range_hist),
             ("reduce", &self.reduce_hist),
+            ("history", &self.history_hist),
             ("ddl", &self.ddl_hist),
         ] {
             for (i, bound) in LATENCY_BUCKETS_US.iter().enumerate() {
@@ -435,6 +451,7 @@ mod tests {
         assert_eq!(m.at_count.load(r), 0);
         assert_eq!(m.range_count.load(r), 0);
         assert_eq!(m.reduce_count.load(r), 0);
+        assert_eq!(m.history_count.load(r), 0);
         assert_eq!(m.ddl_count.load(r), 0);
         assert_eq!(m.connections.load(r), 0);
         assert_eq!(m.rejected_connections.load(r), 0);
@@ -531,6 +548,7 @@ mod tests {
         m.record_at(200);
         m.record_range(300);
         m.record_reduce(400);
+        m.record_history(150);
         m.record_ddl(50);
         let text = m.prometheus_text();
         for line in [

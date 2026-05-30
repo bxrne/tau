@@ -59,22 +59,22 @@ The engine is correct. v0.2.0 makes it fast enough to benchmark honestly, operab
 - [ ] Flamegraph-guided profiling; all regressions caught by the bench suite in CI
 
 **Query performance**
-- [ ] Multi-layer merge iterator: single-pass query across N layers instead of N sequential passes — the primary hot path as layer count grows before compaction
+- [x] Multi-layer merge iterator: single-pass `sweep_range` query across N layers instead of N sequential passes — used as the fast path in `RANGE` for unfiltered base-lens queries
 - [ ] Write throughput profiling and targeted optimisation of the WAL path
 
 **Transactions and batch ingest**
 - [x] `START TRANSACTION` / `COMMIT` / `ROLLBACK`: atomic multi-statement transactions — mutations buffered per-connection, invisible until `COMMIT`, discarded on `ROLLBACK`
 - [x] `load` sends the entire batch inside a transaction — partial loads are rolled back automatically on any error
-- [ ] `BATCH APPEND LENS <name> { ... }`: single-statement bulk ingest for one lens — a list of intervals inside a block, committed as one layer without round-trip overhead; optimised for high-volume ingest paths
+- [x] `BATCH APPEND LENS <name> { ... }`: single-statement bulk ingest for one lens — a list of intervals inside a block, committed as one layer without round-trip overhead; optimised for high-volume ingest paths
 
 **Layer introspection and audit**
-- [ ] `HISTORY LENS <name> [start end]`: list all layers covering a time range, with their IDs, write timestamps, and interval coverage — answers "how many corrections have been applied here and when?"
-- [ ] `AT LENS <name> <t> AS OF <timestamp>`: point query against the state of the data as it existed at a given wall-clock time, using write timestamps recorded in the WAL; the user-facing audit API
-- [ ] `AT LENS <name> <t> LAYER <n>`: low-level audit query against a specific layer ID — used for debugging and by the DST
+- [x] `HISTORY LENS <name> [start end]`: list all layers covering a time range, with their IDs, write timestamps, and interval coverage — answers "how many corrections have been applied here and when?"
+- [x] `AT LENS <name> <t> AS OF <timestamp>`: point query against the state of the data as it existed at a given wall-clock time, using write timestamps recorded in the WAL; the user-facing audit API
+- [x] `AT LENS <name> <t> LAYER <n>`: low-level audit query against a specific layer ID — used for debugging and by the DST
 
 **Backup and restore**
-- [ ] `BACKUP DATABASE <name> TO <path>`: consistent snapshot — quiesces the WAL, copies the store file and a WAL checkpoint, resumes; atomic from the caller's perspective
-- [ ] `RESTORE DATABASE <name> FROM <path>`: replays a backup into a running server with WAL consistency checks
+- [x] `BACKUP DATABASE <name> TO <path>`: WAL snapshot — serialises schema DDL and all data layers into a standalone WAL file; works with or without a live WAL on the source database
+- [x] `RESTORE DATABASE <name> FROM <path>`: replays a backup into a running server, reconstructing schema and data
 - [ ] Tested against real failure scenarios: partial backup, interrupted restore, corrupt snapshot
 
 **Configuration**

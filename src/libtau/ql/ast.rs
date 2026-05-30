@@ -3,12 +3,14 @@
 //! The grammar is deliberately minimal:
 //!
 //! ```text
-//! stmt   := create | append | copy | derive | show | at | range | reduce | drop | use
-//!         | create_user | drop_user | grant | revoke
+//! stmt   := create | append | batch_append | copy | derive | show | at | range
+//!         | reduce | drop | use | create_user | drop_user | grant | revoke
+//!         | history | backup | restore
 //!
 //! create := CREATE DATABASE <ident>
 //!         | CREATE LENS <ident> <type>
 //! append := APPEND LENS <ident> <int> <int> <literal> [, <int> <int> <literal> …]
+//! batch_append := BATCH APPEND LENS <ident> { <int> <int> <literal> [; <int> <int> <literal> …] }
 //! copy   := COPY LENS <ident> FROM "<path>"
 //! derive := DERIVE LENS <ident> AS <expr>
 //! show   := SHOW DATABASES
@@ -16,8 +18,11 @@
 //!         | SHOW USERS
 //!         | SHOW GRANTS [<ident>]
 //! at     := AT     LENS <ident> <int>
+//!         | AT     LENS <ident> <int> AS OF <int>
+//!         | AT     LENS <ident> <int> LAYER <uint>
 //! range  := RANGE  LENS <ident> <int> <int> [WHERE <expr>]
 //! reduce := REDUCE LENS <ident> <int> <int> USING <func>
+//! history := HISTORY LENS <ident> [<int> <int>]
 //! drop   := DROP   LENS <ident>
 //!         | DROP   DATABASE <ident>
 //!         | DROP   USER <ident>
@@ -25,6 +30,8 @@
 //! start  := START TRANSACTION
 //! commit := COMMIT
 //! rollback := ROLLBACK
+//! backup := BACKUP DATABASE <ident> TO "<path>"
+//! restore := RESTORE DATABASE <ident> FROM "<path>"
 //!
 //! create_user := CREATE USER <ident> PASSWORD "<pass>"
 //! grant       := GRANT  <perm-letters> ON <db-or-star> TO   <ident>
@@ -161,6 +168,14 @@ pub enum Stmt {
         name: String,
         taus: Vec<(i64, i64, Literal)>,
     },
+    /// `BATCH APPEND LENS <name> { <s> <e> <v> ; … }` - block-syntax bulk
+    /// ingest.  Semantically identical to `Append` but the brace-delimited
+    /// block syntax is more ergonomic for large payloads and multi-line input.
+    /// All taus are committed as a single layer (one WAL write, one fsync).
+    BatchAppend {
+        name: String,
+        taus: Vec<(i64, i64, Literal)>,
+    },
     /// `COPY LENS <name> FROM "<path>"` - ingest taus from a CSV file where
     /// each line is `start,end,value`.
     Copy {
@@ -174,6 +189,22 @@ pub enum Stmt {
     At {
         name: String,
         t: i64,
+    },
+    /// `AT LENS <name> <t> AS OF <timestamp>` - point query against the state of
+    /// the data as it existed at the given wall-clock time (milliseconds since
+    /// Unix epoch).  Uses `written_at` timestamps recorded in the WAL.
+    AtAsOf {
+        name: String,
+        t: i64,
+        as_of: i64,
+    },
+    /// `AT LENS <name> <t> LAYER <id>` - low-level audit query against a specific
+    /// layer by ID.  Returns the value that layer records at time `t`, or NIL if
+    /// the layer does not cover `t`.
+    AtLayer {
+        name: String,
+        t: i64,
+        layer_id: u64,
     },
     Range {
         name: String,
@@ -227,10 +258,33 @@ pub enum Stmt {
     ShowGrants {
         user: Option<String>,
     },
+    /// `HISTORY LENS <name> [<start> <end>]` - list every layer that covers at
+    /// least part of the time range `[start, end)`.  Without range arguments,
+    /// lists all layers.  Returns layer IDs, write timestamps, and boundary
+    /// information — the user-facing audit API.
+    HistoryLens {
+        name: String,
+        range: Option<(i64, i64)>,
+    },
+    /// `BACKUP DATABASE <name> TO "<path>"` - quiesce the WAL, write a
+    /// self-contained snapshot (schema + data) to `path` in WAL wire format,
+    /// then resume.  Atomic from the caller's perspective.
+    BackupDatabase {
+        name: String,
+        path: String,
+    },
+    /// `RESTORE DATABASE <name> FROM "<path>"` - replay a backup snapshot
+    /// (written by `BACKUP DATABASE`) into the running server as a new
+    /// database named `name`.  WAL consistency checks are applied during
+    /// replay.
+    RestoreDatabase {
+        name: String,
+        path: String,
+    },
 }
 
 impl Stmt {
-    /// True for statements that only observe state (`AT`, `RANGE`).
+    /// True for statements that only observe state (`AT`, `RANGE`, etc.).
     ///
     /// The TCP server uses this to route a query through a shared-read lock
     /// instead of an exclusive write lock, allowing concurrent point and
@@ -239,12 +293,16 @@ impl Stmt {
         matches!(
             self,
             Stmt::At { .. }
+                | Stmt::AtAsOf { .. }
+                | Stmt::AtLayer { .. }
+                | Stmt::HistoryLens { .. }
                 | Stmt::Range { .. }
                 | Stmt::Reduce { .. }
                 | Stmt::ShowDatabases
                 | Stmt::ShowLenses
                 | Stmt::ShowUsers
                 | Stmt::ShowGrants { .. }
+                | Stmt::BackupDatabase { .. }
         )
     }
 }

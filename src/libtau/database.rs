@@ -236,6 +236,7 @@ where
                     store.layers(&name).map(|layers| {
                         layers.iter().map(move |layer| WalEntry {
                             layer_id: layer.id,
+                            written_at: layer.written_at,
                             lens: name.clone(),
                             taus: layer
                                 .taus
@@ -294,6 +295,23 @@ where
             .expect("store lock poisoned")
             .layers(lens)
             .cloned()
+    }
+
+    /// Export all layers for every lens as owned data.
+    ///
+    /// Returns a vec of `(lens_name, layers)` pairs in arbitrary order.
+    /// Layers are cheap to clone because their tau slices are `Arc`-backed.
+    /// Used by the executor's `BACKUP DATABASE` handler.
+    pub fn export_layers(&self) -> Vec<(String, Vec<Layer<V>>)>
+    where
+        V: Clone,
+    {
+        let store = self.store.read().expect("store lock poisoned");
+        store
+            .lens_names()
+            .into_iter()
+            .filter_map(|name| store.layers(&name).map(|layers| (name, layers.clone())))
+            .collect()
     }
 
     /// Pure value transform: `Out = f(V)`.

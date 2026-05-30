@@ -6,7 +6,7 @@ template = "page.html"
 
 Run Tau locally from source. This tutorial assumes you have Rust installed.
 
-**Prerequisites:** Rust 1.81+ (`rustup` recommended), `git`, a terminal.
+**Prerequisites:** Rust 1.94.1 (`rustup` recommended), `git`, a terminal.
 
 ---
 
@@ -86,6 +86,14 @@ RANGE 2; 0:3600:f18.5; 3600:7200:f21
 τ: REDUCE LENS temperature 0 7200 USING avg
 VAL f19.75
 [ok in 0.1ms]
+
+τ: BATCH APPEND LENS temperature { 7200 10800 19.0 ; 10800 14400 23.5 }
+OK
+[ok in 0.1ms]
+
+τ: HISTORY LENS temperature
+LAYERS 2; 1:0:0:7200:2 2:0:7200:14400:2
+[ok in 0.05ms]
 ```
 
 ---
@@ -160,6 +168,8 @@ Create a read-only user:
 GRANTS 1; alice sensors:R
 ```
 
+See [Permissions](/docs/permissions/) for the full CRUDA bitmap and per-statement requirements.
+
 ---
 
 ## 6. Enable TLS
@@ -213,5 +223,6 @@ On success you'll see a table of `PASS` results. On failure, the seed is printed
 ## Next steps
 
 - [TauQL Reference](/docs/tauql/): all statements and expressions
+- [Permissions](/docs/permissions/): CRUDA bitmap and per-statement requirements
 - [Configuration](/docs/configuration/): all flags and environment variables
 - [Examples](/docs/examples/): more queries against the example datasets

@@ -1,7 +1,17 @@
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub type Timestamp = i64;
 pub type LayerId = u64;
+
+/// Wall-clock milliseconds since the Unix epoch.
+#[inline]
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
 
 /// An atomic temporal fact: value V is true over [start, end).
 #[derive(Debug, Clone)]
@@ -35,10 +45,22 @@ pub struct Layer<V> {
     /// contain a tau covering `t`.
     pub max_end: Timestamp,
     pub taus: Arc<[Tau<V>]>,
+    /// Wall-clock time (milliseconds since Unix epoch) when this layer was
+    /// first written.  Set to 0 for layers replayed from WAL files that
+    /// predate the timestamp field (backward-compatible replay).
+    pub written_at: i64,
 }
 
 impl<V> Layer<V> {
-    pub fn new(id: LayerId, mut taus: Vec<Tau<V>>) -> Self {
+    /// Create a new layer, recording the current wall-clock time as the write
+    /// timestamp.  Taus are sorted by `start`; overlapping taus panic.
+    pub fn new(id: LayerId, taus: Vec<Tau<V>>) -> Self {
+        Self::new_at(id, taus, now_ms())
+    }
+
+    /// Create a layer with an explicit write timestamp.  Used during WAL
+    /// replay to restore the original timestamp rather than the replay time.
+    pub fn new_at(id: LayerId, mut taus: Vec<Tau<V>>, written_at: i64) -> Self {
         taus.sort_by_key(|t| t.start);
         assert!(
             taus.windows(2).all(|w| w[0].end <= w[1].start),
@@ -53,6 +75,7 @@ impl<V> Layer<V> {
             min_start,
             max_end,
             taus: taus.into(),
+            written_at,
         }
     }
 

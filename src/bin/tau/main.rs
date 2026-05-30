@@ -670,6 +670,16 @@ fn format_output(o: &Output) -> String {
             }
             out
         }
+        Output::LayerHistory(layers) => {
+            let mut out = format!("LAYERS {}", layers.len());
+            for l in layers {
+                out.push_str(&format!(
+                    "; {}:{}:{}:{}",
+                    l.id, l.written_at, l.min_start, l.max_end
+                ));
+            }
+            out
+        }
     }
 }
 
@@ -696,6 +706,7 @@ fn format_error(e: &ExecError) -> String {
         ExecError::UnknownUser(n) => format!("unknown user: {n}"),
         ExecError::TransactionAlreadyActive => "transaction already active".into(),
         ExecError::NoActiveTransaction => "no active transaction".into(),
+        ExecError::DatabaseAlreadyExists(n) => format!("database already exists: {n}"),
     }
 }
 

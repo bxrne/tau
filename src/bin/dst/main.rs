@@ -79,10 +79,12 @@ fn main() {
         .with_target(false)
         .init();
     let seed = cli.seed.unwrap_or_else(|| {
-        SystemTime::now()
+        let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system clock")
-            .subsec_nanos() as u64
+            .as_nanos() as u64;
+        // XOR with the PID so two concurrent runs never share a seed.
+        nanos ^ (std::process::id() as u64).wrapping_shl(32)
     });
 
     if cli.quick {

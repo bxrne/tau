@@ -114,13 +114,70 @@ where
         return;
     }
     let max_id = layers.iter().map(|l| l.id).max().unwrap_or(0);
+    let max_written_at = layers.iter().map(|l| l.written_at).max().unwrap_or(0);
     let events = build_sweep_events(layers);
     let merged = run_sweep(&events, layers);
     *layers = if merged.is_empty() {
         Vec::new()
     } else {
-        vec![Layer::new(max_id, merged)]
+        vec![Layer::new_at(max_id, merged, max_written_at)]
     };
+}
+
+/// Build sweep-line events restricted to the half-open interval `[range_start, range_end)`.
+///
+/// Each tau is clamped to the query range so the sweep produces output
+/// segments that stay within `[range_start, range_end)`.  Taus that do not
+/// overlap the range at all are skipped.
+fn build_sweep_events_in_range<V>(
+    layers: &[Layer<V>],
+    range_start: Timestamp,
+    range_end: Timestamp,
+) -> Vec<(Timestamp, bool, usize, usize)> {
+    let mut events = Vec::new();
+    for (layer_idx, layer) in layers.iter().enumerate() {
+        if layer.max_end <= range_start || layer.min_start >= range_end {
+            continue;
+        }
+        let taus = &layer.taus;
+        let lo = taus.partition_point(|t| t.end <= range_start);
+        let hi = taus.partition_point(|t| t.start < range_end);
+        for tau_idx in lo..hi {
+            let tau = &taus[tau_idx];
+            let eff_start = tau.start.max(range_start);
+            let eff_end = tau.end.min(range_end);
+            if eff_start < eff_end {
+                events.push((eff_start, false, layer_idx, tau_idx));
+                events.push((eff_end, true, layer_idx, tau_idx));
+            }
+        }
+    }
+    events.sort_unstable_by_key(|e| (e.0, e.1));
+    events
+}
+
+/// Single-pass range query using the sweep-line algorithm restricted to
+/// `[start, end)`.
+///
+/// Returns merged `Tau` segments with newest-wins semantics applied across all
+/// `layers`.  This is O(E log E) where E is the number of tau boundaries
+/// within the range, which is significantly better than calling `at()` at every
+/// boundary (O(M × N × log n) with M boundaries and N layers).
+///
+/// The returned `Tau`s use the clamped boundaries — they are always contained
+/// within `[start, end)`.
+pub fn sweep_range<V>(layers: &[Layer<V>], start: Timestamp, end: Timestamp) -> Vec<Tau<V>>
+where
+    V: Clone + PartialEq,
+{
+    if layers.is_empty() || start >= end {
+        return Vec::new();
+    }
+    let events = build_sweep_events_in_range(layers, start, end);
+    if events.is_empty() {
+        return Vec::new();
+    }
+    run_sweep(&events, layers)
 }
 
 /// Number of layers per lens that triggers an automatic compaction.

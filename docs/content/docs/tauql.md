@@ -140,6 +140,19 @@ Interval semantics: `s` (start, inclusive), `e` (end, exclusive), `v` (value). E
 
 Requires `U` permission on the active database.
 
+### `BATCH APPEND LENS <name> { <s> <e> <v> [; <s> <e> <v> ...] }`
+
+Block-syntax bulk ingest. All intervals inside the braces form one atomic layer. Taus are separated by `;`; a trailing semicolon before `}` is allowed. An empty block `{}` succeeds and writes no data.
+
+```
+BATCH APPEND LENS cpu { 0 60 45 ; 60 120 72 ; 120 180 68 }
+→ OK
+```
+
+Semantically equivalent to a single `APPEND` with the same intervals. Prefer `BATCH APPEND` when building statements programmatically — the block syntax is easier to generate than comma-separated inline lists.
+
+Requires `U` permission on the active database.
+
 ### `COPY LENS <name> FROM "<path>"`
 
 Server-side CSV ingest. Reads a file from the server's own filesystem. The file must follow the `start,end,value` format per line; `#` comments and blank lines are ignored.
@@ -217,6 +230,37 @@ The newest-layer-wins rule applies: if multiple layers have an interval covering
 
 Requires `R` permission.
 
+### `AT LENS <name> <timestamp> AS OF <written_at>`
+
+Temporal point query scoped to layers that were written at or before `written_at` (milliseconds since Unix epoch). Useful for auditing what a lens looked like at a specific wall-clock time.
+
+```
+AT LENS temperature 1800 AS OF 1717000000000
+→ VAL f17.2
+```
+
+Layers written before the `written_at` field was introduced (i.e. replayed from older WAL files) have `written_at = 0` and are always included regardless of the `AS OF` argument.
+
+Only works on base lenses; derived lenses return an error.
+
+Requires `R` permission.
+
+### `AT LENS <name> <timestamp> LAYER <layer_id>`
+
+Point lookup restricted to a single layer identified by its integer ID. Returns `VAL NIL` if the specified layer does not exist or does not cover `t`. Use `HISTORY LENS` to discover layer IDs.
+
+```
+HISTORY LENS temperature
+→ LAYERS 3; 1:0:0:3600 2:0:3600:7200 3:0:7200:10800
+
+AT LENS temperature 1800 LAYER 1
+→ VAL f18.5
+```
+
+Only works on base lenses; derived lenses return an error.
+
+Requires `R` permission.
+
 ### `RANGE LENS <name> <start> <end> [WHERE <expr>]`
 
 Range scan over the interval `[start, end)`. Returns all temporal segments within that window.
@@ -259,6 +303,56 @@ REDUCE LENS requests 0 43200 USING sum
 | `count` | number of intervals |
 
 Requires `R` permission.
+
+### `HISTORY LENS <name> [<start> <end>]`
+
+Lists all layers for a lens, optionally filtered to those whose time range overlaps `[start, end)`. Returns layer metadata: ID, write timestamp, earliest start, latest end, and tau count.
+
+```
+HISTORY LENS cpu
+→ LAYERS 3; 1:1717000000000:0:3600:60 2:1717001000000:3600:7200:60 3:1717002000000:7200:10800:60
+
+HISTORY LENS cpu 3600 7200
+→ LAYERS 1; 2:1717001000000:3600:7200:60
+```
+
+Response format: `LAYERS <n>; <id>:<written_at>:<min_start>:<max_end>:<tau_count>; …`
+
+- `id` — monotonic layer identifier assigned at write time
+- `written_at` — wall-clock milliseconds since Unix epoch (`0` for legacy WAL entries)
+- `min_start` — earliest tau start in the layer
+- `max_end` — latest tau end in the layer
+- `tau_count` — number of taus in the layer
+
+Requires `R` permission.
+
+---
+
+## Database backup and restore
+
+### `BACKUP DATABASE <name> TO "<path>"`
+
+Writes a snapshot of the named database to a WAL file at `path`. The file includes all schema DDL (CREATE LENS, DERIVE LENS) and all data layers. An existing file at `path` is replaced atomically.
+
+```
+BACKUP DATABASE sensors TO "/backups/sensors-2026-01-01.bak"
+→ OK
+```
+
+Requires `R` permission on the named database.
+
+### `RESTORE DATABASE <name> FROM "<path>"`
+
+Reads a backup file and creates a new in-memory database named `name`. The backup must have been produced by `BACKUP DATABASE`. The database name must not already exist in the executor.
+
+```
+RESTORE DATABASE sensors FROM "/backups/sensors-2026-01-01.bak"
+→ OK
+```
+
+After restore, use `USE DATABASE` to switch to the restored database.
+
+Requires global admin (`A on *`).
 
 ---
 
@@ -401,6 +495,7 @@ min(cpu, -3600, 0)  ← minimum cpu over the last hour
 | `RANGE <n>; <s>:<e>:<v>; ...` | `n` segments from `RANGE` |
 | `NAMES <n>; <name>; ...` | List from `SHOW DATABASES`, `SHOW LENSES`, `SHOW USERS` |
 | `GRANTS <n>; <user> <db>:<perms>; ...` | Output of `SHOW GRANTS` |
+| `LAYERS <n>; <id>:<written_at>:<min>:<max>:<count>; ...` | Layer metadata from `HISTORY LENS` |
 | `ERR <message>` | Parse, executor, or permission error |
 
 ### Value encoding
@@ -428,10 +523,16 @@ statement :=
   | DROP LENS name
   | DERIVE LENS name AS expr
   | APPEND LENS name tau_list
+  | BATCH APPEND LENS name { tau_block }
   | COPY LENS name FROM "path"
   | AT LENS name timestamp
+  | AT LENS name timestamp AS OF written_at
+  | AT LENS name timestamp LAYER layer_id
   | RANGE LENS name start end [WHERE expr]
   | REDUCE LENS name start end USING func
+  | HISTORY LENS name [start end]
+  | BACKUP DATABASE name TO "path"
+  | RESTORE DATABASE name FROM "path"
   | START TRANSACTION
   | COMMIT
   | ROLLBACK
@@ -444,8 +545,9 @@ statement :=
   | AUTH user pass
   | QUIT | EXIT
 
-type := int | float | str | bool | bytes
-func := min | max | avg | sum | count
-perms := any combination of C R U D A, or *, or -
+type     := int | float | str | bool | bytes
+func     := min | max | avg | sum | count
+perms    := any combination of C R U D A, or *, or -
 tau_list := s e v [, s e v ...]
+tau_block := s e v [; s e v ...] [;]
 ```

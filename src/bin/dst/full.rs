@@ -10,8 +10,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 use std::{env, fs, process};
 
-use rand::SeedableRng;
 use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use rustls::ClientConfig;
 use rustls::ClientConnection;
 use rustls::StreamOwned;
@@ -103,16 +103,19 @@ pub(crate) fn run_full(seed: u64, cli: &Cli) {
 
     let cells = build_grid();
 
+    let sep = "─".repeat(86);
     info!(
         "dst full: seed={seed:#018x} cells={} ops={} fault-interval={}",
         cells.len(),
         cli.ops,
         cli.fault_interval
     );
+    info!("{sep}");
     info!(
-        "{:<8} {:<10} {:<5} {:<14} {:<14} {:<8} {:<14} {:<14}",
-        "transp", "auth", "wal", "correctness", "faults", "metrics", "ns/op", "ops/s"
+        "{:<8} {:<10} {:<5} {:<14} {:<14} {:<8} {:<12} {:<12}",
+        "transport", "auth", "wal", "correctness", "faults", "metrics", "ns/op", "ops/s"
     );
+    info!("{sep}");
 
     let mut rows: Vec<CellResult> = Vec::new();
 
@@ -122,7 +125,7 @@ pub(crate) fn run_full(seed: u64, cli: &Cli) {
         );
         let result = run_cell(cell, cli, &scratch_root, cell_seed);
         info!(
-            "{:<8} {:<10} {:<5} {:<14} {:<14} {:<8} {:<14.1} {:<14.0}",
+            "{:<8} {:<10} {:<5} {:<14} {:<14} {:<8} {:<12.1} {:<12.0}",
             cell.transport.to_string(),
             cell.auth.to_string(),
             cell.wal.to_string(),
@@ -135,9 +138,25 @@ pub(crate) fn run_full(seed: u64, cli: &Cli) {
         rows.push(result);
     }
 
+    info!("{sep}");
     let pass = rows
         .iter()
         .all(|r| r.correctness == "PASS" && r.fault_injection == "PASS");
+    let failures: Vec<_> = rows
+        .iter()
+        .filter(|r| r.correctness != "PASS" || r.fault_injection != "PASS")
+        .collect();
+    if failures.is_empty() {
+        info!("dst full: ALL {} CELLS PASS", rows.len());
+    } else {
+        for f in &failures {
+            error!(
+                "dst full: FAIL  transport={} auth={} wal={}  correctness={}  faults={}  seed={:#018x}",
+                f.cell.transport, f.cell.auth, f.cell.wal, f.correctness, f.fault_injection, f.seed
+            );
+        }
+        info!("dst full: {}/{} cells FAILED", failures.len(), rows.len());
+    }
     info!("\ndst full: {}", if pass { "PASS" } else { "FAIL" });
 
     if let Some(path) = &cli.out {
@@ -222,11 +241,23 @@ fn execute_append_and_verify(
     }
     *time_cursor = cur;
 
-    let mut stmt_text = format!("APPEND LENS {LENS}");
-    for (s, e, v) in &segs {
-        stmt_text.push_str(&format!(" {s} {e} {v},"));
-    }
-    stmt_text.pop();
+    // Randomly choose APPEND or BATCH APPEND syntax (~30% batch).
+    let use_batch = rng.gen_bool(0.3);
+    let stmt_text = if use_batch {
+        let body = segs
+            .iter()
+            .map(|(s, e, v)| format!("{s} {e} {v}"))
+            .collect::<Vec<_>>()
+            .join(" ; ");
+        format!("BATCH APPEND LENS {LENS} {{ {body} }}")
+    } else {
+        let mut t = format!("APPEND LENS {LENS}");
+        for (s, e, v) in &segs {
+            t.push_str(&format!(" {s} {e} {v},"));
+        }
+        t.pop();
+        t
+    };
 
     let resp = match conn.send(&stmt_text) {
         Ok(r) => r,
