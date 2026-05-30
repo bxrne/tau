@@ -404,3 +404,94 @@ impl std::fmt::Display for Stmt {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ql::parse;
+    use hegel::TestCase;
+    use hegel::generators as gs;
+    use hegel::generators::Generator;
+    use pretty_assertions::assert_eq;
+
+    fn ident_gen() -> impl Generator<String> {
+        gs::from_regex("[a-z][a-z0-9_]{0,12}").fullmatch(true)
+    }
+
+    // CREATE LENS + DERIVE LENS are the two statements that round-trip through
+    // Display (they're persisted in the schema WAL and replayed on startup).
+    #[hegel::test]
+    fn create_lens_display_roundtrips(tc: TestCase) {
+        let name = tc.draw(ident_gen());
+        let ty = tc.draw(gs::sampled_from(vec![
+            Type::Int,
+            Type::Float,
+            Type::Str,
+            Type::Bool,
+        ]));
+        let stmt = Stmt::Create {
+            name: name.clone(),
+            ty: ty.clone(),
+        };
+        let line = stmt.to_string();
+        let (rest, parsed) = parse(&line).expect("Display output must re-parse");
+        assert!(rest.trim().is_empty(), "trailing input: {rest:?}");
+        assert_eq!(parsed, stmt);
+    }
+
+    #[hegel::test]
+    fn derive_lens_display_roundtrips(tc: TestCase) {
+        let name = tc.draw(ident_gen());
+        let src = tc.draw(ident_gen());
+        let stmt = Stmt::Derive {
+            name: name.clone(),
+            expr: Expr::Ident(src.clone()),
+        };
+        let line = stmt.to_string();
+        let (rest, parsed) = parse(&line).expect("Display output must re-parse");
+        assert!(rest.trim().is_empty(), "trailing input: {rest:?}");
+        assert_eq!(parsed, stmt);
+    }
+
+    #[test]
+    fn type_display_covers_all_variants() {
+        assert_eq!(Type::Int.to_string(), "int");
+        assert_eq!(Type::Float.to_string(), "float");
+        assert_eq!(Type::Str.to_string(), "str");
+        assert_eq!(Type::Bool.to_string(), "bool");
+        assert_eq!(Type::Bytes.to_string(), "bytes");
+    }
+
+    #[test]
+    fn aggfunc_display_covers_all_variants() {
+        assert_eq!(AggFunc::Min.to_string(), "min");
+        assert_eq!(AggFunc::Max.to_string(), "max");
+        assert_eq!(AggFunc::Avg.to_string(), "avg");
+        assert_eq!(AggFunc::Sum.to_string(), "sum");
+        assert_eq!(AggFunc::Count.to_string(), "count");
+    }
+
+    #[test]
+    fn literal_display_int_roundtrip() {
+        assert_eq!(Literal::Int(42).to_string(), "42");
+        assert_eq!(Literal::Bool(true).to_string(), "true");
+        assert_eq!(Literal::Null.to_string(), "null");
+        assert_eq!(Literal::Str(Arc::from("hi")).to_string(), "\"hi\"");
+    }
+
+    #[test]
+    fn expr_display_ident() {
+        let e = Expr::Ident("temp".into());
+        assert_eq!(e.to_string(), "temp");
+    }
+
+    #[test]
+    fn expr_display_binary() {
+        let e = Expr::Binary {
+            op: BinOp::Add,
+            lhs: Box::new(Expr::Ident("a".into())),
+            rhs: Box::new(Expr::Lit(Literal::Int(1))),
+        };
+        assert_eq!(e.to_string(), "(a + 1)");
+    }
+}

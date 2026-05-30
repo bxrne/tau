@@ -146,8 +146,8 @@ fn dispatch(registry: &Registry, repl: &mut Repl, line: &str) -> CommandResult {
     if let Some(conn) = repl.manager.active_mut() {
         let resp = conn.send(line).map_err(|e| e.to_string())?;
         println!("{}", resp);
-        if let Some(msg) = resp.strip_prefix("ERR ") {
-            return Err(msg.to_string());
+        if let libtau::Response::Err(msg) = &resp {
+            return Err(msg.clone());
         }
         return Ok(());
     }

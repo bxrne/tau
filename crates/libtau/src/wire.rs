@@ -106,9 +106,9 @@ impl Response {
                     let mut p = item.splitn(3, ':');
                     let s = parse_int(p.next(), "range start")?;
                     let e = parse_int(p.next(), "range end")?;
-                    let enc = p
-                        .next()
-                        .ok_or_else(|| WireError(format!("range segment missing value: {item:?}")))?;
+                    let enc = p.next().ok_or_else(|| {
+                        WireError(format!("range segment missing value: {item:?}"))
+                    })?;
                     let v = Value::decode(enc)
                         .ok_or_else(|| WireError(format!("bad value encoding: {enc:?}")))?;
                     segs.push((s, e, v));
@@ -210,7 +210,11 @@ impl fmt::Display for Response {
             Response::Layers(layers) => {
                 write!(f, "LAYERS {}", layers.len())?;
                 for l in layers {
-                    write!(f, "; {}:{}:{}:{}", l.id, l.written_at, l.min_start, l.max_end)?;
+                    write!(
+                        f,
+                        "; {}:{}:{}:{}",
+                        l.id, l.written_at, l.min_start, l.max_end
+                    )?;
                 }
                 Ok(())
             }
@@ -277,8 +281,11 @@ mod tests {
             "NAMES 2; foo; bar"
         );
         assert_eq!(
-            Response::Grants(vec![("alice".into(), vec![("main".into(), Perm::parse("RU").unwrap())])])
-                .to_string(),
+            Response::Grants(vec![(
+                "alice".into(),
+                vec![("main".into(), Perm::parse("RU").unwrap())]
+            )])
+            .to_string(),
             "GRANTS 1; alice main:RU"
         );
         assert_eq!(Response::Err("boom".into()).to_string(), "ERR boom");
@@ -312,11 +319,17 @@ mod tests {
         roundtrip(&Response::Val(Some(Value::Null)));
         roundtrip(&Response::Val(Some(Value::Str(Arc::from("hi")))));
         roundtrip(&Response::Range(vec![]));
-        roundtrip(&Response::Range(vec![(0, 10, Value::Int(1)), (10, 20, Value::Float(2.5))]));
+        roundtrip(&Response::Range(vec![
+            (0, 10, Value::Int(1)),
+            (10, 20, Value::Float(2.5)),
+        ]));
         roundtrip(&Response::Names(vec![]));
         roundtrip(&Response::Names(vec!["a".into(), "b".into()]));
         roundtrip(&Response::Grants(vec![
-            ("alice".into(), vec![("main".into(), Perm::parse("RU").unwrap())]),
+            (
+                "alice".into(),
+                vec![("main".into(), Perm::parse("RU").unwrap())],
+            ),
             ("bob".into(), vec![]),
         ]));
         roundtrip(&Response::Err("permission denied: nope".into()));

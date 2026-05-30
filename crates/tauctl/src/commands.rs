@@ -100,8 +100,8 @@ fn send_auth(conn: &mut crate::tcpmgr::Connection, user: &str, pass: &str) -> Re
         .send(&format!("AUTH {} {}", user, pass))
         .map_err(|e| e.to_string())?;
     println!("{}", resp);
-    if let Some(msg) = resp.strip_prefix("ERR ") {
-        return Err(msg.to_string());
+    if let libtau::Response::Err(msg) = &resp {
+        return Err(msg.clone());
     }
     Ok(())
 }
@@ -175,8 +175,8 @@ pub fn auth_command() -> Command {
                 .send(&format!("AUTH {} {}", args[0], args[1]))
                 .map_err(|e| e.to_string())?;
             println!("{}", resp);
-            if let Some(msg) = resp.strip_prefix("ERR ") {
-                return Err(msg.to_string());
+            if let libtau::Response::Err(msg) = &resp {
+                return Err(msg.clone());
             }
             Ok(())
         },
@@ -251,12 +251,12 @@ fn flush_chunk(
         return Ok(());
     }
     let resp = ship(conn, lens, buffer)?;
-    if !resp.starts_with("OK") {
+    if resp.is_err() {
         return Err(format!(
             "server rejected chunk #{} at row {}: {}",
             *chunks + 1,
             *total + buffer.len() as u64,
-            resp.strip_prefix("ERR ").unwrap_or(&resp)
+            resp
         ));
     }
     *total += buffer.len() as u64;
@@ -309,11 +309,8 @@ pub fn load_command() -> Command {
             let mut chunks: u64 = 0;
 
             let resp = conn.send("START TRANSACTION").map_err(|e| e.to_string())?;
-            if !resp.starts_with("OK") {
-                return Err(format!(
-                    "START TRANSACTION: {}",
-                    resp.strip_prefix("ERR ").unwrap_or(&resp)
-                ));
+            if resp.is_err() {
+                return Err(format!("START TRANSACTION: {}", resp));
             }
 
             let run_result: Result<(), String> = (|| {
@@ -336,11 +333,8 @@ pub fn load_command() -> Command {
             }
 
             let resp = conn.send("COMMIT").map_err(|e| e.to_string())?;
-            if !resp.starts_with("OK") {
-                return Err(format!(
-                    "COMMIT: {}",
-                    resp.strip_prefix("ERR ").unwrap_or(&resp)
-                ));
+            if resp.is_err() {
+                return Err(format!("COMMIT: {}", resp));
             }
 
             println!(
@@ -355,13 +349,12 @@ pub fn load_command() -> Command {
     )
 }
 
-/// Build and send one `APPEND LENS <lens> s e v, s e v, ...` statement
-/// over `conn`, returning the trimmed response line.
+/// Build and send one `APPEND LENS <lens> s e v, s e v, ...` statement.
 fn ship(
     conn: &mut crate::tcpmgr::Connection,
     lens: &str,
     taus: &[String],
-) -> Result<String, String> {
+) -> Result<libtau::Response, String> {
     let mut stmt = String::with_capacity(32 + taus.len() * 24);
     stmt.push_str("APPEND LENS ");
     stmt.push_str(lens);
