@@ -102,18 +102,18 @@ See [TEST.md](TEST.md) for a full explanation of the three test layers and when 
 
 ```bash
 # Plain server on 127.0.0.1:7070
-cargo run --release
+cargo run --release --bin tau
 
 # With TLS (ephemeral self-signed cert for dev)
-cargo run --release -- --tls
+cargo run --release --bin tau -- --tls
 
 # With auth (bootstraps an admin user on first run)
-cargo run --release -- --auth --users-file /tmp/tau-users.json \
+cargo run --release --bin tau -- --auth --users-file /tmp/tau-users.json \
   --username admin --password hunter2
 
 # With encryption at rest
 export TAU_ENCRYPTION_KEY=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
-cargo run --release -- --data /tmp/tau-data
+cargo run --release --bin tau -- --data /tmp/tau-data
 ```
 
 The interactive REPL (`tauctl`) connects to a running server:

@@ -28,7 +28,7 @@ Time series data is not static. Sensors drift. Prices get restated. Audit record
 ```bash
 # From source
 git clone https://github.com/bxrne/tau && cd tau
-cargo run --release                  # in memory server on 127.0.0.1:7070
+cargo run --release --bin tau        # in memory server on 127.0.0.1:7070
 
 # Docker
 docker pull ghcr.io/bxrne/tau:latest
