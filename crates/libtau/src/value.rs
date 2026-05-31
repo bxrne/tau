@@ -260,6 +260,14 @@ mod tests {
     }
 
     #[hegel::test]
+    fn codec_encode_into_matches_encode(tc: TestCase) {
+        let v = tc.draw(value_gen());
+        let mut buf = String::new();
+        v.encode_into(&mut buf);
+        assert_eq!(buf, v.encode());
+    }
+
+    #[hegel::test]
     fn codec_str_encoding_never_contains_separators(tc: TestCase) {
         let s = tc.draw(gs::text().max_size(128));
         let v = Value::Str(Arc::from(s.as_str()));

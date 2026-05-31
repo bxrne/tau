@@ -692,6 +692,43 @@ mod tests {
     }
 
     #[hegel::test]
+    fn codec_encode_into_matches_encode(tc: TestCase) {
+        // Test i64
+        let v_i64 = tc.draw(gs::integers::<i64>());
+        let mut buf = String::new();
+        v_i64.encode_into(&mut buf);
+        assert_eq!(buf, v_i64.encode());
+
+        // Test f64
+        let v_f64 = tc.draw(gs::floats::<f64>().filter(|f| f.is_finite()));
+        let mut buf = String::new();
+        v_f64.encode_into(&mut buf);
+        assert_eq!(buf, v_f64.encode());
+
+        // Test bool
+        let v_bool = tc.draw(gs::booleans());
+        let mut buf = String::new();
+        v_bool.encode_into(&mut buf);
+        assert_eq!(buf, v_bool.encode());
+    }
+
+    #[test]
+    fn test_write_u32() {
+        let cases = vec![
+            (0u32, "0"),
+            (7u32, "7"),
+            (42u32, "42"),
+            (1234567890u32, "1234567890"),
+            (u32::MAX, "4294967295"),
+        ];
+        for (n, expected) in cases {
+            let mut buf = Vec::new();
+            super::write_u32(&mut buf, n).unwrap();
+            assert_eq!(String::from_utf8(buf).unwrap(), expected);
+        }
+    }
+
+    #[hegel::test]
     fn codec_i64_decode_returns_none_on_unparseable(tc: TestCase) {
         let s = tc
             .draw(gs::text().max_size(32))
