@@ -26,4 +26,4 @@ Complete reference for Tau. The data model, query language, storage internals, t
 - [Docker](/docs/tutorials/docker/). The full observability stack in under five minutes.
 - [Embedded](/docs/tutorials/embedded/). Use Tau as a Rust library with no server process.
 
-**Long form.** See the [blog](/blog/), starting with [Introducing Tau](/blog/introducing-tau/).
+**Long form.** Start with [Overview](/docs/overview/) for the data model, then [How it works](/docs/how-it-works/) for storage and concurrency internals.

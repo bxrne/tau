@@ -41,7 +41,6 @@ main_menu = [
           {url="/docs/containers/", name="Containers"},
           {url="/docs/testing/", name="Testing"},
           {url="/docs/roadmap/", name="Roadmap"},
-          {url="/blog/", name="Blog"},
           {url="/docs/changelog/", name="Changelog"},
 ]
 

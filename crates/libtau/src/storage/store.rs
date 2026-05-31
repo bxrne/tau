@@ -1,5 +1,6 @@
 use crate::model::{Layer, Tau, Timestamp};
-use std::collections::{BinaryHeap, HashSet};
+use rustc_hash::FxHashSet as HashSet;
+use std::collections::BinaryHeap;
 use std::io;
 
 /// Build sweep-line events from `layers`: one start and one end event per tau.
@@ -80,7 +81,7 @@ where
     V: Clone + PartialEq,
 {
     let mut active: BinaryHeap<(usize, usize)> = BinaryHeap::new();
-    let mut closed: HashSet<(usize, usize)> = HashSet::new();
+    let mut closed: HashSet<(usize, usize)> = HashSet::default();
     let mut merged: Vec<Tau<V>> = Vec::new();
     let mut cursor: Option<Timestamp> = None;
     let mut i = 0;

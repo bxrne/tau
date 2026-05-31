@@ -26,11 +26,11 @@
 //! `REDUCE` returns [`Output::Value`] - a single scalar aggregate.
 //! `SHOW DATABASES` / `SHOW LENSES` return [`Output::Names`] - a sorted name list.
 
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::fs;
 use std::io;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use crate::database::Database;
@@ -137,9 +137,9 @@ impl DbState {
     fn new(compact_threshold: usize) -> Self {
         Self {
             db: Database::new(InMemory::<Value>::with_threshold(compact_threshold)),
-            base_types: HashMap::new(),
+            base_types: HashMap::default(),
             next_layer_id: 1,
-            derived: HashMap::new(),
+            derived: HashMap::default(),
         }
     }
 
@@ -157,9 +157,9 @@ impl DbState {
         Ok((
             Self {
                 db,
-                base_types: HashMap::new(),
+                base_types: HashMap::default(),
                 next_layer_id,
-                derived: HashMap::new(),
+                derived: HashMap::default(),
             },
             schema_stmts,
         ))
@@ -168,7 +168,7 @@ impl DbState {
 
 /// Runtime container for executing parsed [`Stmt`]s.
 pub struct Executor {
-    databases: HashMap<String, DbState>,
+    databases: HashMap<String, Arc<RwLock<DbState>>>,
     /// Name of the currently active database (set by the first
     /// `CREATE DATABASE` and by `USE DATABASE`).  Cleared if the active
     /// database is dropped.
@@ -208,7 +208,7 @@ impl Executor {
     /// Create an executor with a custom layer compaction threshold.
     pub fn with_threshold(compact_threshold: usize) -> Self {
         Self {
-            databases: HashMap::new(),
+            databases: HashMap::default(),
             active: None,
             compact_threshold,
             in_replay: false,
@@ -233,7 +233,9 @@ impl Executor {
 
         let mut executor = Self::with_threshold(compact_threshold);
         let (db_state, schema_stmts) = DbState::with_wal(path, compact_threshold, key)?;
-        executor.databases.insert("default".to_string(), db_state);
+        executor
+            .databases
+            .insert("default".to_string(), Arc::new(RwLock::new(db_state)));
         executor.active = Some("default".to_string());
 
         // Replay schema DDL (CREATE LENS / DERIVE LENS).
@@ -267,6 +269,27 @@ impl Executor {
     /// Name of the active database, if any.
     pub fn active(&self) -> Option<&str> {
         self.active.as_deref()
+    }
+
+    /// Disable per-record WAL fsync across all databases.  Caller is
+    /// responsible for periodic `flush_wal()` calls to enforce durability
+    /// boundaries.  Intended for bulk-load paths.
+    pub fn set_wal_fsync_each(&mut self, on: bool) {
+        for arc in self.databases.values() {
+            arc.write()
+                .expect("db lock poisoned")
+                .db
+                .set_wal_fsync_each(on);
+        }
+    }
+
+    /// Flush the WAL for all databases.  Used with group-commit mode
+    /// (`set_wal_fsync_each(false)`) to enforce periodic durability.
+    pub fn flush_wal(&self) -> io::Result<()> {
+        for arc in self.databases.values() {
+            arc.read().expect("db lock poisoned").db.wal_flush()?;
+        }
+        Ok(())
     }
 
     /// Execute a read-only statement (`AT` or `RANGE`) without taking an
@@ -402,14 +425,22 @@ impl Executor {
     /// Read-only statements still route through the standard path; the locking
     /// router in the TCP server picks the right lock variant.
     pub fn exec_as(&mut self, stmt: &Stmt, caller: &str) -> Result<Output, ExecError> {
+        // Check permission under an immutable borrow, then drop it before the
+        // mutable exec call.  We only clone when SHOW DATABASES needs the grants
+        // for post-filtering, avoiding a full User clone on every statement.
+        {
+            let user = self
+                .users
+                .get(caller)
+                .ok_or_else(|| ExecError::UnknownUser(caller.into()))?;
+            self.check_permission(stmt, user)?;
+        }
+        let out = self.exec(stmt)?;
         let user = self
             .users
             .get(caller)
-            .cloned()
             .ok_or_else(|| ExecError::UnknownUser(caller.into()))?;
-        self.check_permission(stmt, &user)?;
-        let out = self.exec(stmt)?;
-        Ok(filter_show_databases(out, stmt, &user))
+        Ok(filter_show_databases(out, stmt, user))
     }
 
     /// Read-only counterpart of [`Executor::exec_as`].  Same permission rules.
@@ -421,6 +452,56 @@ impl Executor {
         self.check_permission(stmt, user)?;
         let out = self.exec_read(stmt)?;
         Ok(filter_show_databases(out, stmt, user))
+    }
+
+    /// Execute a non-registry data-write statement under a per-database write
+    /// lock, holding only the shared executor lock.  This allows concurrent
+    /// reads (and writes to *other* databases) while this write is in flight.
+    ///
+    /// Only call this when [`Executor::is_in_transaction`] is `false`; if a
+    /// transaction is active the caller must use [`Executor::exec`] instead so
+    /// mutations are buffered.
+    ///
+    /// Returns `Err(InvalidExpr)` for registry statements — those require
+    /// `exec`.
+    pub fn exec_db_write(&self, stmt: &Stmt) -> Result<Output, ExecError> {
+        let t0 = Instant::now();
+        let result = match stmt {
+            Stmt::Create { name, ty } => self.create_lens(name, ty.clone()),
+            Stmt::Append { name, taus } => {
+                let parsed: Vec<(Timestamp, Timestamp, Value)> =
+                    taus.iter().map(|(s, e, l)| (*s, *e, l.into())).collect();
+                self.append_lens(name, parsed)
+            }
+            Stmt::BatchAppend { name, taus } => self.batch_append_lens(name, taus),
+            Stmt::Copy { name, path } => self.copy_lens(name, path),
+            Stmt::Derive { name, expr } => self.derive_lens(name, expr.clone()),
+            Stmt::Drop { name } => self.drop_lens(name),
+            Stmt::BackupDatabase { name, path } => self.backup_database(name, path),
+            _ => Err(ExecError::InvalidExpr(
+                "exec_db_write: not a data-write statement".into(),
+            )),
+        };
+        let ns = t0.elapsed().as_nanos() as u64;
+        match stmt {
+            Stmt::Append { .. } | Stmt::BatchAppend { .. } | Stmt::Copy { .. } => {
+                self.metrics.record_append(ns)
+            }
+            _ => {}
+        }
+        result
+    }
+
+    /// Permission-checking wrapper around [`Executor::exec_db_write`].
+    pub fn exec_db_write_as(&self, stmt: &Stmt, caller: &str) -> Result<Output, ExecError> {
+        {
+            let user = self
+                .users
+                .get(caller)
+                .ok_or_else(|| ExecError::UnknownUser(caller.into()))?;
+            self.check_permission(stmt, user)?;
+        }
+        self.exec_db_write(stmt)
     }
 
     /// Per-statement permission check.  Returns `Err(PermissionDenied)` when
@@ -509,7 +590,7 @@ impl Executor {
             return Err(ExecError::DuplicateUser(name.into()));
         }
         self.users
-            .add(User::new(name, password, HashMap::new()))
+            .add(User::new(name, password, std::collections::HashMap::new()))
             .map_err(ExecError::Io)?;
         Ok(Output::Empty)
     }
@@ -593,8 +674,10 @@ impl Executor {
         if self.databases.contains_key(name) {
             return Err(ExecError::DuplicateDatabase(name.into()));
         }
-        self.databases
-            .insert(name.into(), DbState::new(self.compact_threshold));
+        self.databases.insert(
+            name.into(),
+            Arc::new(RwLock::new(DbState::new(self.compact_threshold))),
+        );
         // First database created becomes active by convention.
         if self.active.is_none() {
             self.active = Some(name.into());
@@ -620,9 +703,10 @@ impl Executor {
         Ok(Output::Empty)
     }
 
-    fn create_lens(&mut self, name: &str, ty: Type) -> Result<Output, ExecError> {
+    fn create_lens(&self, name: &str, ty: Type) -> Result<Output, ExecError> {
         let in_replay = self.in_replay;
-        let state = self.active_mut()?;
+        let db_arc = self.active_db_arc()?;
+        let mut state = db_arc.write().expect("db lock poisoned");
         if state.base_types.contains_key(name) || state.derived.contains_key(name) {
             return Err(ExecError::DuplicateLens(name.into()));
         }
@@ -639,14 +723,15 @@ impl Executor {
     }
 
     fn append_lens(
-        &mut self,
+        &self,
         name: &str,
         taus: Vec<(Timestamp, Timestamp, Value)>,
     ) -> Result<Output, ExecError> {
         if taus.is_empty() {
             return Ok(Output::Empty);
         }
-        let state = self.active_mut()?;
+        let db_arc = self.active_db_arc()?;
+        let mut state = db_arc.write().expect("db lock poisoned");
         let ty = state
             .base_types
             .get(name)
@@ -681,12 +766,13 @@ impl Executor {
         Ok(Output::Empty)
     }
 
-    fn copy_lens(&mut self, name: &str, path: &str) -> Result<Output, ExecError> {
-        use crate::ql::parser::parse as ql_parse;
+    fn copy_lens(&self, name: &str, path: &str) -> Result<Output, ExecError> {
+        use crate::ql::parse_literal;
         let content = fs::read_to_string(path).map_err(|e| ExecError::Io(e.to_string()))?;
         // Validate the lens exists and get its type before parsing all rows.
         {
-            let state = self.active_state()?;
+            let db_arc = self.active_db_arc()?;
+            let state = db_arc.read().expect("db lock poisoned");
             if !state.base_types.contains_key(name) {
                 return Err(ExecError::UnknownLens(name.into()));
             }
@@ -720,40 +806,63 @@ impl Executor {
             let end: Timestamp = end_str.parse().map_err(|_| {
                 ExecError::Io(format!("line {}: invalid end {:?}", lineno + 1, end_str))
             })?;
-            // Parse the value as a literal via the QL parser (handles all types).
-            let lit_input = format!("APPEND LENS _dummy_ {start} {end} {val_str}");
-            let value: Value = match ql_parse(&lit_input) {
-                Ok((
-                    _,
-                    Stmt::Append {
-                        taus: ref parsed_taus,
-                        ..
-                    },
-                )) if !parsed_taus.is_empty() => {
-                    let (_, _, lit) = &parsed_taus[0];
-                    lit.into()
-                }
-                _ => {
-                    return Err(ExecError::Io(format!(
+            let value: Value = parse_literal(val_str)
+                .map(|lit| Value::from(&lit))
+                .ok_or_else(|| {
+                    ExecError::Io(format!(
                         "line {}: cannot parse value {:?}",
                         lineno + 1,
                         val_str
-                    )));
-                }
-            };
+                    ))
+                })?;
             taus.push((start, end, value));
         }
-        self.append_lens(name, taus)
+        if taus.is_empty() {
+            return Ok(Output::Empty);
+        }
+        let db_arc = self.active_db_arc()?;
+        let mut state = db_arc.write().expect("db lock poisoned");
+        let ty = state
+            .base_types
+            .get(name)
+            .cloned()
+            .ok_or_else(|| ExecError::UnknownLens(name.into()))?;
+        let mut tau_vec: Vec<crate::model::Tau<Value>> = Vec::with_capacity(taus.len());
+        for (start, end, value) in taus {
+            if let Some(got) = value.ty()
+                && got != ty
+            {
+                return Err(ExecError::TypeMismatch {
+                    lens: name.into(),
+                    expected: ty.clone(),
+                    got: value.type_name().into(),
+                });
+            }
+            tau_vec.push(crate::model::Tau::new(start, end, value));
+        }
+        let id = state.next_layer_id;
+        state.next_layer_id += 1;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        let layer = Layer::new_sorted_unchecked(id, tau_vec, now);
+        state
+            .db
+            .append(&state.db.lens(name), layer)
+            .map_err(|e| ExecError::Io(e.to_string()))?;
+        Ok(Output::Empty)
     }
 
-    fn derive_lens(&mut self, name: &str, expr: Expr) -> Result<Output, ExecError> {
+    fn derive_lens(&self, name: &str, expr: Expr) -> Result<Output, ExecError> {
         let in_replay = self.in_replay;
-        let state = self.active_mut()?;
+        let db_arc = self.active_db_arc()?;
+        let mut state = db_arc.write().expect("db lock poisoned");
         if state.base_types.contains_key(name) || state.derived.contains_key(name) {
             return Err(ExecError::DuplicateLens(name.into()));
         }
         // Reject self-referential or transitively cyclic expressions.
-        let mut visited = HashSet::new();
+        let mut visited = HashSet::default();
         if would_cycle(&state.derived, name, &expr, &mut visited) {
             return Err(ExecError::CycleDetected(name.into()));
         }
@@ -769,8 +878,9 @@ impl Executor {
     }
 
     fn at_lens(&self, name: &str, t: Timestamp) -> Result<Output, ExecError> {
-        let state = self.active_state()?;
-        Ok(Output::Value(eval_lens(state, name, t)?))
+        let db_arc = self.active_db_arc()?;
+        let state = db_arc.read().expect("db lock poisoned");
+        Ok(Output::Value(eval_lens(&state, name, t)?))
     }
 
     fn range_lens(
@@ -783,7 +893,8 @@ impl Executor {
         if start >= end {
             return Err(ExecError::InvalidRange);
         }
-        let state = self.active_state()?;
+        let db_arc = self.active_db_arc()?;
+        let state = db_arc.read().expect("db lock poisoned");
         if !state.base_types.contains_key(name) && !state.derived.contains_key(name) {
             return Err(ExecError::UnknownLens(name.into()));
         }
@@ -801,8 +912,14 @@ impl Executor {
             }
             return Ok(Output::Range(out));
         }
-        let (bounds, layers_snap) = collect_range_bounds(state, name, start, end, filter)?;
-        let out = build_range_segments(state, name, &bounds, layers_snap.as_deref(), filter)?;
+        let (bounds, layers_snap) = collect_range_bounds(&state, name, start, end, filter)?;
+        let out = build_range_segments(
+            &state,
+            name,
+            &bounds,
+            layers_snap.as_ref().map(|v| v.as_slice()),
+            filter,
+        )?;
         Ok(Output::Range(out))
     }
 
@@ -816,11 +933,12 @@ impl Executor {
         if start >= end {
             return Err(ExecError::InvalidRange);
         }
-        let state = self.active_state()?;
+        let db_arc = self.active_db_arc()?;
+        let state = db_arc.read().expect("db lock poisoned");
         if !state.base_types.contains_key(name) && !state.derived.contains_key(name) {
             return Err(ExecError::UnknownLens(name.into()));
         }
-        eval_agg(state, name, func, start, end).map(Output::Value)
+        eval_agg(&state, name, func, start, end).map(Output::Value)
     }
 
     fn show_databases(&self) -> Result<Output, ExecError> {
@@ -830,7 +948,8 @@ impl Executor {
     }
 
     fn show_lenses(&self) -> Result<Output, ExecError> {
-        let state = self.active_state()?;
+        let db_arc = self.active_db_arc()?;
+        let state = db_arc.read().expect("db lock poisoned");
         let mut names: Vec<String> = state
             .base_types
             .keys()
@@ -841,9 +960,10 @@ impl Executor {
         Ok(Output::Names(names))
     }
 
-    fn drop_lens(&mut self, name: &str) -> Result<Output, ExecError> {
+    fn drop_lens(&self, name: &str) -> Result<Output, ExecError> {
         let in_replay = self.in_replay;
-        let state = self.active_mut()?;
+        let db_arc = self.active_db_arc()?;
+        let mut state = db_arc.write().expect("db lock poisoned");
         let in_types = state.base_types.remove(name).is_some();
         let in_derived = state.derived.remove(name).is_some();
         if in_types || in_derived {
@@ -861,25 +981,65 @@ impl Executor {
     }
 
     fn batch_append_lens(
-        &mut self,
+        &self,
         name: &str,
         taus: &[(i64, i64, crate::ql::ast::Literal)],
     ) -> Result<Output, ExecError> {
-        let taus: Vec<(Timestamp, Timestamp, Value)> =
-            taus.iter().map(|(s, e, v)| (*s, *e, v.into())).collect();
-        self.append_lens(name, taus)
+        if taus.is_empty() {
+            return Ok(Output::Empty);
+        }
+        let db_arc = self.active_db_arc()?;
+        let mut state = db_arc.write().expect("db lock poisoned");
+        let ty = state
+            .base_types
+            .get(name)
+            .cloned()
+            .ok_or_else(|| ExecError::UnknownLens(name.into()))?;
+        let mut tau_vec: Vec<crate::model::Tau<Value>> = Vec::with_capacity(taus.len());
+        for (start, end, lit) in taus {
+            if start >= end {
+                return Err(ExecError::InvalidRange);
+            }
+            let value: Value = lit.into();
+            if let Some(got) = value.ty()
+                && got != ty
+            {
+                return Err(ExecError::TypeMismatch {
+                    lens: name.into(),
+                    expected: ty.clone(),
+                    got: value.type_name().into(),
+                });
+            }
+            tau_vec.push(crate::model::Tau::new(*start, *end, value));
+        }
+        let id = state.next_layer_id;
+        state.next_layer_id += 1;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        let layer = Layer::new_sorted_unchecked(id, tau_vec, now);
+        state
+            .db
+            .append(&state.db.lens(name), layer)
+            .map_err(|e| ExecError::Io(e.to_string()))?;
+        Ok(Output::Empty)
     }
 
     fn at_as_of_lens(&self, name: &str, t: Timestamp, as_of: i64) -> Result<Output, ExecError> {
-        let state = self.active_state()?;
+        let db_arc = self.active_db_arc()?;
+        let state = db_arc.read().expect("db lock poisoned");
         if state.base_types.contains_key(name) {
             let filtered: Vec<Layer<Value>> = state
                 .db
                 .layers(name)
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|l| l.written_at == 0 || l.written_at <= as_of)
-                .collect();
+                .map(|arc| {
+                    arc.iter()
+                        .filter(|l| l.written_at == 0 || l.written_at <= as_of)
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
             Ok(Output::Value(if filtered.is_empty() {
                 None
             } else {
@@ -895,7 +1055,8 @@ impl Executor {
     }
 
     fn at_layer_lens(&self, name: &str, t: Timestamp, layer_id: u64) -> Result<Output, ExecError> {
-        let state = self.active_state()?;
+        let db_arc = self.active_db_arc()?;
+        let state = db_arc.read().expect("db lock poisoned");
         if !state.base_types.contains_key(name) {
             return if state.derived.contains_key(name) {
                 Err(ExecError::InvalidExpr(
@@ -916,7 +1077,8 @@ impl Executor {
     }
 
     fn history_lens(&self, name: &str, range: Option<(i64, i64)>) -> Result<Output, ExecError> {
-        let state = self.active_state()?;
+        let db_arc = self.active_db_arc()?;
+        let state = db_arc.read().expect("db lock poisoned");
         if !state.base_types.contains_key(name) && !state.derived.contains_key(name) {
             return Err(ExecError::UnknownLens(name.into()));
         }
@@ -939,10 +1101,12 @@ impl Executor {
     }
 
     fn backup_database(&self, name: &str, path: &str) -> Result<Output, ExecError> {
-        let state = self
+        let db_arc = self
             .databases
             .get(name)
+            .cloned()
             .ok_or_else(|| ExecError::UnknownDatabase(name.into()))?;
+        let state = db_arc.read().expect("db lock poisoned");
 
         // Build schema DDL from executor in-memory state so backup works even
         // when no WAL is attached to the source database.
@@ -1010,12 +1174,12 @@ impl Executor {
         let next_layer_id = db.max_layer_id() + 1;
         self.databases.insert(
             name.into(),
-            DbState {
+            Arc::new(RwLock::new(DbState {
                 db,
-                base_types: HashMap::new(),
+                base_types: HashMap::default(),
                 next_layer_id,
-                derived: HashMap::new(),
-            },
+                derived: HashMap::default(),
+            })),
         );
 
         let prev_active = self.active.clone();
@@ -1038,20 +1202,21 @@ impl Executor {
         Ok(Output::Empty)
     }
 
-    fn active_state(&self) -> Result<&DbState, ExecError> {
+    /// Returns the `Arc<RwLock<DbState>>` for the active database.
+    /// Clone the Arc to hold it across re-borrows of `self`.
+    fn active_db_arc(&self) -> Result<Arc<RwLock<DbState>>, ExecError> {
         let name = self.active.as_deref().ok_or(ExecError::NoActiveDatabase)?;
         self.databases
             .get(name)
+            .cloned()
             .ok_or_else(|| ExecError::UnknownDatabase(name.into()))
     }
 
-    fn active_mut(&mut self) -> Result<&mut DbState, ExecError> {
-        // Use as_deref so HashMap::get_mut receives &str directly (String: Borrow<str>),
-        // avoiding a String allocation on every write-path call.
-        let name = self.active.as_deref().ok_or(ExecError::NoActiveDatabase)?;
-        self.databases
-            .get_mut(name)
-            .ok_or_else(|| ExecError::UnknownDatabase(name.into()))
+    /// Whether a transaction is currently buffering mutations on this executor.
+    /// The server uses this to route data writes through the cheaper
+    /// `exec.read()` path when no transaction is active.
+    pub fn is_in_transaction(&self) -> bool {
+        self.pending.is_some()
     }
 }
 
@@ -1094,6 +1259,7 @@ mod tests {
     use hegel::TestCase;
     use hegel::generators as gs;
     use pretty_assertions::assert_eq;
+    use std::collections::HashMap as StdHashMap;
 
     /// Parse + run.  Panics on parse failure; returns `Result` on exec.
     fn run(exec: &mut Executor, q: &str) -> Result<Output, ExecError> {
@@ -1783,13 +1949,13 @@ mod tests {
     }
 
     fn install_admin(e: &mut Executor) {
-        let mut grants = HashMap::new();
+        let mut grants = StdHashMap::new();
         grants.insert("*".into(), Perm::ALL);
         e.users.add(User::new("admin", "p", grants)).unwrap(); // codeql[rust/hard-coded-cryptographic-value]
     }
 
     fn install_reader(e: &mut Executor, db: &str) {
-        let mut grants = HashMap::new();
+        let mut grants = StdHashMap::new();
         grants.insert(db.to_string(), Perm::R);
         e.users.add(User::new("reader", "p", grants)).unwrap(); // codeql[rust/hard-coded-cryptographic-value]
     }
@@ -1915,7 +2081,7 @@ mod tests {
         let (_, stmt) = parse("CREATE DATABASE beta").unwrap();
         e.exec_as(&stmt, "admin").unwrap();
 
-        let mut grants = HashMap::new();
+        let mut grants = StdHashMap::new();
         grants.insert("alpha".to_string(), Perm::R);
         e.users.add(User::new("alice", "p", grants)).unwrap(); // codeql[rust/hard-coded-cryptographic-value]
 

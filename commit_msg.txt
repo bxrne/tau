@@ -1,0 +1,1 @@
+refactor: workspace crates, per-DB locking, wire codec, 1BRC DST, Criterion benches, ratatui TUI, Arc snapshots, FxHash, group commit, fix Sonar coverage, rm blog, docs pass

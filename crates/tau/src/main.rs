@@ -49,7 +49,7 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 use libtau::crypto;
-use libtau::{Executor, Metrics, Perm, Response, User, UserStore, parse};
+use libtau::{Executor, Metrics, Perm, Response, User, UserStore, needs_registry_lock, parse};
 use rcgen::generate_simple_self_signed;
 use rustls::ServerConfig;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
@@ -135,10 +135,29 @@ pub struct Config {
     /// this long without sending a complete line are closed. 0 disables.
     #[arg(long, value_name = "SECS", default_value_t = 300)]
     pub idle_timeout_secs: u64,
+
+    // These trade durability for throughput.  Use only on trusted, non-critical
+    // workloads or when an external durability boundary (e.g. a replica) exists.
+    /// Skip per-record WAL flush+sync_data.  The WAL is still written but only
+    /// synced to disk on a background interval, not on every APPEND.  Risk:
+    /// up to one flush interval of data loss on an unclean shutdown.
+    #[arg(long)]
+    pub no_fsync_each: bool,
+
+    /// After compaction, skip the full disk-file rewrite.  The file grows
+    /// until a manual checkpoint or restart; saves fsync cost on heavy-write
+    /// workloads.  Only affects the disk backend.
+    #[arg(long)]
+    pub no_rewrite_on_compact: bool,
+
+    /// After compaction, skip the WAL checkpoint rewrite.  The WAL grows
+    /// beyond the live layer set until the server restarts.
+    #[arg(long)]
+    pub no_auto_checkpoint: bool,
 }
 
 fn build_executor(config: &Config, enc_key: Option<[u8; 32]>) -> io::Result<Arc<RwLock<Executor>>> {
-    if config.wal {
+    let exec = if config.wal {
         let wal_path = config.wal_path.clone().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -146,20 +165,38 @@ fn build_executor(config: &Config, enc_key: Option<[u8; 32]>) -> io::Result<Arc<
             )
         })?;
         info!(wal_path = %wal_path.display(), compact_threshold = config.compact_threshold, "starting with WAL");
-        Ok(Arc::new(RwLock::new(Executor::with_wal_threshold(
-            wal_path,
-            config.compact_threshold,
-            enc_key,
-        )?)))
+        let mut e = Executor::with_wal_threshold(wal_path, config.compact_threshold, enc_key)?;
+        if config.no_fsync_each {
+            warn!("--no-fsync-each: WAL sync disabled — data may be lost on unclean shutdown");
+            e.set_wal_fsync_each(false);
+        }
+        e
     } else {
         info!(
             compact_threshold = config.compact_threshold,
             "starting in-memory (no WAL)"
         );
-        Ok(Arc::new(RwLock::new(Executor::with_threshold(
-            config.compact_threshold,
-        ))))
+        Executor::with_threshold(config.compact_threshold)
+    };
+
+    let exec = Arc::new(RwLock::new(exec));
+
+    // Group-commit flush thread: when fsync-per-record is disabled, a
+    // background thread syncs the WAL every 50 ms so durability lag is bounded.
+    if config.wal && config.no_fsync_each {
+        let exec_weak = Arc::downgrade(&exec);
+        thread::spawn(move || {
+            while let Some(e) = exec_weak.upgrade() {
+                thread::sleep(Duration::from_millis(50));
+                if let Ok(guard) = e.read() {
+                    let _ = guard.flush_wal();
+                }
+            }
+        });
+        info!("group-commit flush thread started (50 ms interval)");
     }
+
+    Ok(exec)
 }
 
 fn setup_auth(config: &Config, executor: &Arc<RwLock<Executor>>) -> io::Result<()> {
@@ -614,20 +651,39 @@ fn handle_query(query: &str, exec: &Arc<RwLock<Executor>>, caller: Option<&str>)
         Ok((rest, _)) => return Response::Err(format!("trailing input: {rest:?}")),
         Err(e) => return Response::Err(format!("parse: {e}")),
     };
-    let result = match (stmt.is_read_only(), caller) {
-        (true, Some(u)) => exec
+    // Read-only: shared executor lock + per-DB read lock.
+    // Registry write (CREATE DATABASE etc.): exclusive executor lock.
+    // Data write (APPEND etc.): shared executor lock + per-DB write lock.
+    // When a transaction is active data writes still use exec.write() so they are buffered.
+    let needs_exclusive = !stmt.is_read_only()
+        && (needs_registry_lock(&stmt)
+            || exec
+                .read()
+                .expect("executor lock poisoned")
+                .is_in_transaction());
+
+    let result = match (stmt.is_read_only(), needs_exclusive, caller) {
+        (true, _, Some(u)) => exec
             .read()
             .expect("executor lock poisoned")
             .exec_read_as(&stmt, u),
-        (true, None) => exec
+        (true, _, None) => exec
             .read()
             .expect("executor lock poisoned")
             .exec_read(&stmt),
-        (false, Some(u)) => exec
+        (false, true, Some(u)) => exec
             .write()
             .expect("executor lock poisoned")
             .exec_as(&stmt, u),
-        (false, None) => exec.write().expect("executor lock poisoned").exec(&stmt),
+        (false, true, None) => exec.write().expect("executor lock poisoned").exec(&stmt),
+        (false, false, Some(u)) => exec
+            .read()
+            .expect("executor lock poisoned")
+            .exec_db_write_as(&stmt, u),
+        (false, false, None) => exec
+            .read()
+            .expect("executor lock poisoned")
+            .exec_db_write(&stmt),
     };
     Response::from_result(&result)
 }

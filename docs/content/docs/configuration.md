@@ -4,7 +4,7 @@ date = 2026-05-28
 template = "page.html"
 +++
 
-Tau is configured entirely through command-line flags and environment variables. There is no config file yet (TOML/YAML config is on the roadmap for v1.0).
+Tau is configured entirely through command-line flags and environment variables. There is no config file yet (TOML config is on the roadmap for v0.2.0).
 
 ---
 
@@ -83,29 +83,31 @@ tau --wal -w /var/lib/tau/data.wal
 
 ---
 
-## Interactive REPL (`ctl`)
+## Performance flags (server)
 
-`ctl` has no flags beyond `--version` and `--help`. Configuration is done at runtime through REPL commands.
-
-| variable | description |
-|----------|-------------|
-| `TAU_HISTORY_FILE` | Path to the readline history file. Default: `$HOME/.tau_history`. |
-
----
-
-## Simulation tester (`dst`)
+These trade durability for throughput. Use only for bulk-load paths or when an external durability boundary (replication, backup) exists.
 
 | flag | default | description |
 |------|---------|-------------|
-| `--quick` | off | Embedded mode: use the library executor directly, no server processes |
-| `--seed <N>` | time-based | RNG seed for reproducibility |
-| `--duration <N>` | 30 | Seconds to run in embedded mode |
-| `--ops <N>` | 2000 | Operations per config cell in full mode |
-| `--readers <N>` | 8 | Concurrent reader threads in embedded mode |
-| `--fault-interval <N>` | 500 | Inject a fault every N ops in full mode |
-| `--scratch <DIR>` | `$TMPDIR` | WAL scratch directory (use a real disk path for accurate fsync timing) |
-| `--out <PATH>` | (none) | Write CSV results to path |
-| `--label <NAME>` | `run` | Tag attached to every CSV row |
+| `--no-fsync-each` | off | Skip per-record WAL flush+sync. A background thread flushes every 50 ms |
+| `--no-rewrite-on-compact` | off | Skip disk-file rewrite after compaction |
+| `--no-auto-checkpoint` | off | Skip WAL checkpoint rewrite after compaction |
+
+## Client (`ctl`)
+
+`ctl` launches a ratatui TUI by default when stdout is a TTY. Use `--headless` for the line-editor REPL.
+
+| flag | default | description |
+|------|---------|-------------|
+| `--headless` | off | Use the rustyline REPL instead of the TUI |
+
+## DST (`dst`)
+
+| flag | default | description |
+|------|---------|-------------|
+| `--tier <TIER>` | `nano` | Workload scale: `nano` (10k rows), `micro` (1M), `small` (100M), `full` (1B) |
+| `--seed <N>` | time-based | RNG seed; printed on every run for reproducibility |
+| `--no-faults` | off | Disable fault injection |
 | `--log-level <LEVEL>` | `info` | `tracing` log level |
 
 ---

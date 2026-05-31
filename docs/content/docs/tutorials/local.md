@@ -209,8 +209,8 @@ curl http://127.0.0.1:9090/metrics    # → Prometheus text format
 Verify correctness before relying on any new data:
 
 ```bash
-# Fast embedded mode (30 seconds, no server required)
-cargo run --release --bin dst -- --quick
+# CI correctness check (nano tier, ~1 second)
+cargo run --release --bin dst -- --tier nano
 
 # Full simulation across all transport/auth/WAL combinations
 cargo run --release --bin dst

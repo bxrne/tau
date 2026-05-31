@@ -153,10 +153,10 @@ cargo run --release --bin dst -- --scratch /path/to/real/disk --out results.csv
 
 Every new statement requires changes to four files:
 
-1. `src/libtau/ql/ast.rs` -- add the `Stmt` variant and its `Display` impl
-2. `src/libtau/ql/parser.rs` -- add the `nom` production and register it in the top-level `alt`
-3. `src/libtau/executor.rs` -- add the handler branch, the `check_permission` arm, and update `is_read_only` if needed
-4. `src/bin/tau/main.rs` -- add the output formatter in `format_output` / `format_error`
+1. `crates/libtau/src/ql/ast.rs` -- add the `Stmt` variant and its `Display` impl
+2. `crates/libtau/src/ql/parser.rs` -- add the `nom` production and register it in the top-level `alt`
+3. `crates/libtau/src/executor.rs` -- add the handler branch, the `check_permission` arm, and update `is_read_only` if needed
+4. `crates/libtau/src/wire.rs` -- add the response shape to `Response::from_output` and `Response::parse`
 
 ---
 

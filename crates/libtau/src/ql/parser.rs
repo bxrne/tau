@@ -614,6 +614,18 @@ fn bool_lit(i: &str) -> IResult<&str, bool> {
     .parse(i)
 }
 
+/// Parse a single literal value from `s`, consuming all input.
+/// Used by bulk-load paths that need to decode one scalar without
+/// constructing a full statement.
+pub fn parse_literal(s: &str) -> Option<Literal> {
+    let (rest, lit) = literal(s.trim()).ok()?;
+    if rest.trim().is_empty() {
+        Some(lit)
+    } else {
+        None
+    }
+}
+
 /// A literal value: `null`, a boolean, a string, a float, or an integer.
 fn literal(i: &str) -> IResult<&str, Literal> {
     alt((

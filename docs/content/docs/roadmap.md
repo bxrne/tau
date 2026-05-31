@@ -54,13 +54,21 @@ The core engine and server are feature-complete and shipping. The data model, qu
 The engine is correct. v0.2.0 makes it fast enough to benchmark honestly, operable enough to run in production without documentation gaps, and expressive enough to cover real ingest and audit patterns.
 
 **Benchmarks**
-- [ ] Published `cargo bench` suite using Criterion: `AT`, `RANGE`, `REDUCE`, and `APPEND` at varying layer counts and dataset sizes
+- [x] Published `cargo bench` suite using Criterion: `AT`, `RANGE`, `REDUCE`, and `APPEND` at varying layer counts and dataset sizes (`cargo bench -p libharness`)
+- [x] 1BRC deterministic simulation tester (`dst`): 413 stations × N tiers, oracle-verified, fault-injected, throughput-reported
 - [ ] Reproducible comparison against InfluxDB 2.x and QuestDB on standard ingest and query workloads, with methodology documented and results checked into the repo
 - [ ] Flamegraph-guided profiling; all regressions caught by the bench suite in CI
 
 **Query performance**
 - [x] Multi-layer merge iterator: single-pass `sweep_range` query across N layers instead of N sequential passes — used as the fast path in `RANGE` for unfiltered base-lens queries
+- [x] Arc-shared layer snapshot: `Database::layers()` returns `Arc<Vec<Layer<V>>>` so bounds collection and segment building share one snapshot allocation
+- [x] FxHashMap/FxHashSet for all internal maps (executor, storage, query evaluator)
+- [x] `Layer::new_sorted_unchecked` for trusted bulk paths (BATCH APPEND, COPY) — skips sort + overlap validation
+- [x] `exec_as` permission check no longer clones `User` on every authenticated statement
+- [x] `copy_lens` uses `parse_literal()` instead of a full nom statement parse per CSV row
+- [x] WAL group-commit mode: `--no-fsync-each` + 50 ms background flush thread
 - [ ] Write throughput profiling and targeted optimisation of the WAL path
+- [ ] Per-database `RwLock` sharding in executor (write to one DB no longer blocks reads on others)
 
 **Transactions and batch ingest**
 - [x] `START TRANSACTION` / `COMMIT` / `ROLLBACK`: atomic multi-statement transactions — mutations buffered per-connection, invisible until `COMMIT`, discarded on `ROLLBACK`

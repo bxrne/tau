@@ -2,32 +2,41 @@ name: DST
 
 on:
   workflow_dispatch:
+    inputs:
+      tier:
+        description: "Workload tier: nano, micro, small"
+        required: false
+        default: micro
+      seed:
+        description: "RNG seed (decimal, leave blank for time-based)"
+        required: false
 
 jobs:
   dst:
-    name: Deterministic Simulation Tester
+    name: 1BRC Deterministic Simulation Tester
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.94.1
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: dst
       - name: Build dst binary
         run: cargo build --release --bin dst
-      - name: Run full simulation
+      - name: Run simulation (${{ inputs.tier || 'micro' }})
         run: |
+          SEED_ARG=""
+          if [ -n "${{ inputs.seed }}" ]; then
+            SEED_ARG="--seed ${{ inputs.seed }}"
+          fi
           ./target/release/dst \
-            --ops 1000 \
-            --label "manual-${{ github.sha }}" \
-            --out dst-results.csv \
+            --tier ${{ inputs.tier || 'micro' }} \
+            $SEED_ARG \
             | tee dst-results.txt
       - uses: actions/upload-artifact@v4
         with:
           name: dst-results-${{ github.sha }}
-          path: |
-            dst-results.csv
-            dst-results.txt
+          path: dst-results.txt
           if-no-files-found: error

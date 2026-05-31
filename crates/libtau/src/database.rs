@@ -76,6 +76,25 @@ where
         self.auto_checkpoint.store(on, Ordering::Relaxed);
     }
 
+    /// Control per-record `flush + sync_data` on the WAL.  When `false` the
+    /// WAL buffers writes for throughput; call `Wal::flush` explicitly for
+    /// periodic group-commit durability.  No-op when no WAL is configured.
+    pub fn set_wal_fsync_each(&self, on: bool) {
+        if let Some(wal) = &self.wal {
+            wal.lock().expect("wal lock poisoned").set_fsync_each(on);
+        }
+    }
+
+    /// Flush and fsync the WAL explicitly.  Used for group-commit: after
+    /// `set_wal_fsync_each(false)`, call this periodically to enforce a
+    /// durability boundary without syncing on every record.
+    pub fn wal_flush(&self) -> io::Result<()> {
+        if let Some(wal) = &self.wal {
+            wal.lock().expect("wal lock poisoned").sync()?;
+        }
+        Ok(())
+    }
+
     /// Open an existing WAL, replay it into `store`, then return a live
     /// `Database` with durability enabled.
     ///
@@ -285,16 +304,16 @@ where
         self.store.read().expect("store lock poisoned").at(name, t)
     }
 
-    /// Snapshot of the layer stack for `lens`, cheap-cloned through the
-    /// `Arc`-backed `Layer`.  Returns `None` if the lens has never been
-    /// appended to.  Used by the QL executor to gather change boundaries
-    /// when materialising a `RANGE`.
-    pub fn layers(&self, lens: &str) -> Option<Vec<Layer<V>>> {
+    /// Snapshot of the layer stack for `lens` wrapped in `Arc` so all query
+    /// phases (bounds collection, segment building, etc.) share one allocation.
+    /// Layer clones are pointer bumps; the Vec wrap is one extra Arc for the
+    /// batch.  Returns `None` if the lens has never been appended to.
+    pub fn layers(&self, lens: &str) -> Option<Arc<Vec<Layer<V>>>> {
         self.store
             .read()
             .expect("store lock poisoned")
             .layers(lens)
-            .cloned()
+            .map(|v| Arc::new(v.clone()))
     }
 
     /// Export all layers for every lens as owned data.

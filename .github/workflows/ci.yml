@@ -62,5 +62,5 @@ jobs:
         with:
           shared-key: dst
       - run: cargo build --release --bin dst
-      - run: cargo run --release --bin dst -- --quick --duration 30
+      - run: cargo run --release --bin dst -- --tier nano --log-level warn
 

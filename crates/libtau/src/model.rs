@@ -79,6 +79,31 @@ impl<V> Layer<V> {
         }
     }
 
+    /// Create a layer from taus that the caller guarantees are already sorted
+    /// by `start` and non-overlapping.  Skips the sort + overlap check.
+    /// Used by BATCH APPEND and COPY, where the taus arrive in order and the
+    /// executor has already validated the type of each value.
+    ///
+    /// # Panics (debug only)
+    /// In debug builds a `debug_assert` verifies the invariant so tests catch
+    /// misuse.
+    pub fn new_sorted_unchecked(id: LayerId, taus: Vec<Tau<V>>, written_at: i64) -> Self {
+        debug_assert!(
+            taus.windows(2)
+                .all(|w| w[0].start <= w[1].start && w[0].end <= w[1].start),
+            "new_sorted_unchecked: taus must be sorted and non-overlapping"
+        );
+        let min_start = taus.first().map_or(Timestamp::MAX, |t| t.start);
+        let max_end = taus.last().map_or(Timestamp::MIN, |t| t.end);
+        Self {
+            id,
+            min_start,
+            max_end,
+            taus: taus.into(),
+            written_at,
+        }
+    }
+
     /// O(log n) point lookup via binary search.
     pub fn at(&self, t: Timestamp) -> Option<&V> {
         let i = self.taus.partition_point(|tau| tau.end <= t);

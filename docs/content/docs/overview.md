@@ -90,11 +90,14 @@ Encryption is AES-256-GCM with a random 12-byte nonce per entry, keyed by `TAU_E
 
 ## Concurrency
 
-Each TCP connection runs on its own OS thread. All threads share one `Arc<RwLock<Executor>>`. Read-only statements (`AT`, `RANGE`, `REDUCE`, `SHOW *`) take the read lock and run concurrently. Write statements take the exclusive write lock.
+Each TCP connection runs on its own OS thread. All threads share one `Arc<RwLock<Executor>>` which guards the database registry, plus a separate `Arc<RwLock<DbState>>` per named database.
 
-When a connection uses `START TRANSACTION … COMMIT`, mutations are buffered per-connection and not written to storage until `COMMIT`. At commit time the write lock is held for the entire batch, so readers see either none or all of the transaction's writes. `ROLLBACK` discards the buffer. Nesting is not supported.
+Lock routing:
+- Read-only statements (`AT`, `RANGE`, `REDUCE`, `SHOW *`) take the shared executor lock and a per-database read lock, so concurrent readers never block each other.
+- Data writes (`APPEND`, `CREATE LENS`, `COPY`, etc.) take only the shared executor lock plus a per-database write lock. A write to database `prod` does not block reads on database `metrics`.
+- Registry writes (`CREATE DATABASE`, `DROP DATABASE`, `USE DATABASE`, user management, transactions) take the exclusive executor lock for their brief duration.
 
-The design is intentionally simple. The trade-off — a slow write blocks concurrent reads — is acceptable for the expected workload and avoids the complexity of per-database locking or MVCC.
+When a connection uses `START TRANSACTION … COMMIT`, mutations are buffered per-connection and not written to storage until `COMMIT`. During a transaction, writes route through the exclusive executor lock so the buffer is applied atomically. `ROLLBACK` discards the buffer. Nesting is not supported.
 
 ---
 

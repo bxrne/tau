@@ -67,76 +67,58 @@ The DST is where emergent correctness bugs live: the ones that only appear when:
 - Hundreds of correction layers accumulate before compaction fires, then a concurrent `RANGE` scan sees the transition
 - The same mutation is applied with three different permission levels and the state machine diverges only on the third
 
-### Two modes
+### Dataset and oracle
 
-**Embedded (`--quick`):** uses the library executor directly, no server process, no I/O. Simulates centuries of temporal data in seconds. Suitable for CI.
+The DST is driven by the **1BRC dataset shape**: ~413 station names, each mapped to one Base lens. Every reading is stored as a degenerate tau `[t, t+1)` with `value = temperature × 10`. After ingest, `REDUCE min/max/avg` per station is cross-checked against a `BTreeMap<start, (end, value)>` oracle. Any divergence is a bug.
 
-**Full (default):** spawns a real `tau` server for each config cell in the matrix (Transport × Auth × WAL), drives traffic over TCP, cross-checks every response against a simple oracle, injects faults (connection drops, WAL truncation), and scrapes Prometheus metrics to verify statement counts. Outputs a table of results.
+The oracle has no layers, no compaction, no WAL — just obviously correct temporal semantics.
 
-### Oracle
+### Tiers
 
-Both modes cross-check against a reference implementation: a `BTreeMap<start, (end, value)>` per lens with O(log n) lookups. It has no layers, no compaction, no WAL. Just obviously correct temporal semantics. Any divergence between the oracle and the executor is a bug.
+Scale is controlled by `--tier`. Nano runs in CI on every push.
+
+| tier | rows | use |
+|------|------|-----|
+| `nano` | 10 k | CI correctness smoke (<1 s) |
+| `micro` | 1 M | PR-time perf sanity |
+| `small` | 100 M | nightly / dedicated runner |
+| `full` | 1 B | manual / release benchmarking |
+
+### Fault injection
+
+A fault is injected every 5,000 rows: the victim station's lens is dropped and recreated, and the oracle resets to match. This exercises the lens lifecycle under live ingest load.
 
 ### Deterministic reproduction
 
-A `u64` seed drives the entire operation sequence. Given the same seed, the exact same operations execute in the same order. No flaky tests. No Heisenbugs.
+A `u64` seed drives all randomness. The seed is printed on every run.
 
 ```bash
-cargo run --release --bin dst -- --quick --seed 0xdeadbeef
+cargo run --release --bin dst -- --tier nano --seed 3735928559
 ```
 
 A seed that found a bug six months ago can be re-run against a patched binary to confirm the fix.
 
-### Invariants checked
-
-**Storage:**
-
-- Every base lens has a non-empty layer stack only if data was appended to it
-- `layer.taus` is sorted and non-overlapping within a single layer
-- `layer.min_start` and `layer.max_end` match the actual first/last tau
-- After compaction: for every timestamp the oracle covers, `AT(lens, t) == oracle.AT(lens, t)`
-
-**Query semantics:**
-
-- `AT(lens, t)` agrees with the oracle for any `t` in the covered range
-- `AT(lens, t)` returns `None` for any `t` outside all covered intervals
-- `RANGE` segments are non-overlapping and strictly sorted by start
-- No segment has `start >= end`
-- No segment extends outside the queried range
-
-**Concurrent correctness:**
-
-- All concurrent readers querying the same timestamp return the same value
-- The background stress reader never panics regardless of concurrent write load
-
 ### How to run
 
 ```bash
-# Fast: embedded mode, 30 seconds, CI-suitable
-cargo run --release --bin dst -- --quick
+# CI smoke — runs in under 1 second
+cargo run --release --bin dst -- --tier nano
 
-# Embedded with a specific seed (reproducible)
-cargo run --release --bin dst -- --quick --seed 0xdeadbeef
+# Reproducible run
+cargo run --release --bin dst -- --tier nano --seed 3735928559
 
-# Full simulation: all 8 config cells
-cargo run --release --bin dst
-
-# Full simulation with real-disk WAL and CSV output
-cargo run --release --bin dst -- --scratch /var/tmp/tau --out results.csv
-
-# Longer embedded run
-cargo run --release --bin dst -- --quick --duration 120
+# 1 M rows, disable fault injection
+cargo run --release --bin dst -- --tier micro --no-faults
 ```
 
-On failure, the DST prints the seed, the violated invariant, the expected and actual values, and the exact command to reproduce.
-
----
+On failure, the DST prints the seed and the violated invariant.
 
 ## Summary
 
 | layer | what it catches | when to run |
 |-------|----------------|-------------|
-| Unit tests | Regressions on known-shape behaviour | Always (CI, before every commit) |
+| Unit tests | Regressions on known-shape behaviour | Always (CI) |
 | Hegel PBT | Invariant violations across random inputs | Always (inline with unit tests) |
-| DST embedded | Emergent correctness across simulated centuries | CI (30s), before release |
-| DST full | Fault injection, all transport/auth/WAL combinations | Before release, regression investigation |
+| DST nano | 1BRC correctness: oracle cross-check + fault injection | CI on every push |
+| DST micro/small | Scale + throughput regression | PR / nightly |
+| Criterion benches | Engine microbenchmark regressions (AT/RANGE/REDUCE/APPEND) | Nightly / on demand |

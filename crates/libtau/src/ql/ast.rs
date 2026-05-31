@@ -394,6 +394,27 @@ impl std::fmt::Display for Expr {
     }
 }
 
+/// Returns `true` for statements that require the global executor write lock
+/// because they mutate registry state (`databases`, `active`, `users`, or
+/// `pending`).  All other write statements use a per-database write lock and
+/// only need the executor read lock.
+pub fn needs_registry_lock(stmt: &Stmt) -> bool {
+    matches!(
+        stmt,
+        Stmt::CreateDatabase { .. }
+            | Stmt::DropDatabase { .. }
+            | Stmt::UseDatabase { .. }
+            | Stmt::CreateUser { .. }
+            | Stmt::DropUser { .. }
+            | Stmt::Grant { .. }
+            | Stmt::Revoke { .. }
+            | Stmt::StartTransaction
+            | Stmt::Commit
+            | Stmt::Rollback
+            | Stmt::RestoreDatabase { .. }
+    )
+}
+
 impl std::fmt::Display for Stmt {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
