@@ -1,5 +1,4 @@
 {
-  ".": "0.1.3",
   "crates/libtau": "0.1.3",
   "crates/libharness": "0.1.3",
   "crates/tau": "0.1.3",

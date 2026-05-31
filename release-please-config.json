@@ -1,7 +1,37 @@
 {
+  "linked-versions": true,
   "packages": {
-    ".": {
+    "crates/libtau": {
       "release-type": "rust",
+      "component": "libtau",
+      "bump-minor-pre-major": true,
+      "bump-patch-for-minor-pre-major": true,
+      "changelog-path": "docs/CHANGELOG.md"
+    },
+    "crates/libharness": {
+      "release-type": "rust",
+      "component": "libharness",
+      "bump-minor-pre-major": true,
+      "bump-patch-for-minor-pre-major": true,
+      "changelog-path": "docs/CHANGELOG.md"
+    },
+    "crates/tau": {
+      "release-type": "rust",
+      "component": "tau",
+      "bump-minor-pre-major": true,
+      "bump-patch-for-minor-pre-major": true,
+      "changelog-path": "docs/CHANGELOG.md"
+    },
+    "crates/tauctl": {
+      "release-type": "rust",
+      "component": "tauctl",
+      "bump-minor-pre-major": true,
+      "bump-patch-for-minor-pre-major": true,
+      "changelog-path": "docs/CHANGELOG.md"
+    },
+    "crates/dst": {
+      "release-type": "rust",
+      "component": "dst",
       "bump-minor-pre-major": true,
       "bump-patch-for-minor-pre-major": true,
       "changelog-path": "docs/CHANGELOG.md"
