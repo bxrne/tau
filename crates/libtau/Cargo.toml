@@ -12,6 +12,7 @@ path = "src/lib.rs"
 
 [dependencies]
 crc32fast.workspace = true
+rustc-hash.workspace = true
 nom.workspace = true
 tracing.workspace = true
 aes-gcm.workspace = true

@@ -1,6 +1,6 @@
 use crate::model::Layer;
 use crate::storage::store::{COMPACT_THRESHOLD, Store, compact_layers};
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use std::io;
 
 /// Reference in-memory store. Zero dependencies, suitable for tests and
@@ -23,7 +23,7 @@ impl<V> InMemory<V> {
 
     pub fn with_threshold(compact_threshold: usize) -> Self {
         Self {
-            lenses: HashMap::new(),
+            lenses: HashMap::default(),
             compact_threshold,
         }
     }

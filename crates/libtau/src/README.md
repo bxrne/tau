@@ -1,37 +1,40 @@
 # libtau
 
-The core library. Everything the server and any future client library needs lives here.
+The core engine library. All binaries depend only on this crate.
 
-## What it is
+## Module map
 
-`libtau` implements a time-series database based on **immutable, layered temporal intervals**. The central idea is that data is never corrected in-place. When a value changes, a new layer is appended on top of existing ones, and the newest layer always wins at query time. This is the same model used in bitemporal databases and event-sourced systems - it makes the full correction history available for free and eliminates write-write conflicts entirely.
+| Module | Purpose |
+|--------|---------|
+| `model` | `Tau<V>`, `Layer<V>`, `Lens<V>` — the three data primitives |
+| `value` | `Value` enum (Int/Float/Str/Bool/Null) + tagged wire encoding |
+| `ql/ast` | TauQL AST (`Stmt`, `Expr`, `Literal`, `Type`, `BinOp` …) |
+| `ql/parser` | `nom`-based parser; entry point `parse()`, scalar helper `parse_literal()` |
+| `storage/store` | `Store<V>` trait; sweep-line compaction (`compact_layers`) |
+| `storage/memory` | `InMemory<V>` — `FxHashMap`-backed, zero I/O |
+| `storage/disk` | `Disk<V>` — binary flat file with AES-256-GCM encryption option |
+| `storage/wal` | `Wal` — write-ahead log with schema DDL replay |
+| `database` | `Database<V>` — owns a `Store` + optional `Wal`; `Arc<Vec<Layer>>` snapshots |
+| `executor` | `Executor` — registry of named databases + dispatch + permissions |
+| `query` | Pure query evaluator extracted from executor: `eval_lens`, `eval_expr`, aggregation, range bounds |
+| `wire` | `Response` — typed wire codec shared by server and clients |
+| `users` | `User`, `UserStore`, `Perm` — CRUDA permission system |
+| `metrics` | `Metrics` — Prometheus counters |
+| `crypto` | AES-256-GCM helpers + hex key parsing |
 
-## Design decisions
+## Key data-structure choices
 
-### Generics over a dynamic dispatch boundary
+Internal maps (`executor.rs`, `query.rs`, `storage/memory.rs`, `storage/store.rs`) use `FxHashMap`/`FxHashSet` from `rustc-hash`. The public `User::grants` field stays on `std::collections::HashMap` to keep the public API stable.
 
-The core types (`Tau<V>`, `Layer<V>`, `Database<V>`) are generic over the value type. This lets a consumer embed a typed database - a `Database<f64>` for sensor readings - without boxing every value. The executor adds a single dynamic layer at the top: it uses `Database<Value>` where `Value` is an enum that covers all supported types. The cost is that the executor can only be used with dynamic values; the typed API is available for library consumers who want to skip the executor entirely.
+`Database::layers()` returns `Option<Arc<Vec<Layer<V>>>>` so range query phases (bounds collection, segment building) share one snapshot without re-locking the store.
 
-### Newest-layer-wins without tombstones
+`Layer::new_sorted_unchecked` skips sort + overlap validation for trusted bulk-load callers (`BATCH APPEND`, `COPY`). A `debug_assert` catches misuse in test builds.
 
-There is no delete operation in the traditional sense. Deleting a value means appending a new layer whose taus cover the region you want gone, but with a `null` value - this is visible in `RANGE` output as gaps. The immutability guarantee means consumers can snapshot a layer stack and query it without worrying about concurrent writes invalidating their view.
+## Adding a new statement
 
-### Derived lenses are purely lazy
+Edit these four files in order:
 
-A derived lens is an AST expression stored at definition time. Every `AT` or `RANGE` query re-evaluates the expression from scratch - there is no materialisation, no caching, and no incremental maintenance. This is correct and simple, but it means a deeply nested chain of derived lenses re-evaluates each intermediate step on every point lookup. For 1.0, this is fine; for hot derived lenses over large ranges it may need a materialised view path.
-
-### Crypto is a standalone module
-
-`crypto` has no dependency on the storage or executor modules. It exposes a small, focused API: `encrypt`/`decrypt` for symmetric AES-256-GCM with a random 12-byte nonce per blob. The server wires it into the WAL and Disk paths; the library doesn't force any security policy on embedders.
-
-### Multi-user authorisation lives next to the executor
-
-`users` defines a 5-bit `Perm` bitmap (`C`, `R`, `U`, `D`, `A`) and a `UserStore` that maps `database_name -> Perm` per user - with `"*"` as a wildcard that grants on every database (including ones created later). The `Executor` owns one of these and exposes `exec_as(stmt, caller)` / `exec_read_as` that check the matched user's grants before delegating to the plain `exec`/`exec_read` path. Unrestricted `exec` and `exec_read` are still available for library / test use and for schema-replay startup. Persistence is a single text file, rewritten atomically on every mutation.
-
-### Transactions are connection-scoped and serially applied
-
-`START TRANSACTION` puts the executor into a buffering mode for the calling connection. Subsequent mutations are staged in a per-connection buffer rather than written to storage immediately; readers on other connections see the pre-transaction state throughout. `COMMIT` applies the entire buffer atomically under the write lock. `ROLLBACK` discards it. Nesting is not allowed — a second `START TRANSACTION` before a `COMMIT` or `ROLLBACK` returns `ExecError::TransactionAlreadyActive`. Issuing `COMMIT` or `ROLLBACK` without a preceding `START TRANSACTION` returns `ExecError::NoActiveTransaction`.
-
-### Metrics are shared via Arc
-
-The `Executor` owns an `Arc<Metrics>` field. The TCP server receives a clone of that Arc and shares it with the metrics HTTP thread. This lets the metrics endpoint read counters without going through the executor lock - the counters use `Relaxed` atomics because they are best-effort observability data, not synchronisation barriers.
+- `ql/ast.rs` — add `Stmt` variant + `Display` impl; check if `needs_registry_lock` needs updating
+- `ql/parser.rs` — add nom production + register in the top-level `alt`
+- `executor.rs` — add handler + `check_permission` arm + `is_read_only` if needed; add to `exec_db_write` if it is a data write
+- `wire.rs` — add response shape to `Response::from_output` and `Response::parse`

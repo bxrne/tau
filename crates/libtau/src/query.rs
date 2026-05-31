@@ -5,15 +5,15 @@
 //! DERIVE queries, extracted from executor.rs so it stays focused on dispatch
 //! and lifecycle.
 
-use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::executor::DbState;
 use crate::executor::ExecError;
 use crate::model::{Layer, Timestamp};
 use crate::ql::ast::{AggFunc, BinOp, Expr, UnOp};
 use crate::value::Value;
-
-// ── Cycle detection ──────────────────────────────────────────────────────────
 
 /// Returns `true` if wiring `target = expr` would create a derivation cycle.
 ///
@@ -51,8 +51,6 @@ pub(crate) fn would_cycle(
     }
     false
 }
-
-// ── Expression evaluation ─────────────────────────────────────────────────────
 
 pub(crate) fn eval_lens(
     state: &DbState,
@@ -103,8 +101,6 @@ pub(crate) fn eval_expr(
         }
     }
 }
-
-// ── Operator application ──────────────────────────────────────────────────────
 
 pub(crate) fn apply_unary(op: UnOp, v: Value) -> Result<Value, ExecError> {
     match (op, v) {
@@ -231,9 +227,7 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> Result<bool, ExecError> {
     }
 }
 
-// ── Range scanning ────────────────────────────────────────────────────────────
-
-type RangeBoundsResult = Result<(Vec<Timestamp>, Option<Vec<Layer<Value>>>), ExecError>;
+type RangeBoundsResult = Result<(Vec<Timestamp>, Option<Arc<Vec<Layer<Value>>>>), ExecError>;
 
 /// Collect sorted, deduplicated boundary timestamps for a range scan of `name`
 /// over `[start, end)`, including any filter-expression boundaries. Returns the
@@ -248,7 +242,7 @@ pub(crate) fn collect_range_bounds(
     let mut bounds = Vec::with_capacity(64);
     bounds.push(start);
     bounds.push(end);
-    let layers_snap: Option<Vec<Layer<Value>>> = if state.base_types.contains_key(name) {
+    let layers_snap: Option<Arc<Vec<Layer<Value>>>> = if state.base_types.contains_key(name) {
         let snap = state.db.layers(name);
         if let Some(ref ls) = snap {
             collect_bounds_from_layers(ls, start, end, &mut bounds);
@@ -413,8 +407,6 @@ pub(crate) fn collect_expr_bounds(
     }
 }
 
-// ── Aggregation ───────────────────────────────────────────────────────────────
-
 pub(crate) fn agg_sum(segments: &[(i64, Value)]) -> Result<Value, ExecError> {
     let mut int_sum: i64 = 0;
     let mut float_sum: Option<f64> = None;
@@ -468,7 +460,7 @@ pub(crate) fn collect_agg_segments(
     let mut bounds = Vec::with_capacity(64);
     bounds.push(start);
     bounds.push(end);
-    let layers_snap: Option<Vec<Layer<Value>>> = if state.base_types.contains_key(lens) {
+    let layers_snap: Option<Arc<Vec<Layer<Value>>>> = if state.base_types.contains_key(lens) {
         let snap = state.db.layers(lens);
         if let Some(ref ls) = snap {
             collect_bounds_from_layers(ls, start, end, &mut bounds);
@@ -484,7 +476,7 @@ pub(crate) fn collect_agg_segments(
     for w in bounds.windows(2) {
         let (s, e) = (w[0], w[1]);
         let v = if let Some(ref ls) = layers_snap {
-            at_layers(ls, s)
+            at_layers(ls.as_slice(), s)
         } else {
             eval_lens(state, lens, s)?
         };

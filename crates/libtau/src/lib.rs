@@ -14,7 +14,7 @@ pub use database::Database;
 pub use executor::{ExecError, Executor, LayerInfo, Output};
 pub use metrics::Metrics;
 pub use model::{Layer, LayerId, Lens, LensKind, Tau, Timestamp};
-pub use ql::{AggFunc, Stmt, parse};
+pub use ql::{AggFunc, Stmt, needs_registry_lock, parse};
 pub use storage::{COMPACT_THRESHOLD, Codec, Disk, InMemory, Wal, WalEntry};
 pub use users::{Perm, User, UserStore};
 pub use value::Value;

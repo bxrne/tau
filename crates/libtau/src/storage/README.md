@@ -1,57 +1,35 @@
 # storage
 
-Pluggable backing storage for the layer stack. The `Store<V>` trait is the only interface the rest of the library talks to; backends are swapped out at construction time.
+Pluggable backing storage for the layer stack. The `Store<V>` trait is the only interface the rest of the library uses; backends are swapped at construction time.
 
-## Backends
+## Store trait
 
-### `InMemory`
+```rust
+pub trait Store<V>: Send + Sync {
+    fn append(&mut self, lens: &str, layer: Layer<V>) -> io::Result<bool>;
+    fn layers(&self, lens: &str) -> Option<&Vec<Layer<V>>>;
+    fn at(&self, lens: &str, t: Timestamp) -> Option<V>;      // default impl
+    fn drop_lens(&mut self, _lens: &str) {}                    // default no-op
+    fn lens_names(&self) -> Vec<String>;
+}
+```
 
-A `HashMap` from lens name to a `Vec<Layer<V>>`. All state lives in process memory and is lost on shutdown. Used by the test suite and as the default backend when no WAL path is given.
+`append` returns `true` when compaction ran (the caller decides whether to WAL-checkpoint).
 
-The compaction threshold is configurable at construction; the default is 8 layers per lens. Once the stack depth exceeds that threshold, all layers for that lens are merged into a single canonical layer before the new write lands.
+## Implementations
 
-### `Disk`
+**`InMemory<V>`** — `FxHashMap<String, Vec<Layer<V>>>`. Zero I/O. Used by all unit tests, the embedded DST path, and the in-memory server mode. Compaction fires automatically when a lens exceeds the threshold.
 
-A binary file with a fixed header followed by length-prefixed entries. Each entry records a layer ID, the lens name, and the list of taus. On `open`, the whole file is read and the layer stack is reconstructed in memory; subsequent writes go to memory first, and `flush` rewrites the entire file atomically.
+**`Disk<V>`** — binary flat file. Header is the magic `TAU` (plaintext) or `TAUE` (encrypted). Each entry is a CRC32-prefixed `WalEntry`. Supports AES-256-GCM encryption via `TAU_ENCRYPTION_KEY` env var. Compaction rewrites the file atomically (write to `.tmp`, then rename); set `set_rewrite_on_compact(false)` to skip the rewrite on bulk-load paths.
 
-The binary format uses two magic prefixes: `TAU\x01` for plaintext and `TAUE` for encrypted. When a 32-byte key is provided, `flush` encrypts the entire payload with AES-256-GCM before writing. The AEAD authentication tag makes tampering detectable without a separate checksum in the encrypted path; the plaintext path uses CRC32 per-header.
-
-Unencrypted `Disk` stores hold an open append-mode file handle; writes are O(entry). Encrypted stores still rewrite on flush - the AEAD tag covers the entire payload, so partial appends aren't possible. A compaction triggers a full rewrite in both cases.
-
-### `Wal`
-
-An append-only flat text file. Each line is one of three entry types:
-
-- Data entry: `<crc32hex> <base64-payload>` - a binary-encoded layer, base64-wrapped with a CRC32 integrity check.
-- Schema entry: `S:<crc32hex> <stmt_text>` - a raw `CREATE LENS` or `DERIVE LENS` or `DROP LENS` statement, replayed to reconstruct the schema on startup.
-- Encrypted schema entry: `SE:<crc32hex> <base64-encrypted-DDL>` - AES-256-GCM encrypted schema line.
-
-On startup, `Wal::replay` reads data entries top-to-bottom and pushes each layer back into a fresh store. Schema lines are returned separately and replayed through the executor after data replay. The WAL is the authoritative durability record; the in-memory state is a derived view of it.
-
-Every call to `Wal::append` issues an `fsync` (via `sync_data`) before returning. This is intentionally synchronous and conservative - write latency is bounded below by disk sync latency, but crash recovery guarantees are strong.
-
-After auto-compaction fires, `Database::checkpoint` rewrites the WAL atomically (write to `.tmp`, fsync, rename) to contain only the live post-compaction layers plus any schema lines. WAL growth is bounded to the current live data set.
+**`Wal`** — write-ahead log. Two entry kinds: data entries (CRC32-prefixed binary) and schema entries (`S:` / `SE:` prefix carrying raw `CREATE LENS` / `DERIVE LENS` text). Schema entries are replayed separately from data on startup. Set `set_fsync_each(false)` and call `sync()` periodically for group-commit mode.
 
 ## Compaction
 
-`compact_layers` is a free function shared by both `InMemory` and `Disk`. It takes the full layer stack and produces a single equivalent layer by:
+`compact_layers` in `store.rs` is a sweep-line algorithm: it builds `(time, start/end, layer_idx)` events, sorts them, and produces a single merged layer with newest-wins semantics. O(E log E) where E = 2 × total tau count. Adjacent segments with equal values are merged.
 
-- Collecting all tau boundaries across all layers into a sorted, deduplicated list of timestamps.
-- For each sub-interval between consecutive boundaries, querying the stack in newest-first order to find the effective value.
-- Merging adjacent sub-intervals that share a value.
+## Database
 
-The result is semantically identical to the original stack under any point lookup - it is a lossless compression. Adjacent merging is important: without it, compaction would explode the tau count for workloads that append many overlapping layers with the same value.
+`Database<V>` owns a `Box<dyn Store<V>>` behind `Arc<RwLock<>>` and an optional `Wal` behind `Arc<Mutex<>>`. Append order is WAL-first then store; a WAL fsync failure leaves the in-memory state unchanged.
 
-## Design decisions
-
-### Trait object vs. enum dispatch
-
-`Store<V>` is a trait object (`Box<dyn Store<V>>`). An enum dispatch would be faster (no vtable) but would require the `Database` type to be parameterised over the backend variant, which bleeds into public API. The trait object approach keeps `Database<V>` simple. The hot path is compacted down to two layers at most, so the vtable indirection is rarely on the critical path.
-
-### `HashMap` in both backends
-
-Both `Disk` and `InMemory` use `HashMap<String, Vec<Layer<V>>>` for O(1) amortised lens lookup. `Disk::flush` rewrites the whole file from the in-memory state, so write order is whatever the HashMap iterator produces; the file format is self-describing (length-prefixed lens names + per-entry checksums) and does not need a stable on-disk ordering.
-
-### CRC32 vs. cryptographic checksums
-
-CRC32 is used for corruption detection on unencrypted files, not tamper detection. It catches bit-flip errors and partial writes but not adversarial modification. When encryption is enabled, the AEAD tag (GCM authentication) provides tamper detection as a side effect.
+`Database::layers()` returns `Option<Arc<Vec<Layer<V>>>>` — an Arc-wrapped snapshot so range query phases share one allocation without re-locking.

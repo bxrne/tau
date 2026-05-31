@@ -1,137 +1,99 @@
 +++
 title = "DST"
-date = 2026-05-29
+date = 2026-05-31
 template = "page.html"
 +++
 
-Tau's correctness is not a claim. It is a property checked on every build by a deterministic simulation tester that drives the engine against a reference oracle, injects faults and reproduces any failure from a single seed.
+Tau's correctness is not a claim. It is a property verified on every build by a deterministic simulation tester that drives the engine against a reference oracle, injects faults, and reproduces any failure from a single seed.
 
-This page describes what the DST does, why it works and where the idea comes from.
-
----
+This page describes what the DST does, why it works, and where the idea comes from.
 
 ## Inspiration
 
 The deterministic simulation approach is not new. It comes from a lineage of systems that earned their reputations for correctness the same way.
 
-[**FoundationDB**](https://apple.github.io/foundationdb/testing.html) is the canonical example. The team built a database that starts in an arbitrary state and runs for thousands of simulated days, with concurrent clients and aggressive fault injection, against a single threaded executable so every bug is reproducible from a seed. The simulation tester ran continuously for years before the first public release.
+[**FoundationDB**](https://apple.github.io/foundationdb/testing.html) is the canonical example. The team built a database that starts in an arbitrary state and runs for thousands of simulated days, with concurrent clients and aggressive fault injection, against a single-threaded executable so every bug is reproducible from a seed. The simulation tester ran continuously for years before the first public release.
 
-[**TigerBeetle**](https://tigerbeetle.com/) carried the idea forward with `vopr`, the Variable Operating Reproducer, and built a brand around it. The discipline is the same. Single threaded executable, real protocol traffic, every fault injectable, every run reproducible.
+[**TigerBeetle**](https://tigerbeetle.com/) carried the idea forward with `vopr`, the Variable Operating Reproducer, and built a brand around it. Single-threaded executable, real protocol traffic, every fault injectable, every run reproducible.
 
-Tau's DST is shaped by both. The mechanism is general. Any system whose correctness depends on the interaction of stateful components benefits from a tester of this shape.
+Tau's DST is shaped by both.
 
----
+## Dataset: the 1BRC
 
-## Two modes
+The DST is driven by the **One Billion Row Challenge** dataset shape: ~413 station names, each mapped to one Base lens in tau. Every reading is a degenerate tau `[t, t+1)` with `value = temperature × 10` (i64 fixed-point so all arithmetic stays exact). After ingest, `REDUCE min/max/avg` per station is cross-checked against a BTreeMap oracle.
 
-**Embedded (`--quick`).** Uses the `libtau` executor directly. No server process, no I/O, no network. Simulates centuries of temporal data in seconds. Runs as part of CI on every push.
+The 1BRC shape was chosen deliberately: it exercises the ingest path (many small appends to many distinct lenses), the compaction path (layer count grows and is swept), and the aggregation path (full-range REDUCE). Any divergence between the engine and the oracle is a bug.
 
-**Full (default).** Spawns a real `tau` server process for each cell in the configuration matrix, drives traffic over TCP, scrapes Prometheus metrics, injects faults and cross checks every response against a reference oracle.
+## Tiers
 
-The configuration matrix is eight cells.
+The DST runs at four scale tiers:
 
-```
-Transport: plain | TLS
-Auth:      none  | password
-WAL:       off   | on
-```
+| Tier | Rows | Use |
+|------|------|-----|
+| `nano` | 10 k | CI correctness smoke (<1 s) |
+| `micro` | 1 M | PR-time perf sanity |
+| `small` | 100 M | nightly / dedicated runner |
+| `full` | 1 B | manual / release benchmarking |
 
-All eight are driven from the same seed.
-
----
+Nano runs on every push. Micro runs on workflow dispatch. Small and full are manual.
 
 ## The oracle
 
-The oracle is a `BTreeMap<start, (end, value)>` per lens. No layers. No compaction. No WAL. Just obviously correct temporal semantics with `O(log n)` lookups.
+The oracle is a `BTreeMap<start, (end, value)>` per station lens. No layers. No compaction. No WAL. Just obviously correct temporal semantics.
 
-Every statement processed by the engine is also applied to the oracle. Every read is checked against both. If the engine and the oracle disagree, the DST stops, prints the seed and the violated invariant and tells you how to reproduce.
+Every write applied to the engine is also applied to the oracle. Every REDUCE result is compared against an oracle computation. Any divergence stops the run, prints the seed, and prints the exact command to reproduce.
 
-The oracle has no clever optimisations. That is the point. It is a specification, not an implementation. Any divergence between the engine and the oracle is a bug in the engine.
+The oracle has no clever optimisations. That is the point. It is a specification.
 
----
+## Fault injection
+
+A fault is injected every 5,000 rows: the victim station's lens is dropped and recreated (simulating a connection reset), and the oracle resets to match. This verifies the engine handles lens lifecycle correctly under live ingest load.
 
 ## Reproducibility
 
-A `u64` seed drives the entire operation sequence. Which database. Which lens. Which intervals. Which timestamps. When to inject faults. Which faults to inject. Given the same seed, the same operations execute in the same order, on the same files, in the same threads.
+A `u64` seed drives all randomness: which station each reading goes to, temperature values, and fault victim selection. The same seed always produces the same sequence.
 
 ```sh
-cargo run --release --bin dst -- --quick --seed 0xdeadbeef
+# Reproduce a failure exactly
+cargo run --release --bin dst -- --tier nano --seed <printed-seed>
 ```
 
 A seed that found a bug six months ago can be replayed against a patched binary to confirm the fix.
 
-This is the property that makes the DST useful. Most concurrency bugs are not reproducible. A DST seed is.
-
----
-
-## Fault injection
-
-Two fault classes are injected in full mode.
-
-**Connection drop.** The client TCP connection is closed and reconnected. Verifies that the server accepts reconnections cleanly and that previously written data is still readable afterwards.
-
-**WAL truncation.** The WAL file is truncated by 16 bytes to simulate a partial write. On the next server restart the WAL must replay cleanly without panic or silent data loss.
-
-A `--fault-interval N` flag controls density. The default injects a fault every 500 operations.
-
----
-
-## What it catches
-
-The DST is where emergent bugs live. Not the ones a unit test catches, but the ones that only appear when several mechanisms interact at once.
-
-- A base lens compacts. A derived lens references it. The WAL replays. A `RANGE` query straddles the boundary.
-- Hundreds of correction layers accumulate before compaction fires. A concurrent reader sees the transition.
-- The same mutation is applied at three permission levels. The state machine diverges only on the third.
-
-These are the bugs narrow testing approaches miss. The DST catches them or fails to terminate, and either result is information.
-
----
-
-## Invariants checked
-
-**Storage**
-
-- A base lens has data only if data was appended.
-- Each layer is sorted with no internal overlap.
-- `min_start` and `max_end` match the actual extent.
-- After compaction, for every timestamp the oracle covers, `AT(lens, t) == oracle.AT(lens, t)`.
-
-**Query semantics**
-
-- `AT(lens, t)` agrees with the oracle for any `t` in the covered range.
-- `AT(lens, t)` returns `None` for any `t` outside all covered intervals.
-- `RANGE` segments are non overlapping and strictly sorted by `start`.
-- No segment has `start >= end`. No segment extends outside the queried range.
-
-**Concurrent correctness**
-
-- All concurrent readers querying the same timestamp return the same value.
-- A background stress reader never panics regardless of the concurrent write load.
-
----
-
 ## Running it
 
 ```sh
-# Embedded mode. 30 seconds. CI suitable.
-cargo run --release --bin dst -- --quick
+# CI smoke — runs in under 1 second
+cargo run --release --bin dst -- --tier nano
 
-# Embedded with a specific seed.
-cargo run --release --bin dst -- --quick --seed 0xdeadbeef
+# Reproducible run
+cargo run --release --bin dst -- --tier nano --seed 3735928559
 
-# Full simulation across all eight cells.
-cargo run --release --bin dst
+# Disable fault injection
+cargo run --release --bin dst -- --tier micro --no-faults
 
-# Full simulation with real disk WAL and CSV output.
-cargo run --release --bin dst -- --scratch /var/tmp/tau --out results.csv
-
-# Longer embedded run.
-cargo run --release --bin dst -- --quick --duration 120
+# Quiet output
+cargo run --release --bin dst -- --tier nano --log-level error
 ```
 
-On failure the DST prints the seed, the violated invariant, the expected and actual values and the exact command to reproduce.
+On failure the DST prints the seed, the violated invariant, and the exact command to reproduce.
 
----
+## Architecture
 
-*Tau's DST builds on prior art from [FoundationDB](https://apple.github.io/foundationdb/testing.html) and [TigerBeetle](https://tigerbeetle.com/). Both teams have written extensively about the practice and both are recommended reading for anyone building a system where correctness matters more than features.*
+The DST uses `libharness` for:
+
+- `OneBrcGen` — deterministic reading generator
+- `Oracle` — BTreeMap reference implementation
+- `SeedTree` — hierarchical seed derivation so sub-streams are independent
+
+The simulation runs in embedded mode only (library executor directly, no server process). This keeps the run fast and deterministic without OS scheduling noise.
+
+## Invariants checked
+
+**After ingest:** `AT(lens, t)` agrees with the oracle for every midpoint of every recorded segment.
+
+**After REDUCE:** `REDUCE LENS station 0 N USING min` matches `oracle.reduce_min(station, 0, N)` for the first ten stations.
+
+**Fault recovery:** after a lens is dropped and recreated, subsequent appends and queries succeed without error.
+
+*Tau's DST builds on prior art from [FoundationDB](https://apple.github.io/foundationdb/testing.html) and [TigerBeetle](https://tigerbeetle.com/). Both teams have written extensively about deterministic simulation testing and both are recommended reading.*

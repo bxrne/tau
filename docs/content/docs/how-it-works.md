@@ -170,7 +170,7 @@ The split is intentional: embedding Tau as a library bypasses auth entirely. Aut
 
 TauQL is a line-oriented command language: one statement in, one response line out. The grammar is minimal: no implicit join, no subquery, no transaction syntax.
 
-The parser is a `nom` combinator in `libtau::ql::parser`. Adding a new statement requires changes to four files: `ast.rs` (new variant + `Display`), `parser.rs` (production + `alt` entry), `executor.rs` (handler + `check_permission` arm), and `bin/tau/main.rs` (output formatter).
+The parser is a `nom` combinator in `libtau::ql::parser`. Adding a new statement requires changes to four files: `ast.rs` (new variant + `Display`), `parser.rs` (production + `alt` entry), `executor.rs` (handler + `check_permission` arm), and `libtau::wire` (`Response::from_output` and `Response::parse`).
 
 Operator precedence from low to high: `||`, `&&`, comparison, additive, multiplicative, unary, primary.
 
@@ -184,9 +184,14 @@ Line-oriented text: one TauQL statement per line in, one response line out.
 
 ### Concurrency
 
-Each accepted connection runs on its own OS thread. All threads share one `Arc<RwLock<Executor>>`. Read-only statements take the read lock and run concurrently. Write statements take the exclusive write lock.
+Each accepted connection runs on its own OS thread. The executor holds one `Arc<RwLock<Executor>>` for the database registry and a separate `Arc<RwLock<DbState>>` per named database.
 
-This is simple and correct. The tradeoff: a slow write (e.g. WAL fsync on a slow disk) blocks all concurrent reads. For write-heavy workloads this can be a bottleneck; a per-database lock would improve write-read concurrency but adds complexity.
+Three lock routing tiers in `handle_query`:
+- Read-only statements: shared executor lock + per-database read lock. All readers run concurrently.
+- Data writes (`APPEND`, `CREATE LENS`, `COPY`, etc.): shared executor lock + per-database write lock. A write to `prod` does not block reads on `metrics`.
+- Registry writes (`CREATE DATABASE`, `DROP DATABASE`, user management, transactions): exclusive executor lock for their brief duration.
+
+The `--no-fsync-each` flag removes per-record WAL fsync from the write path entirely; a 50 ms background thread takes over durability, dramatically cutting write lock hold-time for WAL-enabled deployments.
 
 ### Connection capacity
 
@@ -228,4 +233,4 @@ The server uses `std::thread` rather than Tokio or async-std. For a database ser
 
 ### Two modes in `dst`
 
-`dst` serves as both the correctness tester and the performance measurement tool. In full mode it spawns real server processes across all config combinations. In embedded mode (`--quick`) it uses the library executor directly, covering centuries of simulated time without I/O overhead. The same seed printed at startup makes any failure reproducible from a single flag.
+`dst` serves as both the correctness tester and the performance measurement tool. It uses the 1BRC dataset shape (413 station lenses, temperature readings) and cross-checks REDUCE results against a BTreeMap oracle. Fault injection and deterministic seeds make every failure reproducible from a single flag.

@@ -1,81 +1,65 @@
-# dst - Deterministic Simulation Tester
+# dst — 1BRC Deterministic Simulation Tester
 
-Correctness verification and throughput measurement in one binary. Replaces the former standalone bench binary.
+Correctness verification, fault injection, and throughput measurement driven by
+the One Billion Row Challenge dataset shape.
 
-## Two modes
+## Dataset model
 
-**Embedded (`--quick`):** uses the `libtau` executor directly, no server process, no I/O. Simulates centuries of temporal data in seconds. Suitable for CI - runs as part of every push.
+~413 station names, each mapped to one Base lens in tau. Every reading is a
+degenerate tau `[t, t+1)` with `value = temperature × 10` (i64 fixed-point).
+After ingest, `REDUCE min/max/avg` per station is cross-checked against a
+BTreeMap oracle. A fault is injected every 5,000 rows: one station's lens is
+dropped and recreated (simulating a connection reset), and the oracle is reset
+to match.
 
-**Full (default):** spawns a real `tau` server for each config cell in the matrix (Transport x Auth x WAL), drives traffic over TCP, cross-checks every response against a simple oracle, injects faults (connection drops, WAL truncation), and scrapes Prometheus metrics to verify statement counts. Outputs a table of results and optionally writes CSV.
+## Tiers
 
-## Config matrix
-
-| Transport | Auth | WAL |
-|-----------|------|-----|
-| plain | none | off |
-| plain | none | on |
-| plain | password | off |
-| plain | password | on |
-| TLS | none | off |
-| TLS | none | on |
-| TLS | password | off |
-| TLS | password | on |
+| Tier | Rows | Use |
+|------|------|-----|
+| `nano` | 10 k | CI correctness smoke (<1 s) |
+| `micro` | 1 M | PR-time perf sanity |
+| `small` | 100 M | nightly / dedicated runner |
+| `full` | 1 B | manual / release benchmarking |
 
 ## Usage
 
 ```bash
-# Embedded mode: fast, no server, CI-suitable (30s default)
-cargo run --release --bin dst -- --quick
-
-# Full mode: all 8 config cells, server processes, fault injection
-cargo run --release --bin dst
+# CI smoke (runs in ~1 s)
+cargo run --release --bin dst -- --tier nano
 
 # Reproducible run from a known seed
-cargo run --release --bin dst -- --quick --seed 575573495
+cargo run --release --bin dst -- --tier nano --seed 3735928559
 
-# Full mode with CSV output and real-disk WAL scratch
-cargo run --release --bin dst -- --scratch /var/tmp/tau --out results.csv
+# Disable fault injection
+cargo run --release --bin dst -- --tier micro --no-faults
+
+# Quiet output
+cargo run --release --bin dst -- --tier nano --log-level error
 ```
 
 ## Options
 
-| flag | default | description |
+| Flag | Default | Description |
 |------|---------|-------------|
-| `--quick` | off | Embedded executor mode; no server processes |
-| `--seed N` | time-based | RNG seed; printed on every run for reproducibility |
-| `--duration N` | 30 | Seconds to run in embedded mode |
-| `--ops N` | 2000 | Operations per config cell in full mode |
-| `--readers N` | 8 | Concurrent reader threads in embedded mode |
-| `--fault-interval N` | 500 | Inject a fault every N ops in full mode |
-| `--scratch DIR` | $TMPDIR | WAL scratch directory (use a real disk path for accurate fsync timing) |
-| `--out PATH` | none | Write CSV results to path |
-| `--label NAME` | run | Tag attached to every CSV row |
-| `--log-level LEVEL` | info | `tracing` log level (error, warn, info, debug, trace) |
-
-## Oracle
-
-The embedded simulation and each full-mode cell are cross-checked against a simple reference implementation: a `BTreeMap<start, (end, value)>` per lens with O(log n) lookups. It has no layers, no compaction, no WAL - just obviously correct temporal semantics. Any divergence between the oracle and the executor is a bug.
-
-## Fault injection
-
-Two fault types are injected in full mode:
-
-- **Connection drop:** the client TCP connection is dropped and reconnected. Verifies that the server accepts reconnections and that previously written data is still readable.
-- **WAL truncation:** the WAL file is truncated by 16 bytes to simulate a partial write. On the next server restart, the WAL must replay cleanly without panic or silent data loss.
+| `--tier` | `nano` | Workload tier: nano, micro, small, full |
+| `--seed N` | time-based | RNG seed (printed on every run for reproducibility) |
+| `--no-faults` | off | Disable fault injection |
+| `--log-level` | `info` | Tracing log level |
 
 ## On failure
 
-When any invariant is violated, the DST prints:
-
-1. The seed that reproduces the failure
-2. The invariant that was violated
-3. The expected value (oracle) and the actual value (executor)
-4. The exact command to reproduce
-
-The seed alone is sufficient to reproduce the failure on the same binary:
+The seed printed at startup is sufficient to reproduce the failure:
 
 ```bash
-cargo run --release --bin dst -- --quick --seed <printed-seed>
+cargo run --release --bin dst -- --tier nano --seed <printed-seed>
 ```
 
-See [`TEST.md`](../../../TEST.md) for how the DST fits into the three-layer testing strategy.
+## Design
+
+The DST runs in embedded mode (library executor directly, no server process).
+It uses `libharness` for:
+- `OneBrcGen` — deterministic reading generator (station + temperature)
+- `Oracle` — BTreeMap reference implementation for cross-checking
+- `SeedTree` — hierarchical seed derivation so sub-streams are independent
+
+See `crates/libharness/src/` for the shared harness components.

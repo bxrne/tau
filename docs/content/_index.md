@@ -70,7 +70,6 @@ VAL i45
 
 ## Read more
 
-- [Introducing Tau](/blog/introducing-tau/). The bitemporal model in long form.
 - [Overview](/docs/overview/). The data model.
 - [How it works](/docs/how-it-works/). Storage, WAL, compaction, concurrency.
 - [DST](/docs/dst/). The deterministic simulation tester.
