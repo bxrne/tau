@@ -17,8 +17,10 @@
 //!   failures, total error responses.
 
 use std::fmt::Write as FmtWrite;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 /// Histogram bucket upper bounds in microseconds.  Chosen so the buckets
 /// reasonably span the latency range tau workloads produce: sub-microsecond

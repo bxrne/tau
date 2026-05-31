@@ -9,8 +9,7 @@
 
 use std::hash::{Hash, Hasher};
 
-use rand::SeedableRng;
-use rand::rngs::StdRng;
+use rand::{SeedableRng, rngs::StdRng};
 
 /// A reproducible tree of RNG seeds rooted at a single `u64`.
 #[derive(Clone, Copy, Debug)]

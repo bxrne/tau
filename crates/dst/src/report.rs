@@ -36,7 +36,10 @@ impl Report {
 
     pub fn print(&self) {
         if self.ok {
-            let r = self.result.as_ref().unwrap();
+            let r = self
+                .result
+                .as_ref()
+                .expect("ok=true implies result is Some");
             println!(
                 "PASS  tier={} seed={:#x} rows={} faults={} ingest={}ms query={}ms rows/s={:.0}",
                 r.tier.name(),

@@ -8,9 +8,7 @@
 //! All output is deterministic from a seed; pass a `SeedTree` child so
 //! parallel workloads draw independent but reproducible streams.
 
-use rand::Rng;
-use rand::SeedableRng;
-use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng, rngs::StdRng};
 
 use crate::seed::SeedTree;
 

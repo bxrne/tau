@@ -11,9 +11,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use rustyline::error::ReadlineError;
-use rustyline::history::FileHistory;
-use rustyline::{ColorMode, Config, EditMode, Editor};
+use rustyline::{ColorMode, Config, EditMode, Editor, error::ReadlineError, history::FileHistory};
 
 use crate::commands::{CommandResult, Registry};
 use crate::style;

@@ -45,7 +45,7 @@ The core engine and server are feature-complete and shipping. The data model, qu
 
 **Verification**
 - [x] Property-based tests (Hegel/Hypothesis): interval containment, layer lookup, value roundtrip, compaction query-equivalence, permission composition — each checked against hundreds of randomised inputs
-- [x] Deterministic simulation tester (`dst`): every transport × auth × WAL combination, driven against a reference oracle, with fault injection and reproducible seeds
+- [x] Deterministic simulation tester (`dst`): 1BRC dataset (413 stations, 4 scale tiers), driven against a BTreeMap oracle, with fault injection and reproducible seeds
 
 ---
 

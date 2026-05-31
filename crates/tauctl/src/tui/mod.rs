@@ -28,8 +28,7 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::Terminal;
-use ratatui::backend::CrosstermBackend;
+use ratatui::{Terminal, backend::CrosstermBackend};
 
 pub use app::App;
 use ui::build_input_area;
@@ -76,10 +75,8 @@ fn event_loop<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> io::R
             break;
         }
 
-        // Render.
         terminal.draw(|f| ui::draw(f, &app, &input))?;
 
-        // Poll events with a short timeout so we keep draining I/O.
         if event::poll(Duration::from_millis(16))? {
             match event::read()? {
                 Event::Key(key) => {
@@ -101,7 +98,6 @@ fn event_loop<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> io::R
                             app.log.push(app::LogEntry {
                                 query: line.clone(),
                                 response: String::new(),
-                                elapsed_ms: 0,
                                 is_err: false,
                             });
                             app.submit(line);

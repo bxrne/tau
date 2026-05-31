@@ -7,11 +7,8 @@ use super::net::{IoRequest, IoResponse, NetHandle};
 /// One entry in the query log pane.
 #[derive(Debug, Clone)]
 pub struct LogEntry {
-    #[allow(dead_code)]
     pub query: String,
     pub response: String,
-    #[allow(dead_code)]
-    pub elapsed_ms: u64,
     pub is_err: bool,
 }
 
@@ -111,7 +108,6 @@ impl App {
                 self.log.push(LogEntry {
                     query: String::new(),
                     response: s,
-                    elapsed_ms: 0,
                     is_err: false,
                 });
             }
@@ -121,7 +117,6 @@ impl App {
                 self.log.push(LogEntry {
                     query: String::new(),
                     response: format!("ERR {e}"),
-                    elapsed_ms: 0,
                     is_err: true,
                 });
             }
@@ -134,7 +129,6 @@ impl App {
                 self.log.push(LogEntry {
                     query: String::new(),
                     response: text,
-                    elapsed_ms: 0,
                     is_err,
                 });
             }

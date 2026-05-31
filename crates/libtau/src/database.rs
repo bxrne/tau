@@ -1,6 +1,5 @@
 use crate::model::{Eval, Layer, LayerId, Lens, LensKind, Timestamp};
-use crate::storage::wal::Codec;
-use crate::storage::{Store, Wal, WalEntry};
+use crate::storage::{Store, Wal, WalEntry, wal::Codec};
 use std::io;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};

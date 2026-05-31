@@ -28,7 +28,7 @@ The cost is that every query must resolve which layer wins at each point in time
 
 ## Architecture
 
-Tau is structured as a library (`libtau`) consumed by three binaries: the TCP server (`tau`), the interactive REPL (`ctl`), and the deterministic simulation tester (`dst`). The library exposes a clean `Executor` API; auth, TLS, and network concerns live exclusively in the server.
+Tau is structured as a library (`libtau`) consumed by three binaries: the TCP server (`tau`), the interactive client (`ctl`, ratatui TUI with `--headless` fallback), and the deterministic simulation tester (`dst`). The library exposes a clean `Executor` API; auth, TLS, and network concerns live exclusively in the server.
 
 ```
 Stmt → Executor → Database<Value> → Store<V> + optional Wal

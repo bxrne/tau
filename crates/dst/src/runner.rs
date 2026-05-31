@@ -45,7 +45,6 @@ pub fn run_embedded(cfg: &RunConfig) -> Report {
         .map(|s| s.to_string())
         .collect();
 
-    // Create one int lens per station.
     for station in &stations {
         let stmt = format!("CREATE LENS {} int", escaped(station));
         let r = exec_write(&exec, &stmt);
@@ -177,12 +176,18 @@ fn escaped(name: &str) -> String {
 
 fn exec_write(exec: &Arc<RwLock<Executor>>, stmt: &str) -> Output {
     let (_, s) = parse(stmt).expect("parse");
-    exec.write().unwrap().exec(&s).unwrap_or(Output::Empty)
+    exec.write()
+        .expect("executor lock poisoned")
+        .exec(&s)
+        .unwrap_or(Output::Empty)
 }
 
 fn exec_read(exec: &Arc<RwLock<Executor>>, stmt: &str) -> Output {
     let (_, s) = parse(stmt).expect("parse");
-    exec.read().unwrap().exec_read(&s).unwrap_or(Output::Empty)
+    exec.read()
+        .expect("executor lock poisoned")
+        .exec_read(&s)
+        .unwrap_or(Output::Empty)
 }
 
 fn exec_result(o: &Output) -> std::result::Result<(), String> {

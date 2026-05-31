@@ -10,7 +10,7 @@ page_template = "page.html"
 
 1. **Corrections are first class.** Every append is an immutable layer. The newest layer wins where layers overlap. Old values stay on disk.
 2. **Compaction is a provable normalisation.** A sweep line algorithm collapses N layers into one canonical layer. Query equivalent before and after. Checked by property based tests on every build.
-3. **Deterministic simulation tester.** Inspired by TigerBeetle's DST. Drives every transport, auth and WAL combination against a reference oracle. Reproducible from a single seed. See [DST](/docs/dst/).
+3. **Deterministic simulation tester.** Inspired by TigerBeetle's DST. Drives the 1BRC dataset against a BTreeMap oracle, injects faults, and is reproducible from a single seed. See [DST](/docs/dst/).
 4. **TauQL.** A tiny query language. One statement in, one response line out. Derived lenses compose as lazy closures. Rolling window aggregations are first class expressions.
 5. **Library or server.** Embed `libtau` in a Rust process or run the standalone TCP server. Same engine.
 
@@ -52,7 +52,7 @@ docker pull ghcr.io/bxrne/tau:latest
 docker run --rm -p 7070:7070 ghcr.io/bxrne/tau:latest
 ```
 
-Connect with any TCP client, or use the included REPL:
+Connect with `ctl` (ratatui TUI, or `--headless` for a line REPL):
 
 ```bash
 ctl
