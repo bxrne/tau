@@ -40,8 +40,10 @@ use crate::ql::ast::{AggFunc, Expr, Stmt, Type};
 use crate::query::{
     at_layers, build_range_segments, collect_range_bounds, eval_agg, eval_lens, would_cycle,
 };
-use crate::storage::wal::{Wal, WalEntry};
-use crate::storage::{InMemory, sweep_range};
+use crate::storage::{
+    InMemory, sweep_range,
+    wal::{Wal, WalEntry},
+};
 use crate::users::{Perm, User, UserStore};
 use crate::value::Value;
 
@@ -590,7 +592,7 @@ impl Executor {
             return Err(ExecError::DuplicateUser(name.into()));
         }
         self.users
-            .add(User::new(name, password, std::collections::HashMap::new()))
+            .add(User::new(name, password, Default::default()))
             .map_err(ExecError::Io)?;
         Ok(Output::Empty)
     }
@@ -842,10 +844,7 @@ impl Executor {
         }
         let id = state.next_layer_id;
         state.next_layer_id += 1;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as i64;
+        let now = crate::model::now_ms();
         let layer = Layer::new_sorted_unchecked(id, tau_vec, now);
         state
             .db
@@ -1014,10 +1013,7 @@ impl Executor {
         }
         let id = state.next_layer_id;
         state.next_layer_id += 1;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as i64;
+        let now = crate::model::now_ms();
         let layer = Layer::new_sorted_unchecked(id, tau_vec, now);
         state
             .db
@@ -2305,8 +2301,6 @@ mod tests {
         );
     }
 
-    // --- BATCH APPEND tests ---
-
     #[test]
     fn batch_append_produces_same_at_result_as_append() {
         let mut e = setup();
@@ -2378,8 +2372,6 @@ mod tests {
         }
     }
 
-    // --- HISTORY LENS tests ---
-
     #[test]
     fn history_lens_returns_one_layer_after_append() {
         let mut e = setup();
@@ -2450,8 +2442,6 @@ mod tests {
         );
     }
 
-    // --- AT AS OF tests ---
-
     #[test]
     fn at_as_of_with_max_timestamp_includes_all_data() {
         let mut e = setup();
@@ -2476,8 +2466,6 @@ mod tests {
             "AT AS OF on a derived lens should error"
         );
     }
-
-    // --- AT LAYER tests ---
 
     #[test]
     fn at_layer_returns_value_from_correct_layer() {
@@ -2504,8 +2492,6 @@ mod tests {
         let (_, stmt) = parse("AT LENS x 5 LAYER 99999").unwrap();
         assert_eq!(e.exec_read(&stmt).unwrap(), Output::Value(None));
     }
-
-    // --- BACKUP / RESTORE tests ---
 
     #[test]
     fn backup_restore_roundtrip_preserves_data() {

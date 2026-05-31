@@ -13,8 +13,7 @@ use std::sync::{Arc, RwLock};
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
-use libharness::datagen::OneBrcGen;
-use libharness::{SeedTree, Tier};
+use libharness::{SeedTree, Tier, datagen::OneBrcGen};
 use libtau::{Executor, Output, parse};
 
 /// Build a fresh executor with one database `bench` and one int lens `x`,

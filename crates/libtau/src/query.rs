@@ -9,8 +9,7 @@ use std::sync::Arc;
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
-use crate::executor::DbState;
-use crate::executor::ExecError;
+use crate::executor::{DbState, ExecError};
 use crate::model::{Layer, Timestamp};
 use crate::ql::ast::{AggFunc, BinOp, Expr, UnOp};
 use crate::value::Value;

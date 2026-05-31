@@ -9,9 +9,7 @@ use ratatui::{
 };
 use tui_textarea::TextArea;
 
-use libtau::storage::Codec;
-
-use libtau::Response;
+use libtau::{Response, storage::Codec};
 
 use super::app::App;
 
@@ -133,7 +131,12 @@ fn draw_log(f: &mut Frame, app: &App, area: Rect) {
             } else {
                 Style::default().fg(Color::DarkGray)
             };
-            ListItem::new(Line::from(vec![Span::styled(e.response.clone(), style)]))
+            let text = if e.query.is_empty() {
+                e.response.clone()
+            } else {
+                format!("{} → {}", e.query, e.response)
+            };
+            ListItem::new(Line::from(vec![Span::styled(text, style)]))
         })
         .collect();
 

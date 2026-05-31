@@ -48,12 +48,15 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use clap::Parser;
-use libtau::crypto;
-use libtau::{Executor, Metrics, Perm, Response, User, UserStore, needs_registry_lock, parse};
+use libtau::{
+    Executor, Metrics, Perm, Response, User, UserStore, crypto, needs_registry_lock, parse,
+};
 use rcgen::generate_simple_self_signed;
-use rustls::ServerConfig;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-use rustls::server::ServerConnection;
+use rustls::{
+    ServerConfig,
+    pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
+    server::ServerConnection,
+};
 use tracing::{debug, error, info, trace, warn};
 
 /// Tau time-series database TCP server.

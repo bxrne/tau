@@ -25,7 +25,7 @@ This produces three binaries in `target/release/`:
 | binary | purpose |
 |--------|---------|
 | `tau` | TCP server |
-| `ctl` | interactive REPL |
+| `ctl` | interactive client (ratatui TUI, `--headless` for line REPL) |
 | `dst` | deterministic simulation tester |
 
 ---
@@ -34,10 +34,10 @@ This produces three binaries in `target/release/`:
 
 ```bash
 # In-memory mode (data lost on restart)
-cargo run --release
+cargo run --release --bin tau
 
 # With write-ahead log (durable across restarts)
-cargo run --release -- --wal -w /tmp/tau.wal
+cargo run --release --bin tau -- --wal -w /tmp/tau.wal
 ```
 
 The server listens on `127.0.0.1:7070` by default. You should see:
@@ -48,7 +48,7 @@ The server listens on `127.0.0.1:7070` by default. You should see:
 
 ---
 
-## 3. Connect with the REPL
+## 3. Connect with ctl
 
 Open a second terminal:
 
@@ -143,7 +143,7 @@ cargo run --release -- \
   --auth --username admin --password s3cr3t
 ```
 
-In the REPL, authenticate when connecting:
+In `ctl`, authenticate when connecting:
 
 ```
 τ: connect prod 127.0.0.1:7070 admin s3cr3t
@@ -212,11 +212,11 @@ Verify correctness before relying on any new data:
 # CI correctness check (nano tier, ~1 second)
 cargo run --release --bin dst -- --tier nano
 
-# Full simulation across all transport/auth/WAL combinations
-cargo run --release --bin dst
+# Larger workload (1 M rows)
+cargo run --release --bin dst -- --tier micro
 ```
 
-On success you'll see a table of `PASS` results. On failure, the seed is printed for reproduction.
+On success you'll see `PASS tier=nano ...`. On failure the seed is printed for exact reproduction.
 
 ---
 

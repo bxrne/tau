@@ -13,7 +13,6 @@ use crate::tcpmgr::TcpManager;
 
 /// A request from the TUI to the I/O thread.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub enum IoRequest {
     /// Run a TauQL statement or built-in command on the active connection.
     Query(String),
@@ -47,6 +46,12 @@ pub enum IoResponse {
 pub struct NetHandle {
     pub tx: Sender<IoRequest>,
     pub rx: Receiver<IoResponse>,
+}
+
+impl Drop for NetHandle {
+    fn drop(&mut self) {
+        let _ = self.tx.send(IoRequest::Quit);
+    }
 }
 
 /// Spawn the background I/O thread.  Returns handles to communicate with it.
