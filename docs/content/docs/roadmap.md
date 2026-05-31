@@ -67,8 +67,8 @@ The engine is correct. v0.2.0 makes it fast enough to benchmark honestly, operab
 - [x] `exec_as` permission check no longer clones `User` on every authenticated statement
 - [x] `copy_lens` uses `parse_literal()` instead of a full nom statement parse per CSV row
 - [x] WAL group-commit mode: `--no-fsync-each` + 50 ms background flush thread
-- [ ] Write throughput profiling and targeted optimisation of the WAL path
-- [ ] Per-database `RwLock` sharding in executor (write to one DB no longer blocks reads on others)
+- [x] Write throughput profiling and targeted optimisation of the WAL path: `Codec::encode_into` eliminates per-tau String allocation in `append_layer`; `write_u32` replaces `writeln!` to avoid the `io::Write::write_fmt` heap allocation; `wal` Criterion suite tracks regression
+- [x] Per-database `RwLock` sharding in executor (write to one DB no longer blocks reads on others): data writes route through `exec_db_write` holding only the shared executor read lock; reads and writes to different databases are fully concurrent
 
 **Transactions and batch ingest**
 - [x] `START TRANSACTION` / `COMMIT` / `ROLLBACK`: atomic multi-statement transactions — mutations buffered per-connection, invisible until `COMMIT`, discarded on `ROLLBACK`

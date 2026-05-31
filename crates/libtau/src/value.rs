@@ -98,15 +98,20 @@ impl From<&Literal> for Value {
 /// format: space, colon, and the escape character itself.
 fn escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
+    escape_into(s, &mut out);
+    out
+}
+
+/// Write the percent-encoded form of `s` directly into `buf` with no intermediate allocation.
+fn escape_into(s: &str, buf: &mut String) {
     for ch in s.chars() {
         match ch {
-            '%' => out.push_str("%25"),
-            ' ' => out.push_str("%20"),
-            ':' => out.push_str("%3A"),
-            c => out.push(c),
+            '%' => buf.push_str("%25"),
+            ' ' => buf.push_str("%20"),
+            ':' => buf.push_str("%3A"),
+            c => buf.push(c),
         }
     }
-    out
 }
 
 /// Inverse of [`escape`]. Returns `None` on a malformed escape.
@@ -133,6 +138,26 @@ impl Codec for Value {
             Value::Str(s) => format!("s{}", escape(s)),
             Value::Bool(b) => format!("b{}", if *b { 1 } else { 0 }),
             Value::Null => "n".into(),
+        }
+    }
+
+    fn encode_into(&self, buf: &mut String) {
+        use std::fmt::Write as _;
+        match self {
+            Value::Int(i) => {
+                buf.push('i');
+                let _ = write!(buf, "{i}");
+            }
+            Value::Float(f) => {
+                buf.push('f');
+                let _ = write!(buf, "{f}");
+            }
+            Value::Str(s) => {
+                buf.push('s');
+                escape_into(s, buf);
+            }
+            Value::Bool(b) => buf.push_str(if *b { "b1" } else { "b0" }),
+            Value::Null => buf.push('n'),
         }
     }
 

@@ -45,6 +45,11 @@ use tracing::{debug, instrument, warn};
 pub trait Codec: Sized {
     fn encode(&self) -> String;
     fn decode(s: &str) -> Option<Self>;
+    /// Write the encoded form directly into `buf` without an intermediate `String` allocation.
+    /// The default delegates to `encode()`; override for zero-allocation hot paths.
+    fn encode_into(&self, buf: &mut String) {
+        buf.push_str(&self.encode());
+    }
 }
 
 macro_rules! impl_codec_display_parse {
@@ -52,6 +57,10 @@ macro_rules! impl_codec_display_parse {
         $(impl Codec for $t {
             fn encode(&self) -> String { self.to_string() }
             fn decode(s: &str) -> Option<Self> { s.parse().ok() }
+            fn encode_into(&self, buf: &mut String) {
+                use std::fmt::Write as _;
+                let _ = write!(buf, "{}", self);
+            }
         })+
     };
 }
@@ -65,6 +74,22 @@ fn crc32(data: &str) -> u32 {
     let mut hasher = Hasher::new();
     hasher.update(data.as_bytes());
     hasher.finalize()
+}
+
+/// Write a `u32` decimal representation to `w` using a stack buffer.
+/// Avoids the heap allocation that `io::Write::write_fmt` incurs internally.
+fn write_u32(w: &mut impl io::Write, mut n: u32) -> io::Result<()> {
+    let mut buf = [0u8; 10]; // u32 max is 4294967295 (10 digits)
+    let mut i = 10usize;
+    if n == 0 {
+        return w.write_all(b"0");
+    }
+    while n > 0 {
+        i -= 1;
+        buf[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+    w.write_all(&buf[i..])
 }
 
 /// One serialised append record.
@@ -330,16 +355,16 @@ impl Wal {
             layer.id, layer.written_at, lens
         );
         for tau in layer.taus.iter() {
-            let _ = write!(
-                &mut self.scratch,
-                " {}:{}:{}",
-                tau.start,
-                tau.end,
-                tau.value.encode()
-            );
+            let _ = write!(&mut self.scratch, " {}:{}:", tau.start, tau.end);
+            tau.value.encode_into(&mut self.scratch);
         }
         let checksum = crc32(&self.scratch);
-        writeln!(self.writer, "{} {}", checksum, self.scratch)?;
+        // Write without writeln! to avoid the internal String allocation that
+        // io::Write::write_fmt incurs when formatting multiple values in one call.
+        write_u32(&mut self.writer, checksum)?;
+        self.writer.write_all(b" ")?;
+        self.writer.write_all(self.scratch.as_bytes())?;
+        self.writer.write_all(b"\n")?;
         if self.fsync_each {
             self.writer.flush()?;
             self.writer.get_ref().sync_data()?;
