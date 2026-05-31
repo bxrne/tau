@@ -133,6 +133,22 @@ fn bench_append(c: &mut Criterion) {
     group.finish();
 }
 
+fn safe_name(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect()
+}
+
+fn setup_brc_exec(tree: &SeedTree) -> Arc<RwLock<Executor>> {
+    let exec = Arc::new(RwLock::new(Executor::new()));
+    run_write(&exec, "CREATE DATABASE brc");
+    let dg = OneBrcGen::new(tree, "setup");
+    for name in dg.station_names() {
+        run_write(&exec, &format!("CREATE LENS {} int", safe_name(name)));
+    }
+    exec
+}
+
 fn bench_1brc_ingest(c: &mut Criterion) {
     let mut group = c.benchmark_group("onebrc");
     let tree = SeedTree::new(0x0bab_5eed);
@@ -141,32 +157,19 @@ fn bench_1brc_ingest(c: &mut Criterion) {
 
     group.bench_function("nano/append", |b| {
         b.iter_batched(
-            || {
-                let exec = Arc::new(RwLock::new(Executor::new()));
-                run_write(&exec, "CREATE DATABASE brc");
-                // Create one lens per station.
-                let dg = OneBrcGen::new(&tree, "setup");
-                for name in dg.station_names() {
-                    let safe: String = name
-                        .chars()
-                        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-                        .collect();
-                    run_write(&exec, &format!("CREATE LENS {safe} int"));
-                }
-                exec
-            },
+            || setup_brc_exec(&tree),
             |exec| {
                 let mut dg = OneBrcGen::new(&tree, "bench");
                 for t in 0..rows {
                     let r = dg.draw();
-                    let safe: String = r
-                        .station
-                        .chars()
-                        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-                        .collect();
                     run_write(
                         &exec,
-                        &format!("APPEND LENS {safe} {t} {} {}", t + 1, r.temp_x10),
+                        &format!(
+                            "APPEND LENS {} {t} {} {}",
+                            safe_name(&r.station),
+                            t + 1,
+                            r.temp_x10
+                        ),
                     );
                 }
             },
