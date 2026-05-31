@@ -30,13 +30,21 @@ pub struct RunConfig {
     pub fault_inject: bool,
 }
 
+struct IngestStats {
+    rows: u64,
+    faults: u64,
+    ingest_ms: u64,
+}
+
 pub fn run_embedded(cfg: &RunConfig) -> Report {
     let tree = SeedTree::new(cfg.seed);
     let mut oracle = Oracle::new();
     let exec = Arc::new(RwLock::new(Executor::new()));
 
-    let setup = exec_write(&exec, "CREATE DATABASE brc");
-    assert_matches_ok(&setup, "CREATE DATABASE brc");
+    assert_matches_ok(
+        &exec_write(&exec, "CREATE DATABASE brc"),
+        "CREATE DATABASE brc",
+    );
 
     let mut datagen = OneBrcGen::new(&tree, "datagen");
     let stations: Vec<String> = datagen
@@ -47,33 +55,79 @@ pub fn run_embedded(cfg: &RunConfig) -> Report {
 
     for station in &stations {
         let stmt = format!("CREATE LENS {} int", escaped(station));
-        let r = exec_write(&exec, &stmt);
-        assert_matches_ok(&r, &stmt);
+        assert_matches_ok(&exec_write(&exec, &stmt), &stmt);
     }
 
+    info!(
+        tier = cfg.tier.name(),
+        total = cfg.tier.row_count(),
+        seed = cfg.seed,
+        "starting 1BRC embedded"
+    );
+
+    let total_started = Instant::now();
+    let stats = match ingest_rows(&exec, &mut oracle, &mut datagen, &stations, cfg) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+
+    info!(
+        rows = stats.rows,
+        faults = stats.faults,
+        ingest_ms = stats.ingest_ms,
+        "ingest done, verifying"
+    );
+
+    if let Some(r) = verify_at(&exec, &oracle, &stations) {
+        return r;
+    }
+
+    let query_started = Instant::now();
+    if let Some(r) = verify_reduce(&exec, &oracle, &stations) {
+        return r;
+    }
+
+    let query_ms = query_started.elapsed().as_millis() as u64;
+    let total_ms = total_started.elapsed().as_millis() as u64;
+    info!(
+        rows = stats.rows,
+        faults = stats.faults,
+        ingest_ms = stats.ingest_ms,
+        query_ms,
+        total_ms,
+        "PASS"
+    );
+
+    Report::success(RunResult {
+        tier: cfg.tier,
+        seed: cfg.seed,
+        rows: stats.rows,
+        faults: stats.faults,
+        ingest_ms: stats.ingest_ms,
+        query_ms,
+    })
+}
+
+fn ingest_rows(
+    exec: &Arc<RwLock<Executor>>,
+    oracle: &mut Oracle,
+    datagen: &mut OneBrcGen,
+    stations: &[String],
+    cfg: &RunConfig,
+) -> Result<IngestStats, Report> {
     let total = cfg.tier.row_count();
     let batch_size: u64 = match cfg.tier {
         Tier::Nano => 100,
         Tier::Micro => 1_000,
         _ => 10_000,
     };
-    info!(
-        tier = cfg.tier.name(),
-        total,
-        seed = cfg.seed,
-        "starting 1BRC embedded"
-    );
-
     let started = Instant::now();
     let mut rows_written: u64 = 0;
     let mut faults: u64 = 0;
 
     while rows_written < total {
         let n = batch_size.min(total - rows_written) as usize;
-        let readings = datagen.batch(n);
-
-        // APPEND one row at a time (correct; BATCH APPEND path is a Phase 2 perf item).
-        for reading in &readings {
+        for reading in &datagen.batch(n) {
             let t = rows_written as i64;
             let stmt = format!(
                 "APPEND LENS {} {} {} {}",
@@ -82,40 +136,44 @@ pub fn run_embedded(cfg: &RunConfig) -> Report {
                 t + 1,
                 reading.temp_x10
             );
-            let r = exec_write(&exec, &stmt);
+            let r = exec_write(exec, &stmt);
             if let Err(e) = exec_result(&r) {
                 error!(stmt, error = %e, "APPEND failed");
-                return Report::failure(format!("APPEND failed: {e}"));
+                return Err(Report::failure(format!("APPEND failed: {e}")));
             }
             oracle.append(&reading.station, &[(t, t + 1, reading.temp_x10)]);
             rows_written += 1;
-
-            // Fault injection: reset one station's oracle + executor state
             if cfg.fault_inject && rows_written.is_multiple_of(FAULT_EVERY) {
-                let victim = &stations[(rows_written as usize).wrapping_rem(stations.len())];
-                let drop_stmt = format!("DROP LENS {}", escaped(victim));
-                let _ = exec_write(&exec, &drop_stmt);
-                let create_stmt = format!("CREATE LENS {} int", escaped(victim));
-                let _ = exec_write(&exec, &create_stmt);
-                oracle.reset(victim);
+                inject_fault(exec, oracle, stations, rows_written);
                 faults += 1;
             }
         }
     }
 
-    let ingest_ms = started.elapsed().as_millis() as u64;
-    info!(
-        rows = rows_written,
-        faults, ingest_ms, "ingest done, verifying"
-    );
+    Ok(IngestStats {
+        rows: rows_written,
+        faults,
+        ingest_ms: started.elapsed().as_millis() as u64,
+    })
+}
 
-    // Spot-check oracle vs executor for each station.
+fn inject_fault(
+    exec: &Arc<RwLock<Executor>>,
+    oracle: &mut Oracle,
+    stations: &[String],
+    rows_written: u64,
+) {
+    let victim = &stations[(rows_written as usize).wrapping_rem(stations.len())];
+    let _ = exec_write(exec, &format!("DROP LENS {}", escaped(victim)));
+    let _ = exec_write(exec, &format!("CREATE LENS {} int", escaped(victim)));
+    oracle.reset(victim);
+}
+
+fn verify_at(exec: &Arc<RwLock<Executor>>, oracle: &Oracle, stations: &[String]) -> Option<Report> {
     let mut mismatches = 0u64;
-    for station in &stations {
-        let pts = oracle.sample_midpoints(station, 5);
-        for t in pts {
-            let stmt = format!("AT LENS {} {t}", escaped(station));
-            let r = exec_read(&exec, &stmt);
+    for station in stations {
+        for t in oracle.sample_midpoints(station, 5) {
+            let r = exec_read(exec, &format!("AT LENS {} {t}", escaped(station)));
             let expected = oracle.at(station, t);
             let got = parse_at_output(&r);
             if expected != got {
@@ -126,44 +184,32 @@ pub fn run_embedded(cfg: &RunConfig) -> Report {
             }
         }
     }
+    (mismatches > 0).then(|| Report::failure(format!("{mismatches} AT mismatches detected")))
+}
 
-    if mismatches > 0 {
-        return Report::failure(format!("{mismatches} AT mismatches detected"));
+fn verify_reduce(
+    exec: &Arc<RwLock<Executor>>,
+    oracle: &Oracle,
+    stations: &[String],
+) -> Option<Report> {
+    let n = oracle.total_segments() as i64 / stations.len() as i64;
+    if n == 0 {
+        return None;
     }
-
-    // Verify REDUCE on all stations.
-    let query_started = Instant::now();
     for station in stations.iter().take(10) {
-        let n = oracle.total_segments() as i64 / stations.len() as i64;
-        if n == 0 {
-            continue;
-        }
-        let stmt = format!("REDUCE LENS {} 0 {n} USING min", escaped(station));
-        let r = exec_read(&exec, &stmt);
+        let r = exec_read(
+            exec,
+            &format!("REDUCE LENS {} 0 {n} USING min", escaped(station)),
+        );
         let oracle_min = oracle.reduce_min(station, 0, n);
         let engine_min = parse_at_output(&r);
         if oracle_min != engine_min {
-            return Report::failure(format!(
+            return Some(Report::failure(format!(
                 "REDUCE MIN mismatch on {station}: oracle={oracle_min:?} engine={engine_min:?}"
-            ));
+            )));
         }
     }
-
-    let query_ms = query_started.elapsed().as_millis() as u64;
-    let total_ms = started.elapsed().as_millis() as u64;
-    info!(
-        rows = rows_written,
-        faults, ingest_ms, query_ms, total_ms, "PASS"
-    );
-
-    Report::success(RunResult {
-        tier: cfg.tier,
-        seed: cfg.seed,
-        rows: rows_written,
-        faults,
-        ingest_ms,
-        query_ms,
-    })
+    None
 }
 
 /// Convert a station name into a valid TauQL identifier: keep ASCII

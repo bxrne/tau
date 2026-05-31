@@ -67,69 +67,85 @@ pub fn spawn() -> NetHandle {
     }
 }
 
+fn handle_connect(
+    mgr: &mut TcpManager,
+    name: String,
+    addr: String,
+    tls: bool,
+    tx: &Sender<IoResponse>,
+) {
+    let result = if tls {
+        let sni = addr.split(':').next().unwrap_or("localhost").to_string();
+        mgr.connect_tls(&name, &addr, &sni)
+    } else {
+        mgr.connect(&name, &addr)
+    };
+    match result {
+        Ok(()) => {
+            let mode = if tls { "TLS" } else { "plain" };
+            let _ = tx.send(IoResponse::Info(format!(
+                "connected to {addr} as {name} ({mode})"
+            )));
+            let _ = tx.send(IoResponse::Connections(mgr.list()));
+        }
+        Err(e) => {
+            let _ = tx.send(IoResponse::Error(format!("connect: {e}")));
+        }
+    }
+}
+
+fn handle_disconnect(mgr: &mut TcpManager, name: String, tx: &Sender<IoResponse>) {
+    match mgr.disconnect(&name) {
+        Ok(()) => {
+            let _ = tx.send(IoResponse::Info(format!("disconnected {name}")));
+            let _ = tx.send(IoResponse::Connections(mgr.list()));
+        }
+        Err(e) => {
+            let _ = tx.send(IoResponse::Error(e));
+        }
+    }
+}
+
+fn handle_use(mgr: &mut TcpManager, name: String, tx: &Sender<IoResponse>) {
+    match mgr.set_active(&name) {
+        Ok(()) => {
+            let _ = tx.send(IoResponse::Connections(mgr.list()));
+        }
+        Err(e) => {
+            let _ = tx.send(IoResponse::Error(e));
+        }
+    }
+}
+
+fn handle_query(mgr: &mut TcpManager, line: String, tx: &Sender<IoResponse>) {
+    match mgr.active_mut() {
+        Some(conn) => match conn.send(&line) {
+            Ok(resp) => {
+                let _ = tx.send(IoResponse::Response(resp));
+            }
+            Err(e) => {
+                let _ = tx.send(IoResponse::Error(format!("io: {e}")));
+            }
+        },
+        None => {
+            let _ = tx.send(IoResponse::Error(
+                "no active connection — use `connect <name> <host:port>`".into(),
+            ));
+        }
+    }
+}
+
 fn io_thread(rx: Receiver<IoRequest>, tx: Sender<IoResponse>) {
     let mut mgr = TcpManager::new();
-
     for req in rx {
         match req {
             IoRequest::Quit => break,
-
             IoRequest::Connect { name, addr, tls } => {
-                let result = if tls {
-                    let sni = addr.split(':').next().unwrap_or("localhost").to_string();
-                    mgr.connect_tls(&name, &addr, &sni)
-                } else {
-                    mgr.connect(&name, &addr)
-                };
-                match result {
-                    Ok(()) => {
-                        let _ = tx.send(IoResponse::Info(format!(
-                            "connected to {addr} as {name} ({})",
-                            if tls { "TLS" } else { "plain" }
-                        )));
-                        let _ = tx.send(IoResponse::Connections(mgr.list()));
-                    }
-                    Err(e) => {
-                        let _ = tx.send(IoResponse::Error(format!("connect: {e}")));
-                    }
-                }
+                handle_connect(&mut mgr, name, addr, tls, &tx)
             }
-
-            IoRequest::Disconnect(name) => match mgr.disconnect(&name) {
-                Ok(()) => {
-                    let _ = tx.send(IoResponse::Info(format!("disconnected {name}")));
-                    let _ = tx.send(IoResponse::Connections(mgr.list()));
-                }
-                Err(e) => {
-                    let _ = tx.send(IoResponse::Error(e));
-                }
-            },
-
-            IoRequest::Use(name) => match mgr.set_active(&name) {
-                Ok(()) => {
-                    let _ = tx.send(IoResponse::Connections(mgr.list()));
-                }
-                Err(e) => {
-                    let _ = tx.send(IoResponse::Error(e));
-                }
-            },
-
-            IoRequest::Query(line) => {
-                if let Some(conn) = mgr.active_mut() {
-                    match conn.send(&line) {
-                        Ok(resp) => {
-                            let _ = tx.send(IoResponse::Response(resp));
-                        }
-                        Err(e) => {
-                            let _ = tx.send(IoResponse::Error(format!("io: {e}")));
-                        }
-                    }
-                } else {
-                    let _ = tx.send(IoResponse::Error(
-                        "no active connection — use `connect <name> <host:port>`".into(),
-                    ));
-                }
-            }
+            IoRequest::Disconnect(name) => handle_disconnect(&mut mgr, name, &tx),
+            IoRequest::Use(name) => handle_use(&mut mgr, name, &tx),
+            IoRequest::Query(line) => handle_query(&mut mgr, line, &tx),
         }
     }
 }

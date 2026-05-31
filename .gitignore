@@ -1,7 +1,5 @@
 /target
 *.wal
-/store.dat
-/thermostat.disk
 /.hegel
 /docs/public/
 /crates/libtau/.hegel
@@ -11,5 +9,3 @@
 /lcov.info
 /coverage.xml
 /bench-samples/
-/crates/tau/.hegel/unicode_data/15.0.0/codec-utf-8.json.gz
-/crates/tauctl/.hegel/unicode_data/15.0.0/codec-utf-8.json.gz
