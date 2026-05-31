@@ -14,7 +14,7 @@ use std::sync::{Arc, RwLock};
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 use libharness::{SeedTree, Tier, datagen::OneBrcGen};
-use libtau::{Executor, Output, parse};
+use libtau::{Executor, Layer, Output, Tau, Value, Wal, parse};
 
 /// Build a fresh executor with one database `bench` and one int lens `x`,
 /// populated with `layers` layers of `taus_per_layer` taus each.
@@ -179,12 +179,38 @@ fn bench_1brc_ingest(c: &mut Criterion) {
     group.finish();
 }
 
+/// Measure WAL serialisation throughput in group-commit mode (fsync disabled).
+/// Uses a real file path so the benchmark exercises BufWriter flushing, but
+/// skips sync_data so it is not I/O-bound — the measurement captures the
+/// encoding + CRC32 + BufWriter write cost per append.
+fn bench_wal_append(c: &mut Criterion) {
+    let mut group = c.benchmark_group("wal");
+
+    for &n in &[1usize, 100, 1_000] {
+        let taus: Vec<Tau<Value>> = (0..n as i64)
+            .map(|i| Tau::new(i, i + 1, Value::Int(i * 7)))
+            .collect();
+        let layer = Layer::new(1, taus);
+
+        group.throughput(Throughput::Elements(n as u64));
+        group.bench_with_input(BenchmarkId::new("taus", n), &n, |b, _| {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("bench.wal");
+            let mut wal = Wal::open(&path, None).unwrap();
+            wal.set_fsync_each(false);
+            b.iter(|| wal.append_layer("bench", &layer).unwrap());
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_at,
     bench_range,
     bench_reduce,
     bench_append,
+    bench_wal_append,
     bench_1brc_ingest
 );
 criterion_main!(benches);

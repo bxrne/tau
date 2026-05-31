@@ -841,6 +841,7 @@ dependencies = [
  "pretty_assertions",
  "rand",
  "rustc-hash",
+ "tempfile",
 ]
 
 [[package]]
