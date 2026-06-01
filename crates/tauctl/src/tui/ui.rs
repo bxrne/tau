@@ -259,3 +259,154 @@ pub fn build_input_area<'a>(prompt: &str, text: &str) -> TextArea<'a> {
     ta.set_cursor_line_style(Style::default());
     ta
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+
+    use libtau::{Response, Value};
+    use ratatui::{Terminal, backend::TestBackend};
+
+    use super::super::app::App;
+    use super::super::net::{IoRequest, IoResponse, NetHandle};
+    use super::*;
+
+    fn test_app() -> App {
+        let (tx_req, _rx_req) = mpsc::channel::<IoRequest>();
+        let (_tx_resp, rx_resp) = mpsc::channel::<IoResponse>();
+        App {
+            net: NetHandle {
+                tx: tx_req,
+                rx: rx_resp,
+            },
+            connections: vec![],
+            log: vec![],
+            last_response: None,
+            pending: false,
+            status: "Ready".into(),
+            should_quit: false,
+        }
+    }
+
+    fn terminal() -> Terminal<TestBackend> {
+        Terminal::new(TestBackend::new(120, 30)).unwrap()
+    }
+
+    #[test]
+    fn build_input_area_empty_has_no_content() {
+        let ta = build_input_area("τ›", "");
+        assert_eq!(ta.lines(), &[""]);
+    }
+
+    #[test]
+    fn build_input_area_with_text_sets_content() {
+        let ta = build_input_area("τ›", "AT LENS x 42");
+        assert_eq!(ta.lines(), &["AT LENS x 42"]);
+    }
+
+    #[test]
+    fn draw_does_not_panic_with_empty_app() {
+        let mut t = terminal();
+        let app = test_app();
+        let input = build_input_area("τ›", "");
+        t.draw(|f| draw(f, &app, &input)).unwrap();
+    }
+
+    #[test]
+    fn draw_does_not_panic_with_pending_state() {
+        let mut t = terminal();
+        let mut app = test_app();
+        app.pending = true;
+        app.status = "sending…".into();
+        let input = build_input_area("τ›", "RANGE LENS x 0 100");
+        t.draw(|f| draw(f, &app, &input)).unwrap();
+    }
+
+    #[test]
+    fn draw_does_not_panic_with_connections() {
+        let mut t = terminal();
+        let mut app = test_app();
+        app.connections = vec![
+            ("dev".into(), "127.0.0.1:7070".into(), true, false),
+            ("prod".into(), "10.0.0.1:7070".into(), false, true),
+        ];
+        let input = build_input_area("τ›", "");
+        t.draw(|f| draw(f, &app, &input)).unwrap();
+    }
+
+    #[test]
+    fn draw_does_not_panic_with_ok_response() {
+        let mut t = terminal();
+        let mut app = test_app();
+        app.last_response = Some(Response::Ok);
+        let input = build_input_area("τ›", "");
+        t.draw(|f| draw(f, &app, &input)).unwrap();
+    }
+
+    #[test]
+    fn draw_does_not_panic_with_err_response() {
+        let mut t = terminal();
+        let mut app = test_app();
+        app.last_response = Some(Response::Err("no active database".into()));
+        app.status = "ERR no active database".into();
+        let input = build_input_area("τ›", "");
+        t.draw(|f| draw(f, &app, &input)).unwrap();
+    }
+
+    #[test]
+    fn draw_does_not_panic_with_range_response() {
+        let mut t = terminal();
+        let mut app = test_app();
+        app.last_response = Some(Response::Range(vec![
+            (0, 3600, Value::Int(42)),
+            (3600, 7200, Value::Int(55)),
+        ]));
+        let input = build_input_area("τ›", "");
+        t.draw(|f| draw(f, &app, &input)).unwrap();
+    }
+
+    #[test]
+    fn draw_does_not_panic_with_names_response() {
+        let mut t = terminal();
+        let mut app = test_app();
+        app.last_response = Some(Response::Names(vec!["cpu".into(), "pressure".into()]));
+        let input = build_input_area("τ›", "");
+        t.draw(|f| draw(f, &app, &input)).unwrap();
+    }
+
+    #[test]
+    fn draw_does_not_panic_with_log_entries() {
+        let mut t = terminal();
+        let mut app = test_app();
+        app.log = vec![
+            super::super::app::LogEntry {
+                query: "AT LENS x 0".into(),
+                response: "VAL i42".into(),
+                is_err: false,
+            },
+            super::super::app::LogEntry {
+                query: "AT LENS x 9999".into(),
+                response: "ERR no such lens".into(),
+                is_err: true,
+            },
+        ];
+        let input = build_input_area("τ›", "");
+        t.draw(|f| draw(f, &app, &input)).unwrap();
+    }
+
+    #[test]
+    fn draw_status_reflects_ok_state() {
+        let mut t = terminal();
+        let mut app = test_app();
+        app.status = "OK".into();
+        let input = build_input_area("τ›", "");
+        t.draw(|f| draw(f, &app, &input)).unwrap();
+        let buf = t.backend().buffer().clone();
+        let content: String = buf
+            .content()
+            .iter()
+            .map(|c| c.symbol().to_owned())
+            .collect();
+        assert!(content.contains("OK") || content.contains("Ctrl-C"));
+    }
+}

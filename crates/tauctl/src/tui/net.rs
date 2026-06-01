@@ -264,3 +264,154 @@ fn io_thread(rx: Receiver<IoRequest>, tx: Sender<IoResponse>) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+
+    use super::*;
+
+    fn ok_server() -> std::net::SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                std::thread::spawn(move || {
+                    let mut reader = BufReader::new(stream);
+                    let mut line = String::new();
+                    while reader.read_line(&mut line).unwrap_or(0) > 0 {
+                        let _ = writeln!(reader.get_mut(), "OK");
+                        let _ = reader.get_mut().flush();
+                        line.clear();
+                    }
+                });
+            }
+        });
+        addr
+    }
+
+    #[test]
+    fn handle_load_no_active_connection_sends_error() {
+        let mut mgr = TcpManager::new();
+        let (tx, rx) = mpsc::channel::<IoResponse>();
+        handle_load(&mut mgr, "x".into(), "/tmp/x.csv".into(), 256, &tx);
+        assert!(matches!(rx.recv().unwrap(), IoResponse::Error(_)));
+    }
+
+    #[test]
+    fn handle_load_missing_file_sends_error() {
+        let addr = ok_server();
+        let mut mgr = TcpManager::new();
+        mgr.connect("t", &addr.to_string()).unwrap();
+        let (tx, rx) = mpsc::channel::<IoResponse>();
+        handle_load(
+            &mut mgr,
+            "x".into(),
+            "/tmp/tauctl-no-such-file-xyz123.csv".into(),
+            256,
+            &tx,
+        );
+        let resp = rx.recv().unwrap();
+        assert!(matches!(resp, IoResponse::Error(_)));
+        if let IoResponse::Error(e) = resp {
+            assert!(e.contains("open"), "expected file error, got: {e}");
+        }
+    }
+
+    #[test]
+    fn handle_load_success_sends_done_with_row_count() {
+        let addr = ok_server();
+        let mut mgr = TcpManager::new();
+        mgr.connect("t", &addr.to_string()).unwrap();
+
+        let path = format!("/tmp/tauctl-load-test-{}.csv", std::process::id());
+        std::fs::write(&path, "0,1,42\n1,2,43\n2,3,44\n").unwrap();
+
+        let (tx, rx) = mpsc::channel::<IoResponse>();
+        handle_load(&mut mgr, "x".into(), path.clone(), 256, &tx);
+        std::fs::remove_file(&path).ok();
+
+        let resp = rx.recv().unwrap();
+        assert!(matches!(resp, IoResponse::Done(_)));
+        if let IoResponse::Done(s) = resp {
+            assert!(s.contains("3"), "expected row count, got: {s}");
+            assert!(s.contains("x"), "expected lens name, got: {s}");
+        }
+    }
+
+    #[test]
+    fn handle_load_csv_with_comments_and_blanks() {
+        let addr = ok_server();
+        let mut mgr = TcpManager::new();
+        mgr.connect("t", &addr.to_string()).unwrap();
+
+        let path = format!("/tmp/tauctl-load-comments-{}.csv", std::process::id());
+        std::fs::write(&path, "# comment\n0,1,10\n\n1,2,20\n").unwrap();
+
+        let (tx, rx) = mpsc::channel::<IoResponse>();
+        handle_load(&mut mgr, "y".into(), path.clone(), 256, &tx);
+        std::fs::remove_file(&path).ok();
+
+        let resp = rx.recv().unwrap();
+        assert!(matches!(resp, IoResponse::Done(_)));
+        if let IoResponse::Done(s) = resp {
+            assert!(s.contains("2"), "expected 2 data rows, got: {s}");
+        }
+    }
+
+    #[test]
+    fn handle_connect_failure_sends_error() {
+        let mut mgr = TcpManager::new();
+        let (tx, rx) = mpsc::channel::<IoResponse>();
+        handle_connect(&mut mgr, "bad".into(), "127.0.0.1:1".into(), false, &tx);
+        assert!(matches!(rx.recv().unwrap(), IoResponse::Error(_)));
+    }
+
+    #[test]
+    fn handle_disconnect_unknown_sends_error() {
+        let mut mgr = TcpManager::new();
+        let (tx, rx) = mpsc::channel::<IoResponse>();
+        handle_disconnect(&mut mgr, "nobody".into(), &tx);
+        assert!(matches!(rx.recv().unwrap(), IoResponse::Error(_)));
+    }
+
+    #[test]
+    fn handle_use_unknown_sends_error() {
+        let mut mgr = TcpManager::new();
+        let (tx, rx) = mpsc::channel::<IoResponse>();
+        handle_use(&mut mgr, "nobody".into(), &tx);
+        assert!(matches!(rx.recv().unwrap(), IoResponse::Error(_)));
+    }
+
+    #[test]
+    fn handle_query_no_active_connection_sends_error() {
+        let mut mgr = TcpManager::new();
+        let (tx, rx) = mpsc::channel::<IoResponse>();
+        handle_query(&mut mgr, "AT LENS x 0".into(), &tx);
+        assert!(matches!(rx.recv().unwrap(), IoResponse::Error(_)));
+    }
+
+    #[test]
+    fn handle_connect_success_sends_info_and_connections() {
+        let addr = ok_server();
+        let mut mgr = TcpManager::new();
+        let (tx, rx) = mpsc::channel::<IoResponse>();
+        handle_connect(&mut mgr, "dev".into(), addr.to_string(), false, &tx);
+        let first = rx.recv().unwrap();
+        assert!(matches!(first, IoResponse::Info(_)));
+        let second = rx.recv().unwrap();
+        assert!(matches!(second, IoResponse::Connections(_)));
+    }
+
+    #[test]
+    fn handle_use_known_connection_sends_connections() {
+        let addr = ok_server();
+        let mut mgr = TcpManager::new();
+        mgr.connect("dev", &addr.to_string()).unwrap();
+        let (tx, rx) = mpsc::channel::<IoResponse>();
+        handle_use(&mut mgr, "dev".into(), &tx);
+        assert!(matches!(rx.recv().unwrap(), IoResponse::Connections(_)));
+    }
+}
