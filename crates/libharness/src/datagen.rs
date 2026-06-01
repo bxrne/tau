@@ -405,3 +405,105 @@ static STATION_NAMES: &[&str] = &[
     "Zagreb",
     "Zurich",
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hegel::TestCase;
+    use hegel::generators as gs;
+    use pretty_assertions::assert_eq;
+
+    #[hegel::test]
+    fn same_seed_produces_same_sequence(tc: TestCase) {
+        let seed = tc.draw(gs::integers::<u64>());
+        let tree = SeedTree::new(seed);
+        let mut g1 = OneBrcGen::new(&tree, "test");
+        let mut g2 = OneBrcGen::new(&tree, "test");
+        for _ in 0..20 {
+            let r1 = g1.draw();
+            let r2 = g2.draw();
+            assert_eq!(r1.station, r2.station);
+            assert_eq!(r1.temp_x10, r2.temp_x10);
+        }
+    }
+
+    #[hegel::test]
+    fn temperature_in_expected_range(tc: TestCase) {
+        let seed = tc.draw(gs::integers::<u64>());
+        let tree = SeedTree::new(seed);
+        let mut dg = OneBrcGen::new(&tree, "t");
+        for _ in 0..50 {
+            let r = dg.draw();
+            // mean is in [-200, 400], delta is in [-150, 150]
+            assert!(
+                r.temp_x10 >= -350 && r.temp_x10 <= 550,
+                "temperature out of range: {}",
+                r.temp_x10
+            );
+        }
+    }
+
+    #[hegel::test]
+    fn batch_returns_correct_count(tc: TestCase) {
+        let n = tc.draw(gs::integers::<usize>().min_value(0).max_value(100));
+        let tree = SeedTree::new(0);
+        let mut dg = OneBrcGen::new(&tree, "t");
+        assert_eq!(dg.batch(n).len(), n);
+    }
+
+    #[hegel::test]
+    fn cursor_advances_by_one_per_draw(tc: TestCase) {
+        let n = tc.draw(gs::integers::<usize>().min_value(1).max_value(50));
+        let tree = SeedTree::new(0);
+        let mut dg = OneBrcGen::new(&tree, "t");
+        let start = dg.cursor();
+        for _ in 0..n {
+            dg.draw();
+        }
+        assert_eq!(dg.cursor(), start + n as i64);
+    }
+
+    #[hegel::test]
+    fn station_names_are_non_empty(tc: TestCase) {
+        let seed = tc.draw(gs::integers::<u64>());
+        let tree = SeedTree::new(seed);
+        let mut dg = OneBrcGen::new(&tree, "t");
+        for _ in 0..20 {
+            let r = dg.draw();
+            assert!(!r.station.is_empty());
+        }
+    }
+
+    #[test]
+    fn station_count_matches_pool_size() {
+        let tree = SeedTree::new(0);
+        let dg = OneBrcGen::new(&tree, "t");
+        assert_eq!(dg.station_count(), STATION_NAMES.len());
+    }
+
+    #[test]
+    fn tier_row_counts_are_ordered() {
+        assert!(Tier::Nano.row_count() < Tier::Micro.row_count());
+        assert!(Tier::Micro.row_count() < Tier::Small.row_count());
+        assert!(Tier::Small.row_count() < Tier::Full.row_count());
+    }
+
+    #[test]
+    fn tier_parse_roundtrips() {
+        for (s, t) in [
+            ("nano", Tier::Nano),
+            ("micro", Tier::Micro),
+            ("small", Tier::Small),
+            ("full", Tier::Full),
+        ] {
+            assert_eq!(Tier::parse(s), Some(t));
+            assert_eq!(t.name(), s);
+        }
+    }
+
+    #[test]
+    fn tier_parse_rejects_unknown() {
+        assert_eq!(Tier::parse("huge"), None);
+        assert_eq!(Tier::parse(""), None);
+    }
+}

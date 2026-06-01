@@ -55,31 +55,77 @@ impl SeedTree {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hegel::TestCase;
+    use hegel::generators as gs;
+    use hegel::generators::Generator;
+    use pretty_assertions::assert_eq;
 
-    #[test]
-    fn same_tag_is_stable() {
-        let t = SeedTree::new(0xdead_beef);
-        assert_eq!(t.seed_for("reader-0"), t.seed_for("reader-0"));
+    #[hegel::test]
+    fn same_tag_is_stable(tc: TestCase) {
+        let root = tc.draw(gs::integers::<u64>());
+        let tag = tc.draw(gs::text().max_size(32));
+        let t = SeedTree::new(root);
+        assert_eq!(t.seed_for(&tag), t.seed_for(&tag));
     }
 
-    #[test]
-    fn distinct_tags_differ() {
-        let t = SeedTree::new(0xdead_beef);
-        assert_ne!(t.seed_for("reader-0"), t.seed_for("reader-1"));
+    #[hegel::test]
+    fn distinct_tags_differ(tc: TestCase) {
+        let root = tc.draw(gs::integers::<u64>());
+        let a = tc.draw(gs::text().max_size(16));
+        let b = tc.draw(gs::text().max_size(16).filter({
+            let a = a.clone();
+            move |s| *s != a
+        }));
+        let t = SeedTree::new(root);
+        assert_ne!(t.seed_for(&a), t.seed_for(&b));
     }
 
-    #[test]
-    fn distinct_roots_differ() {
+    #[hegel::test]
+    fn distinct_roots_differ(tc: TestCase) {
+        let r1 = tc.draw(gs::integers::<u64>());
+        let r2 = tc.draw(gs::integers::<u64>().filter(move |&x| x != r1));
+        let tag = tc.draw(gs::text().max_size(16));
         assert_ne!(
-            SeedTree::new(1).seed_for("cell"),
-            SeedTree::new(2).seed_for("cell"),
+            SeedTree::new(r1).seed_for(&tag),
+            SeedTree::new(r2).seed_for(&tag)
         );
     }
 
-    #[test]
-    fn child_nesting_is_deterministic() {
-        let a = SeedTree::new(7).child("cell-3").seed_for("reader-2");
-        let b = SeedTree::new(7).child("cell-3").seed_for("reader-2");
+    #[hegel::test]
+    fn child_nesting_is_deterministic(tc: TestCase) {
+        let root = tc.draw(gs::integers::<u64>());
+        let child_tag = tc.draw(gs::text().max_size(16));
+        let leaf_tag = tc.draw(gs::text().max_size(16));
+        let a = SeedTree::new(root).child(&child_tag).seed_for(&leaf_tag);
+        let b = SeedTree::new(root).child(&child_tag).seed_for(&leaf_tag);
         assert_eq!(a, b);
+    }
+
+    #[hegel::test]
+    fn rng_is_deterministic_from_same_seed(tc: TestCase) {
+        use rand::RngCore;
+        let root = tc.draw(gs::integers::<u64>());
+        let tag = tc.draw(gs::text().max_size(16));
+        let t = SeedTree::new(root);
+        let mut r1 = t.rng(&tag);
+        let mut r2 = t.rng(&tag);
+        let a: u64 = r1.next_u64();
+        let b: u64 = r2.next_u64();
+        assert_eq!(a, b);
+    }
+
+    #[hegel::test]
+    fn root_accessor_returns_root(tc: TestCase) {
+        let root = tc.draw(gs::integers::<u64>());
+        assert_eq!(SeedTree::new(root).root(), root);
+    }
+
+    #[hegel::test]
+    fn child_differs_from_parent_seed(tc: TestCase) {
+        let root = tc.draw(gs::integers::<u64>());
+        let tag = tc.draw(gs::text().min_size(1).max_size(16));
+        let parent = SeedTree::new(root).seed_for(&tag);
+        let child = SeedTree::new(root).child(&tag).seed_for(&tag);
+        assert_ne!(parent, child);
     }
 }

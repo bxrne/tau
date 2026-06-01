@@ -55,7 +55,7 @@ The engine is correct. v0.2.0 makes it fast enough to benchmark honestly, operab
 
 **Benchmarks**
 - [x] Published `cargo bench` suite using Criterion: `AT`, `RANGE`, `REDUCE`, and `APPEND` at varying layer counts and dataset sizes (`cargo bench -p libharness`)
-- [x] 1BRC deterministic simulation tester (`dst`): 413 stations × N tiers, oracle-verified, fault-injected, throughput-reported
+- [x] 1BRC deterministic simulation tester (`dst`): 413 stations × N tiers, oracle-verified, fault-injected, throughput-reported; three backends: `embedded`, `wal` (replay fault injection), `tcp` (in-process server over loopback)
 - [ ] Reproducible comparison against InfluxDB 2.x and QuestDB on standard ingest and query workloads, with methodology documented and results checked into the repo
 - [ ] Flamegraph-guided profiling; all regressions caught by the bench suite in CI
 
