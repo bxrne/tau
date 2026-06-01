@@ -71,8 +71,8 @@ Within the slice, a binary search (`partition_point` on `tau.end <= t`) locates 
 A named temporal function: either a `Base` lens backed by a store, or a `Derived` lens backed by a lazy closure.
 
 ```
-Lens::Base          -- delegates to the store layer stack
-Lens::Derived(f)    -- f: Arc<dyn Fn(Timestamp) -> Option<V>>
+Lens::Base          # delegates to the store layer stack
+Lens::Derived(f)    # f: Arc<dyn Fn(Timestamp) -> Option<V>>
 ```
 
 Derived lenses are closures compiled at `DERIVE` time. At query time they call `f(t)`. The closure captures references to other lenses so derivations chain: `DERIVE c AS a + b` compiles into a closure that calls the closures of `a` and `b`.
@@ -108,9 +108,9 @@ The WAL sits between the caller and the store. Every mutation writes to the WAL 
 WAL entries are line-oriented text:
 
 ```
-<crc32hex> <base64-payload>        -- data entry
-S:<checksum> <CREATE LENS ...>     -- schema DDL
-SE:<crc32hex> <base64-encrypted>   -- encrypted schema DDL
+<crc32hex> <base64-payload>        # data entry
+S:<checksum> <CREATE LENS ...>     # schema DDL
+SE:<crc32hex> <base64-encrypted>   # encrypted schema DDL
 ```
 
 Schema entries carry the raw TauQL text of `CREATE LENS` and `DERIVE LENS`. On replay, these are re-parsed and executed with `in_replay = true`, which suppresses re-appending them to the WAL.
@@ -121,7 +121,7 @@ The WAL is checkpointed after compaction: a fresh snapshot of in-memory state is
 
 Each base lens accumulates layers over time. A point query must walk layers newest-first until it finds a covering tau. With many layers this is linear in the layer count.
 
-Auto-compaction fires when a lens exceeds a threshold (default: 4 layers). It runs a sweep-line algorithm over all layers:
+Auto-compaction fires when a lens exceeds a threshold (default: 8 layers, configurable via `--compact-threshold`). It runs a sweep-line algorithm over all layers:
 
 1. Build a list of start/end events, one pair per tau across all layers.
 2. Sort events by timestamp; ends before starts at ties.
@@ -168,7 +168,7 @@ The split is intentional: embedding Tau as a library bypasses auth entirely. Aut
 
 ## Query Language
 
-TauQL is a line-oriented command language: one statement in, one response line out. The grammar is minimal: no implicit join, no subquery, no transaction syntax.
+TauQL is a line-oriented command language: one statement in, one response line out. The grammar is minimal: no implicit join, no subquery. Multi-statement atomicity is provided by `START TRANSACTION / COMMIT / ROLLBACK`.
 
 The parser is a `nom` combinator in `libtau::ql::parser`. Adding a new statement requires changes to four files: `ast.rs` (new variant + `Display`), `parser.rs` (production + `alt` entry), `executor.rs` (handler + `check_permission` arm), and `libtau::wire` (`Response::from_output` and `Response::parse`).
 
@@ -209,11 +209,13 @@ Mutation would require finding and splitting or replacing existing taus. With im
 
 The tradeoff is query cost: O(log n) per layer rather than O(log n) total. Compaction restores O(log n) by collapsing layers.
 
-### No transaction syntax
+### Transaction semantics
 
-Tau does not expose transactions. The WAL provides durability; compaction provides space reclamation. Both happen automatically. Multi-statement atomicity would require locking, MVCC, or 2PC, none of which fit the single-writer append-only model cheaply.
+`START TRANSACTION / COMMIT / ROLLBACK` provide per-connection multi-statement atomicity. Mutations after `START TRANSACTION` are buffered in memory; `COMMIT` applies the buffer under the exclusive executor write lock so no other reader sees partial state. `ROLLBACK` discards the buffer.
 
-If multiple appends must land atomically, batch them: `APPEND LENS x 0 10 1, 10 20 2` is a single layer and a single WAL entry.
+The implementation deliberately limits scope: nesting is not supported, and concurrent readers on other connections see only pre-transaction state throughout. This fits the append-only workload well without the complexity of MVCC or 2PC.
+
+For single-layer atomicity without explicit transactions, batching works equally well: `APPEND LENS x 0 10 1, 10 20 2` is one layer and one WAL entry.
 
 ### `exec` vs `exec_as` split
 

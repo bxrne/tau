@@ -15,7 +15,7 @@ Tau is a time-series database for workloads where data changes over time — not
 Every value in Tau has a time range over which it was true:
 
 ```
-Tau { start: i64, end: i64, value: V }   -- value V is true over [start, end)
+Tau { start: i64, end: i64, value: V }   # value V holds over [start, end)
 ```
 
 The interval is **half-open**: it includes `start` and excludes `end`. This is a deliberate algebraic choice. Half-open intervals form a monoid under concatenation:

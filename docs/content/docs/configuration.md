@@ -108,6 +108,7 @@ These trade durability for throughput. Use only for bulk-load paths or when an e
 | `--tier <TIER>` | `nano` | Workload scale: `nano` (10k rows), `micro` (1M), `small` (100M), `full` (1B) |
 | `--seed <N>` | time-based | RNG seed; printed on every run for reproducibility |
 | `--no-faults` | off | Disable fault injection |
+| `--backend <BACKEND>` | `embedded` | Storage backend: `embedded` (in-memory library), `wal` (disk WAL with replay faults), `tcp` (in-process server over loopback) |
 | `--log-level <LEVEL>` | `info` | `tracing` log level |
 
 ---

@@ -72,6 +72,12 @@ cargo run --release --bin dst -- --tier nano --seed 3735928559
 # Disable fault injection
 cargo run --release --bin dst -- --tier micro --no-faults
 
+# WAL backend — exercises replay correctness under fault injection
+cargo run --release --bin dst -- --tier nano --backend wal
+
+# TCP backend — exercises the full line protocol over loopback
+cargo run --release --bin dst -- --tier nano --backend tcp
+
 # Quiet output
 cargo run --release --bin dst -- --tier nano --log-level error
 ```
@@ -86,14 +92,26 @@ The DST uses `libharness` for:
 - `Oracle` — BTreeMap reference implementation
 - `SeedTree` — hierarchical seed derivation so sub-streams are independent
 
-The simulation runs in embedded mode only (library executor directly, no server process). This keeps the run fast and deterministic without OS scheduling noise.
+Three backends are available via `--backend`:
+
+| backend | what it exercises |
+|---------|-------------------|
+| `embedded` (default) | library executor directly — fastest, no OS scheduling noise |
+| `wal` | executor backed by a real WAL on disk; fault injection restarts the executor and replays the WAL, verifying replay correctness |
+| `tcp` | full in-process TCP server over loopback — exercises the line protocol, lock-routing, and connection handling |
+
+The embedded backend is the default because it is deterministic, fast, and has no external dependencies. The WAL and TCP backends add coverage at the cost of I/O and OS scheduling.
 
 ## Invariants checked
 
-**After ingest:** `AT(lens, t)` agrees with the oracle for every midpoint of every recorded segment.
+**After ingest (all backends):** `AT(lens, t)` agrees with the oracle for every midpoint of every recorded segment.
 
-**After REDUCE:** `REDUCE LENS station 0 N USING min` matches `oracle.reduce_min(station, 0, N)` for the first ten stations.
+**After REDUCE (embedded and WAL):** `REDUCE LENS station 0 N USING min` matches `oracle.reduce_min(station, 0, N)` for the first ten stations.
 
-**Fault recovery:** after a lens is dropped and recreated, subsequent appends and queries succeed without error.
+**After REDUCE (TCP backend):** same check issued over the wire; any divergence between the TCP response and the oracle value is a bug in the protocol layer, not just the engine.
+
+**WAL replay (WAL backend):** after each fault, the executor is restarted from the WAL file. The restarted executor must produce the same query results as the oracle, verifying that WAL replay reconstructs state correctly.
+
+**Fault recovery (all backends):** after a lens is dropped and recreated, subsequent appends and queries succeed without error.
 
 *Tau's DST builds on prior art from [FoundationDB](https://apple.github.io/foundationdb/testing.html) and [TigerBeetle](https://tigerbeetle.com/). Both teams have written extensively about deterministic simulation testing and both are recommended reading.*
