@@ -1,6 +1,6 @@
 [package]
 name = "libharness"
-version = "0.1.3" # x-release-please-version
+version = "0.1.4" # x-release-please-version
 edition.workspace = true
 license.workspace = true
 description = "Shared simulation + benchmark harness for tau: backends, oracle, generators, reporting."
