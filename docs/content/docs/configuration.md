@@ -4,67 +4,147 @@ date = 2026-05-28
 template = "page.html"
 +++
 
-Tau is configured entirely through command-line flags and environment variables. There is no config file yet (TOML config is on the roadmap for v0.2.0).
+Tau is configured via a TOML file. The server looks for `config.toml` in the
+current working directory unless `--config <path>` is passed. All fields are
+optional; an absent config file starts an in-memory server on `127.0.0.1:7070`
+with defaults.
 
 ---
 
-## Server (`tau`)
+## Quick start
 
+```bash
+# Copy the sample and edit
+cp config.toml my-tau.toml
+
+# Start with the default config.toml in the current directory
+tau
+
+# Or point at a specific path
+tau --config /etc/tau/config.toml
 ```
-Usage: tau [OPTIONS] [ADDR]
 
-Arguments:
-  [ADDR]   TCP address to listen on [default: 127.0.0.1:7070]
+---
+
+## Full example
+
+```toml
+bind = "127.0.0.1:7070"
+log_level = "info"         # error | warn | info | debug | trace
+compact_threshold = 8      # layers per lens before auto-compaction fires
+
+[wal]
+enabled = true
+path = "/var/lib/tau/tau.wal"
+no_fsync_each = false       # true: 50 ms group-commit; risk: up to one interval of data loss
+no_rewrite_on_compact = false
+no_auto_checkpoint = false
+
+[tls]
+enabled = true
+cert = "/etc/tau/cert.pem"  # omit both cert+key for ephemeral self-signed (dev only)
+key  = "/etc/tau/key.pem"
+
+[auth]
+enabled = true
+username = "admin"          # bootstrap admin on first run
+password = "changeme"       # hashed with argon2id at startup; plaintext not retained
+users_file = "/var/lib/tau/users.db"
+
+[metrics]
+port = 9100                 # serves GET /metrics and GET /healthz
+
+[limits]
+max_connections = 1024
+idle_timeout_secs = 300     # 0 disables
 ```
 
-### Storage
+---
 
-| flag | default | description |
-|------|---------|-------------|
-| `--wal` | off | Enable write-ahead logging for durability |
-| `-w, --wal-path <PATH>` | (required with --wal) | Path for the WAL file |
-| `--compact-threshold <N>` | 8 | Number of layers per lens before auto-compaction fires |
+## Top-level fields
 
-When `--wal` is enabled, every write is fsynced to the WAL before being applied to the in-memory store. On startup, the WAL is replayed to reconstruct state. Without `--wal`, data is in-memory only and lost on process exit.
+| field | default | description |
+|-------|---------|-------------|
+| `bind` | `127.0.0.1:7070` | TCP address to listen on |
+| `log_level` | `info` | `error` \| `warn` \| `info` \| `debug` \| `trace` |
+| `compact_threshold` | `8` | Number of layers per lens before automatic compaction fires |
 
-### TLS
+---
 
-| flag | default | description |
-|------|---------|-------------|
-| `--tls` | off | Enable TLS |
-| `--tls-cert <PATH>` | (ephemeral self-signed) | PEM certificate file |
-| `--tls-key <PATH>` | (ephemeral self-signed) | PEM private key file |
+## `[wal]`
 
-With `--tls` and no cert/key paths, an ephemeral self-signed certificate is generated at startup; convenient for development but not verifiable by clients. For production, provide a real cert and key.
+| field | default | description |
+|-------|---------|-------------|
+| `enabled` | `false` | Enable write-ahead logging for durability across restarts |
+| `path` | (none) | Path for the WAL file — required when `enabled = true` |
+| `no_fsync_each` | `false` | Skip per-record WAL flush+sync; a background thread flushes every 50 ms |
+| `no_rewrite_on_compact` | `false` | Skip disk-file rewrite after compaction |
+| `no_auto_checkpoint` | `false` | Skip WAL checkpoint rewrite after compaction |
 
-### Authentication
+When `enabled = true`, every write is fsynced to the WAL before being applied
+to the in-memory store. On startup, the WAL is replayed to reconstruct state.
+Without the WAL, data is in-memory only and lost on process exit.
 
-| flag | default | description |
-|------|---------|-------------|
-| `--auth` | off | Enable per-connection authentication |
-| `--username <NAME>` | (none) | Bootstrap admin username (requires `--auth`) |
-| `--password <PASS>` | (none) | Bootstrap admin password, hashed with Argon2id at startup |
-| `--users-file <PATH>` | (none) | Persistent multi-user store; file is created on first run |
+The `no_*` fields trade durability for throughput. Use only on trusted
+workloads or when an external durability boundary (replication, backup) exists.
+
+---
+
+## `[tls]`
+
+| field | default | description |
+|-------|---------|-------------|
+| `enabled` | `false` | Enable TLS |
+| `cert` | (none) | Path to PEM-encoded certificate file |
+| `key` | (none) | Path to PEM-encoded private key file |
+
+With `enabled = true` and no `cert`/`key` paths, an ephemeral self-signed
+certificate is generated at startup — convenient for development but not
+verifiable by clients. For production, provide a real cert and key.
+
+---
+
+## `[auth]`
+
+| field | default | description |
+|-------|---------|-------------|
+| `enabled` | `false` | Enable per-connection authentication |
+| `username` | (none) | Bootstrap admin username |
+| `password` | (none) | Bootstrap admin password, hashed with Argon2id at startup |
+| `users_file` | (none) | Persistent multi-user store; created on first run |
 
 Two user-store modes:
 
-**In-memory single user:** `--auth --username admin --password s3cr3t`. Bootstraps one global-admin user with no persistence. Every restart requires the same flags.
+**In-memory single user** — set `username`/`password`, no `users_file`. Bootstraps
+one global-admin user with no persistence. Every restart requires the same values.
 
-**Persistent multi-user:** `--auth --users-file /var/lib/tau/users`. On first run with `--username`/`--password`, the file is seeded with that user as global admin. Subsequent `CREATE USER`, `DROP USER`, `GRANT`, and `REVOKE` statements are atomically written to the file.
+**Persistent multi-user** — set `users_file`. On first run with `username`/`password`,
+the file is seeded with that user as global admin. Subsequent `CREATE USER`,
+`DROP USER`, `GRANT`, and `REVOKE` statements are atomically written back.
 
-### Observability
+---
 
-| flag | default | description |
-|------|---------|-------------|
-| `--metrics-port <PORT>` | (none) | Expose Prometheus `/metrics` and `/healthz` on this HTTP port |
-| `-l, --log-level <LEVEL>` | `info` | `error` \| `warn` \| `info` \| `debug` \| `trace` |
+## `[metrics]`
 
-### Connection management
+| field | default | description |
+|-------|---------|-------------|
+| `port` | (none) | Expose Prometheus `/metrics` and `/healthz` on this HTTP port |
 
-| flag | default | description |
-|------|---------|-------------|
-| `--max-connections <N>` | 1024 | Maximum concurrent client connections; beyond the cap, new connections receive `ERR server at connection limit` |
-| `--idle-timeout-secs <SECS>` | 300 | Per-connection idle timeout in seconds; 0 disables |
+When `port` is set:
+
+```
+GET http://0.0.0.0:<port>/metrics    Prometheus text-format
+GET http://0.0.0.0:<port>/healthz    Liveness probe
+```
+
+---
+
+## `[limits]`
+
+| field | default | description |
+|-------|---------|-------------|
+| `max_connections` | `1024` | Maximum concurrent client connections; new connections beyond the cap receive `ERR server at connection limit` |
+| `idle_timeout_secs` | `300` | Per-connection idle timeout in seconds; `0` disables |
 
 ---
 
@@ -74,53 +154,14 @@ Two user-store modes:
 |----------|-------------|
 | `TAU_ENCRYPTION_KEY` | 64 hex characters (32 bytes). When set, WAL entries are encrypted per-entry with AES-256-GCM. Without this key, an encrypted WAL file cannot be replayed. |
 
-Example:
-
 ```bash
 export TAU_ENCRYPTION_KEY=$(openssl rand -hex 32)
-tau --wal -w /var/lib/tau/data.wal
+tau --config /etc/tau/config.toml
 ```
-
----
-
-## Performance flags (server)
-
-These trade durability for throughput. Use only for bulk-load paths or when an external durability boundary (replication, backup) exists.
-
-| flag | default | description |
-|------|---------|-------------|
-| `--no-fsync-each` | off | Skip per-record WAL flush+sync. A background thread flushes every 50 ms |
-| `--no-rewrite-on-compact` | off | Skip disk-file rewrite after compaction |
-| `--no-auto-checkpoint` | off | Skip WAL checkpoint rewrite after compaction |
-
-## Client (`ctl`)
-
-`ctl` launches a ratatui TUI by default when stdout is a TTY. Use `--headless` for the line-editor REPL.
-
-| flag | default | description |
-|------|---------|-------------|
-| `--headless` | off | Use the rustyline REPL instead of the TUI |
-
-## DST (`dst`)
-
-| flag | default | description |
-|------|---------|-------------|
-| `--tier <TIER>` | `nano` | Workload scale: `nano` (10k rows), `micro` (1M), `small` (100M), `full` (1B) |
-| `--seed <N>` | time-based | RNG seed; printed on every run for reproducibility |
-| `--no-faults` | off | Disable fault injection |
-| `--backend <BACKEND>` | `embedded` | Storage backend: `embedded` (in-memory library), `wal` (disk WAL with replay faults), `tcp` (in-process server over loopback) |
-| `--log-level <LEVEL>` | `info` | `tracing` log level |
 
 ---
 
 ## Metrics reference
-
-When `--metrics-port` is set, the server exposes:
-
-```
-GET http://127.0.0.1:<PORT>/metrics    Prometheus text-format
-GET http://127.0.0.1:<PORT>/healthz    Liveness probe (returns "ok")
-```
 
 | metric | type | description |
 |--------|------|-------------|
@@ -139,7 +180,7 @@ GET http://127.0.0.1:<PORT>/healthz    Liveness probe (returns "ok")
 
 ## Permission model
 
-When `--auth` is enabled, every statement is checked against the caller's CRUDA bitmap:
+When `[auth] enabled = true`, every statement is checked against the caller's CRUDA bitmap:
 
 | bit | grants |
 |-----|--------|
@@ -149,6 +190,25 @@ When `--auth` is enabled, every statement is checked against the caller's CRUDA 
 | `D` | `DROP LENS` |
 | `A` | Admin: manage users, `GRANT`/`REVOKE`, `CREATE DATABASE`, `DROP DATABASE` |
 
-Effective permissions for a user on database `db` = `grants[db] | grants["*"]`. A user with `A` on `"*"` is a global admin.
+Effective permissions for a user on database `db` = `grants[db] | grants["*"]`.
+A user with `A` on `"*"` is a global admin.
 
-`SHOW DATABASES` is post-filtered for non-admins: only databases the caller holds any grant on are returned.
+`SHOW DATABASES` is post-filtered for non-admins: only databases the caller
+holds any grant on are returned.
+
+---
+
+## Client (`ctl`)
+
+`ctl` has no configuration file. It accepts only `--version` and `--help`;
+all connection and session settings are entered interactively in the TUI.
+
+## DST (`dst`)
+
+| flag | default | description |
+|------|---------|-------------|
+| `--tier <TIER>` | `nano` | Workload scale: `nano` (10k rows), `micro` (1M), `small` (100M), `full` (1B) |
+| `--seed <N>` | time-based | RNG seed; printed on every run for reproducibility |
+| `--no-faults` | off | Disable fault injection |
+| `--backend <BACKEND>` | `embedded` | Storage backend: `embedded`, `wal`, `tcp` |
+| `--log-level <LEVEL>` | `info` | `tracing` log level |

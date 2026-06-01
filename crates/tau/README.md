@@ -2,6 +2,47 @@
 
 The TCP server binary. Exposes a `libtau` executor over a line-oriented TCP protocol.
 
+## Configuration
+
+The server reads `config.toml` in the current working directory, or a path supplied with `--config`:
+
+```bash
+tau                          # uses ./config.toml if present, otherwise defaults
+tau --config /etc/tau/cfg.toml
+```
+
+A sample config lives at the repo root. Key sections:
+
+```toml
+bind = "127.0.0.1:7070"
+log_level = "info"
+compact_threshold = 8
+
+[wal]
+enabled = true
+path = "/var/lib/tau/tau.wal"
+
+[tls]
+enabled = true
+cert = "/etc/tau/cert.pem"
+key  = "/etc/tau/key.pem"
+
+[auth]
+enabled = true
+username = "admin"
+password = "changeme"
+users_file = "/var/lib/tau/users.db"
+
+[metrics]
+port = 9100
+
+[limits]
+max_connections = 1024
+idle_timeout_secs = 300
+```
+
+See [docs/configuration](https://tau.bxrne.com/docs/configuration/) for the full reference.
+
 ## Wire protocol
 
 One statement per line in, one response line out. The wire codec lives in `libtau::wire::Response` — both the server encoder and the client decoder use the same type.
@@ -22,12 +63,7 @@ Values are encoded with a one-character type tag: `i<int>`, `f<float>`, `s<perce
 
 ## Authentication
 
-When `--auth` is set, the first message from every client must be `AUTH <username> <password>`. After a successful `AUTH`, the session is bound to that user and every subsequent statement dispatches through `exec_as` for CRUDA grant enforcement.
-
-Two user-store modes:
-
-- **In-memory single user**: `--auth --username admin --password s3cr3t`. Bootstraps one global-admin user; no persistence.
-- **Persistent multi-user**: `--auth --users-file /path/users.json`. Loads and persists all user mutations.
+When `[auth] enabled = true`, the first message from every client must be `AUTH <username> <password>`. After a successful `AUTH`, the session is bound to that user and every subsequent statement dispatches through `exec_as` for CRUDA grant enforcement.
 
 ## Concurrency model
 
@@ -35,23 +71,12 @@ Per-connection OS threads, one `Arc<RwLock<Executor>>` wrapping a `FxHashMap<Str
 
 Lock routing in `handle_query`:
 - Read-only statements: shared executor lock + per-DB read lock inside `exec_read`.
-- Registry writes (CREATE DATABASE, user management, transactions): exclusive executor lock.
-- Data writes (APPEND, CREATE LENS, etc.): shared executor lock + per-DB write lock inside `exec_db_write`. Reads to database A proceed concurrently with writes to database B.
-
-## Performance flags
-
-| Flag | Default | Purpose |
-|------|---------|---------|
-| `--no-fsync-each` | off | Skip per-record WAL sync; a background thread flushes every 50 ms |
-| `--no-rewrite-on-compact` | off | Skip disk-file rewrite after compaction |
-| `--no-auto-checkpoint` | off | Skip WAL checkpoint rewrite after compaction |
+- Registry writes (`CREATE DATABASE`, user management, transactions): exclusive executor lock.
+- Data writes (`APPEND`, `CREATE LENS`, etc.): shared executor lock + per-DB write lock inside `exec_db_write`.
 
 ## Running
 
 ```bash
-cargo run --release --bin tau                              # in-memory, 127.0.0.1:7070
-cargo run --release --bin tau -- --wal -w /tmp/tau.wal    # with WAL
-cargo run --release --bin tau -- --tls                    # ephemeral self-signed TLS
-cargo run --release --bin tau -- --auth --username u --password p
-cargo run --release --bin tau -- --no-fsync-each --wal -w /tmp/tau.wal
+cargo run --release --bin tau                       # in-memory, defaults
+cargo run --release --bin tau -- --config cfg.toml  # with config file
 ```

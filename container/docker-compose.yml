@@ -24,7 +24,9 @@ services:
 
     volumes:
       - tau_data:/data
-      # Mount real TLS material in production by uncommenting and editing:
+      - ./tau-config.toml:/data/config.toml:ro
+      # Mount real TLS material in production by uncommenting and editing
+      # tau-config.toml ([tls] section) and the lines below:
       # - /etc/tau/tls/server.crt:/data/tls/server.crt:ro
       # - /etc/tau/tls/server.key:/data/tls/server.key:ro
 
@@ -35,23 +37,8 @@ services:
       - tau_net
 
     command:
-      - "0.0.0.0:7070"
-      - "--wal"
-      - "-w"
-      - "/data/tau.wal"
-      - "--users-file"
-      - "/data/users.json"
-      - "--metrics-port"
-      - "9100"
-      - "--log-level"
-      - "${TAU_LOG_LEVEL:-info}"
-      - "--compact-threshold"
-      - "${TAU_COMPACT_THRESHOLD:-8}"
-      - "--auth"
-      - "--username"
-      - "${TAU_USERNAME:?TAU_USERNAME must be set (copy container/.env.example to container/.env)}"
-      - "--password"
-      - "${TAU_PASSWORD:?TAU_PASSWORD must be set (copy container/.env.example to container/.env)}"
+      - "--config"
+      - "/data/config.toml"
 
     read_only: true
 
