@@ -76,21 +76,17 @@ pub fn clear_command() -> Command {
     })
 }
 
-/// Remove the first case-insensitive `"tls"` token from `args` and return
-/// `(tls_found, remaining_args)`.  Uses `Box::leak` so the returned slice
-/// has the same lifetime as the leaked allocation; this is intentional - the
-/// slice lives only for the duration of a single command dispatch.
-fn strip_tls_token<'a>(args: &'a [&'a str]) -> (bool, &'a [&'a str]) {
+fn strip_tls_token<'a>(args: &'a [&'a str]) -> (bool, Vec<&'a str>) {
     if let Some(pos) = args.iter().position(|t| t.eq_ignore_ascii_case("tls")) {
-        let mut filtered: Vec<&str> = Vec::with_capacity(args.len() - 1);
-        for (i, t) in args.iter().enumerate() {
-            if i != pos {
-                filtered.push(*t);
-            }
-        }
-        (true, Box::leak(filtered.into_boxed_slice()))
+        let filtered = args
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != pos)
+            .map(|(_, t)| *t)
+            .collect();
+        (true, filtered)
     } else {
-        (false, args)
+        (false, args.to_vec())
     }
 }
 

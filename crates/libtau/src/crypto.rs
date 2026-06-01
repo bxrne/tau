@@ -1,6 +1,5 @@
 use std::env;
 use std::io;
-use std::process;
 
 use aes_gcm::{
     Aes256Gcm, Nonce,
@@ -18,19 +17,19 @@ fn decode_hex(s: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
-pub fn parse_key_from_env() -> Option<[u8; 32]> {
-    let hex = env::var("TAU_ENCRYPTION_KEY").ok()?;
-    let bytes = decode_hex(&hex).unwrap_or_else(|| {
-        eprintln!("TAU_ENCRYPTION_KEY must be 64 hex chars (32 bytes)");
-        process::exit(1);
-    });
+pub fn parse_key_from_env() -> Result<Option<[u8; 32]>, String> {
+    let hex = match env::var("TAU_ENCRYPTION_KEY") {
+        Ok(s) => s,
+        Err(_) => return Ok(None),
+    };
+    let bytes = decode_hex(&hex)
+        .ok_or_else(|| "TAU_ENCRYPTION_KEY must be 64 hex chars (32 bytes)".to_string())?;
     if bytes.len() != 32 {
-        eprintln!("TAU_ENCRYPTION_KEY must be exactly 32 bytes (64 hex chars)");
-        process::exit(1);
+        return Err("TAU_ENCRYPTION_KEY must be exactly 32 bytes (64 hex chars)".to_string());
     }
     let mut key = [0u8; 32];
     key.copy_from_slice(&bytes);
-    Some(key)
+    Ok(Some(key))
 }
 
 pub fn encrypt(key: &[u8; 32], plaintext: &[u8]) -> Vec<u8> {

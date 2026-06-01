@@ -117,8 +117,6 @@ pub enum ExecError {
     TransactionAlreadyActive,
     /// `COMMIT` or `ROLLBACK` issued without a preceding `START TRANSACTION`.
     NoActiveTransaction,
-    /// `RESTORE DATABASE` targeted a name that already exists.
-    DatabaseAlreadyExists(String),
 }
 
 /// Per-database executor state.
@@ -1152,7 +1150,7 @@ impl Executor {
 
     fn restore_database(&mut self, name: &str, path: &str) -> Result<Output, ExecError> {
         if self.databases.contains_key(name) {
-            return Err(ExecError::DatabaseAlreadyExists(name.into()));
+            return Err(ExecError::DuplicateDatabase(name.into()));
         }
         if !Path::new(path).exists() {
             return Err(ExecError::Io(format!("backup file not found: {path}")));
@@ -2628,8 +2626,8 @@ mod tests {
 
         let err = run(&mut e, &format!("RESTORE DATABASE main FROM \"{bak}\""));
         assert!(
-            matches!(err, Err(ExecError::DatabaseAlreadyExists(_))),
-            "expected DatabaseAlreadyExists, got {err:?}"
+            matches!(err, Err(ExecError::DuplicateDatabase(_))),
+            "expected DuplicateDatabase, got {err:?}"
         );
     }
 }

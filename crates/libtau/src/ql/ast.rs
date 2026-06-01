@@ -421,7 +421,7 @@ impl std::fmt::Display for Stmt {
             // These two are the only statements replayed via the schema WAL.
             Stmt::Create { name, ty } => write!(f, "CREATE LENS {name} {ty}"),
             Stmt::Derive { name, expr } => write!(f, "DERIVE LENS {name} AS {expr}"),
-            other => write!(f, "{other:?}"),
+            _ => unreachable!("Stmt::Display is only implemented for WAL-persisted DDL variants"),
         }
     }
 }

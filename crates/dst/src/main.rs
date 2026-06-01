@@ -1,19 +1,4 @@
 //! Tau deterministic simulation tester — driven by the 1BRC dataset.
-//!
-//! The dataset shape: ~413 station names, each mapped to one Base lens in tau.
-//! Every reading is a degenerate tau [t, t+1) with value = temperature × 10
-//! (i64 fixed-point). After ingest, REDUCE min/max/avg per station is
-//! cross-checked against a BTreeMap oracle. Fault injection (lens drop/recreate
-//! simulating a connection reset) is interleaved every few thousand rows.
-//!
-//! Tiers control dataset size:
-//!   nano   10 k rows  — CI correctness smoke (<1 s)
-//!   micro  1 M rows   — PR-time sanity
-//!   small  100 M rows — nightly / dedicated runner
-//!   full   1 B rows   — manual / release benchmarking
-//!
-//! Usage:
-//!   dst [--tier nano|micro|small|full] [--seed N] [--no-faults] [--log-level LEVEL]
 
 mod report;
 mod runner;
@@ -22,6 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
 use libharness::Tier;
+use runner::Backend;
 use tracing::Level;
 
 #[derive(Parser, Debug)]
@@ -35,7 +21,7 @@ struct Cli {
     #[arg(long, default_value = "nano")]
     tier: String,
 
-    /// RNG seed (default: time-based, printed on every run for reproducibility).
+    /// RNG seed (default: time-based).
     #[arg(long)]
     seed: Option<u64>,
 
@@ -46,6 +32,10 @@ struct Cli {
     /// Tracing log level.
     #[arg(long, default_value = "info")]
     log_level: Level,
+
+    /// Storage backend: embedded (default), wal, tcp.
+    #[arg(long, default_value = "embedded")]
+    backend: String,
 }
 
 fn main() {
@@ -61,6 +51,16 @@ fn main() {
         std::process::exit(1);
     });
 
+    let backend = match cli.backend.as_str() {
+        "embedded" => Backend::Embedded,
+        "wal" => Backend::Wal,
+        "tcp" => Backend::Tcp,
+        other => {
+            eprintln!("unknown backend {other:?}; valid: embedded wal tcp");
+            std::process::exit(1);
+        }
+    };
+
     let seed = cli.seed.unwrap_or_else(|| {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -74,9 +74,11 @@ fn main() {
         tier,
         seed,
         fault_inject: !cli.no_faults,
+        backend,
+        rows_override: None,
     };
 
-    let report = runner::run_embedded(&cfg);
+    let report = runner::run(&cfg);
     report.print();
     if !report.ok {
         std::process::exit(1);

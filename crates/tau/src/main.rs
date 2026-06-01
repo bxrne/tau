@@ -289,7 +289,10 @@ fn main() -> io::Result<()> {
         .with_target(false)
         .init();
 
-    let enc_key = crypto::parse_key_from_env();
+    let enc_key = crypto::parse_key_from_env().unwrap_or_else(|e| {
+        eprintln!("error: {e}");
+        std::process::exit(1);
+    });
     if enc_key.is_some() {
         info!("WAL encryption enabled (TAU_ENCRYPTION_KEY)");
     }
