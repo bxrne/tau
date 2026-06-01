@@ -20,10 +20,4 @@ Complete reference for Tau. The data model, query language, storage internals, t
 - [Roadmap](/docs/roadmap/). What shipped in v0.1 and what v0.2 and v0.3 require.
 - [Changelog](/docs/changelog/). Release history.
 
-**Tutorials.** Step by step.
-
-- [Local](/docs/tutorials/local/). Build from source and run the server.
-- [Docker](/docs/tutorials/docker/). The full observability stack in under five minutes.
-- [Embedded](/docs/tutorials/embedded/). Use Tau as a Rust library with no server process.
-
 **Long form.** Start with [Overview](/docs/overview/) for the data model, then [How it works](/docs/how-it-works/) for storage and concurrency internals.

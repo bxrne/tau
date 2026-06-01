@@ -15,6 +15,8 @@ use libtau::{Response, storage::Codec};
 
 use super::app::App;
 
+const ACCENT: Color = Color::Rgb(255, 168, 106);
+
 fn panel(title: impl std::fmt::Display, border_color: Color) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
@@ -57,11 +59,7 @@ pub fn draw(f: &mut Frame, app: &App, input: &TextArea) {
 }
 
 fn draw_connections(f: &mut Frame, app: &App, area: Rect) {
-    let border_color = if app.pending {
-        Color::Yellow
-    } else {
-        Color::DarkGray
-    };
+    let border_color = if app.pending { ACCENT } else { Color::DarkGray };
 
     let items: Vec<ListItem> = app
         .connections
@@ -70,21 +68,22 @@ fn draw_connections(f: &mut Frame, app: &App, area: Rect) {
             let tls_tag = if *tls {
                 Span::styled(
                     " [tls]",
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM),
+                    Style::default().fg(ACCENT).add_modifier(Modifier::DIM),
                 )
             } else {
                 Span::raw("")
             };
             if *active {
                 ListItem::new(Line::from(vec![
-                    Span::styled("▶ ", Style::default().fg(Color::Green)),
+                    Span::styled("▶ ", Style::default().fg(ACCENT)),
                     Span::styled(
                         name.as_str(),
-                        Style::default()
-                            .fg(Color::Green)
-                            .add_modifier(Modifier::BOLD),
+                        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
                     ),
-                    Span::styled(format!("  {addr}"), Style::default().fg(Color::Green)),
+                    Span::styled(
+                        format!("  {addr}"),
+                        Style::default().fg(ACCENT).add_modifier(Modifier::DIM),
+                    ),
                     tls_tag,
                 ]))
             } else {
@@ -115,7 +114,7 @@ fn draw_results(f: &mut Frame, app: &App, area: Rect) {
         Some(Response::Range(segs)) => {
             let header = Row::new(vec!["start", "end", "value"]).style(
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(ACCENT)
                     .add_modifier(Modifier::BOLD)
                     .add_modifier(Modifier::UNDERLINED),
             );
@@ -147,7 +146,7 @@ fn draw_results(f: &mut Frame, app: &App, area: Rect) {
                 .iter()
                 .map(|n| {
                     ListItem::new(Line::from(vec![
-                        Span::styled("• ", Style::default().fg(Color::Cyan)),
+                        Span::styled("• ", Style::default().fg(ACCENT)),
                         Span::raw(n.as_str()),
                     ]))
                 })
@@ -219,7 +218,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         if status_str.starts_with("ERR") || status_str.starts_with("I/O") {
             (Color::Red, status_str)
         } else if app.pending {
-            (Color::Yellow, "pending…")
+            (ACCENT, "pending…")
         } else if status_str == "OK" {
             (Color::Green, "OK")
         } else {
@@ -252,7 +251,7 @@ pub fn build_input_area<'a>(prompt: &str, text: &str) -> TextArea<'a> {
         Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(Color::Cyan))
+            .border_style(Style::default().fg(ACCENT))
             .title(format!(" {prompt} ")),
     );
     ta.set_style(Style::default().fg(Color::Reset));
@@ -294,13 +293,13 @@ mod tests {
 
     #[test]
     fn build_input_area_empty_has_no_content() {
-        let ta = build_input_area("τ›", "");
+        let ta = build_input_area("τ", "");
         assert_eq!(ta.lines(), &[""]);
     }
 
     #[test]
     fn build_input_area_with_text_sets_content() {
-        let ta = build_input_area("τ›", "AT LENS x 42");
+        let ta = build_input_area("τ", "AT LENS x 42");
         assert_eq!(ta.lines(), &["AT LENS x 42"]);
     }
 
@@ -308,7 +307,7 @@ mod tests {
     fn draw_does_not_panic_with_empty_app() {
         let mut t = terminal();
         let app = test_app();
-        let input = build_input_area("τ›", "");
+        let input = build_input_area("τ", "");
         t.draw(|f| draw(f, &app, &input)).unwrap();
     }
 
@@ -318,7 +317,7 @@ mod tests {
         let mut app = test_app();
         app.pending = true;
         app.status = "sending…".into();
-        let input = build_input_area("τ›", "RANGE LENS x 0 100");
+        let input = build_input_area("τ", "RANGE LENS x 0 100");
         t.draw(|f| draw(f, &app, &input)).unwrap();
     }
 
@@ -330,7 +329,7 @@ mod tests {
             ("dev".into(), "127.0.0.1:7070".into(), true, false),
             ("prod".into(), "10.0.0.1:7070".into(), false, true),
         ];
-        let input = build_input_area("τ›", "");
+        let input = build_input_area("τ", "");
         t.draw(|f| draw(f, &app, &input)).unwrap();
     }
 
@@ -339,7 +338,7 @@ mod tests {
         let mut t = terminal();
         let mut app = test_app();
         app.last_response = Some(Response::Ok);
-        let input = build_input_area("τ›", "");
+        let input = build_input_area("τ", "");
         t.draw(|f| draw(f, &app, &input)).unwrap();
     }
 
@@ -349,7 +348,7 @@ mod tests {
         let mut app = test_app();
         app.last_response = Some(Response::Err("no active database".into()));
         app.status = "ERR no active database".into();
-        let input = build_input_area("τ›", "");
+        let input = build_input_area("τ", "");
         t.draw(|f| draw(f, &app, &input)).unwrap();
     }
 
@@ -361,7 +360,7 @@ mod tests {
             (0, 3600, Value::Int(42)),
             (3600, 7200, Value::Int(55)),
         ]));
-        let input = build_input_area("τ›", "");
+        let input = build_input_area("τ", "");
         t.draw(|f| draw(f, &app, &input)).unwrap();
     }
 
@@ -370,7 +369,7 @@ mod tests {
         let mut t = terminal();
         let mut app = test_app();
         app.last_response = Some(Response::Names(vec!["cpu".into(), "pressure".into()]));
-        let input = build_input_area("τ›", "");
+        let input = build_input_area("τ", "");
         t.draw(|f| draw(f, &app, &input)).unwrap();
     }
 
@@ -390,7 +389,7 @@ mod tests {
                 is_err: true,
             },
         ];
-        let input = build_input_area("τ›", "");
+        let input = build_input_area("τ", "");
         t.draw(|f| draw(f, &app, &input)).unwrap();
     }
 
@@ -399,7 +398,7 @@ mod tests {
         let mut t = terminal();
         let mut app = test_app();
         app.status = "OK".into();
-        let input = build_input_area("τ›", "");
+        let input = build_input_area("τ", "");
         t.draw(|f| draw(f, &app, &input)).unwrap();
         let buf = t.backend().buffer().clone();
         let content: String = buf

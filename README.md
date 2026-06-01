@@ -25,31 +25,36 @@ Time series data is not static. Sensors drift. Prices get restated. Audit record
 ## Quick start
 
 ```bash
-# From source
+# From source — no config file needed, starts in-memory on 127.0.0.1:7070
 git clone https://github.com/bxrne/tau && cd tau
-cargo run --release --bin tau        # in memory server on 127.0.0.1:7070
+cargo run --release --bin tau
+
+# With a config file
+cp config.toml my.toml && $EDITOR my.toml
+cargo run --release --bin tau -- --config my.toml
 
 # Docker
 docker pull ghcr.io/bxrne/tau:latest
-docker run --rm -p 7070:7070 ghcr.io/bxrne/tau:latest
+docker run --rm -p 7070:7070 -v $PWD/config.toml:/data/config.toml:ro \
+  ghcr.io/bxrne/tau:latest --config /data/config.toml
 ```
 
 Connect with the interactive client (`ctl`) and try a correction:
 
 ```bash
 cargo run --release --bin ctl
-τ: connect demo 127.0.0.1:7070
-τ: CREATE DATABASE sensors
-τ: CREATE LENS temperature float
-τ: APPEND LENS temperature 0 3600 18.5, 3600 7200 21.0
-τ: AT LENS temperature 1800
+τ connect demo 127.0.0.1:7070
+τ CREATE DATABASE sensors
+τ CREATE LENS temperature float
+τ APPEND LENS temperature 0 3600 18.5, 3600 7200 21.0
+τ AT LENS temperature 1800
 VAL f18.5
 
-τ: APPEND LENS temperature 0 3600 20.0   # correction: new layer over same range
-τ: AT LENS temperature 1800
-VAL f20                                   # newest layer wins; prior layer still on disk until compaction
-τ: REDUCE LENS temperature 0 7200 USING avg
-VAL f20.5                                 # aggregate reflects the correction
+τ APPEND LENS temperature 0 3600 20.0   # correction: new layer over same range
+τ AT LENS temperature 1800
+VAL f20                                  # newest layer wins; prior layer still on disk until compaction
+τ REDUCE LENS temperature 0 7200 USING avg
+VAL f20.5                                # aggregate reflects the correction
 ```
 
 
@@ -58,13 +63,11 @@ VAL f20.5                                 # aggregate reflects the correction
 - [Overview](https://tau.bxrne.com/docs/overview/). The data model.
 - [TauQL Reference](https://tau.bxrne.com/docs/tauql/). Every statement and operator.
 - [How it works](https://tau.bxrne.com/docs/how-it-works/). Storage, WAL, compaction, concurrency.
+- [Configuration](https://tau.bxrne.com/docs/configuration/). TOML config file reference.
 - [DST](https://tau.bxrne.com/docs/dst/). The deterministic simulation tester.
 - [Testing](https://tau.bxrne.com/docs/testing/). Property based tests and unit anchors.
-- [Configuration](https://tau.bxrne.com/docs/configuration/). All server flags and environment variables.
 - [Containers](https://tau.bxrne.com/docs/containers/). Docker stack with Prometheus and Grafana.
 - [Examples](https://tau.bxrne.com/docs/examples/). Worked queries against real datasets.
-- [Tutorials](https://tau.bxrne.com/docs/tutorials/local/). Local, Docker and embedded.
-
 
 
 ## Development
@@ -72,11 +75,11 @@ VAL f20.5                                 # aggregate reflects the correction
 ```bash
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
-cargo test --release                          # unit tests and property tests
-cargo run --release --bin dst -- --tier nano  # deterministic simulation tester (1BRC, ~1s)
+cargo nextest run --release               # preferred runner (used in CI)
+cargo run --release --bin dst -- --tier nano  # deterministic simulation tester (~1 s)
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and workflow details.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for full setup and workflow details.
 
 
 ## License

@@ -1,0 +1,37 @@
+# tau server configuration
+# Place as config.toml in the working directory, or pass --config <path>.
+# All fields are optional and fall back to the defaults shown here.
+
+bind = "127.0.0.1:7070"
+log_level = "info"         # error | warn | info | debug | trace
+compact_threshold = 8      # layers per lens before auto-compaction fires
+
+# Write-ahead log — enables durability across restarts.
+[wal]
+enabled = false
+# path = "/var/lib/tau/tau.wal"   # required when enabled = true
+no_fsync_each = false             # true: 50 ms group-commit; risk: up to one interval of data loss
+no_rewrite_on_compact = false     # true: skip disk-file rewrite after compaction
+no_auto_checkpoint = false        # true: skip WAL checkpoint rewrite after compaction
+
+# TLS — encryption in transit.
+[tls]
+enabled = false
+# cert = "/etc/tau/cert.pem"      # omit both cert+key for an ephemeral self-signed cert (dev only)
+# key  = "/etc/tau/key.pem"
+
+# Authentication — per-connection username/password.
+[auth]
+enabled = false
+# username = "admin"              # bootstrap admin on first run (only when users_file is empty/absent)
+# password = "changeme"           # hashed with argon2id at startup; plaintext is not retained
+# users_file = "/var/lib/tau/users.db"  # persistent multi-user store
+
+# Prometheus metrics endpoint.
+[metrics]
+# port = 9100                     # serves GET /metrics and GET /healthz on this HTTP port
+
+# Connection limits.
+[limits]
+max_connections = 1024
+idle_timeout_secs = 300           # 0 disables

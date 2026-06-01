@@ -35,7 +35,6 @@ main_menu = [
           {url="/docs/how-it-works/", name="How it works"},
           {url="/docs/tauql/", name="TauQL"},
           {url="/docs/dst/", name="DST"},
-          {url="/docs/tutorials/", name="Tutorials"},
           {url="/docs/examples/", name="Examples"},
           {url="/docs/configuration/", name="Configuration"},
           {url="/docs/containers/", name="Containers"},

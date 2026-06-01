@@ -25,10 +25,11 @@ Tau uses three distinct testing layers. Each one finds a different class of bug;
 **How to run:**
 
 ```bash
-cargo test --release            # all tests
-cargo test --release --lib      # libtau unit tests only
-cargo test --release --bin tau  # server tests only
-cargo nextest run               # parallel runner, nicer output
+cargo nextest run --release                        # all tests (preferred)
+cargo nextest run --release --lib                  # libtau unit tests only
+cargo nextest run --release -E 'binary(tau)'       # server tests only
+cargo nextest run --release -E 'binary(ctl)'       # tauctl tests only
+cargo test --release                               # fallback if nextest is not installed
 ```
 
 ---
@@ -52,7 +53,7 @@ cargo nextest run               # parallel runner, nicer output
 **How to run:**
 
 ```bash
-cargo test --release    # Hegel runs inline alongside example tests
+cargo nextest run --release   # Hegel runs inline alongside example tests
 ```
 
 Hegel auto-installs a Python shim (`~/.cache/hegel`) on first run. Each property runs 100+ randomised cases by default. Use `HEGEL_MAX_EXAMPLES=500` to increase the draw count.

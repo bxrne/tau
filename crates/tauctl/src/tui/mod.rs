@@ -169,7 +169,7 @@ fn handle_key(
 
 fn event_loop<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> io::Result<()> {
     let mut app = App::new();
-    let prompt = format!("{}›", crate::TAU_SYMBOL);
+    let prompt = crate::TAU_SYMBOL.to_string();
     let mut input = build_input_area(&prompt, "");
     let mut hist = InputHistory::new();
 
