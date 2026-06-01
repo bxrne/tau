@@ -68,6 +68,35 @@ impl App {
             ["use", name] => {
                 self.send_io(IoRequest::Use(name.to_string()));
             }
+            ["load", lens, path] => {
+                self.pending = true;
+                self.status = "loading…".into();
+                self.send_io(IoRequest::Load {
+                    lens: lens.to_string(),
+                    path: path.to_string(),
+                    chunk: 256,
+                });
+            }
+            ["load", lens, path, chunk_str] => match chunk_str.parse::<usize>() {
+                Ok(chunk) if chunk > 0 => {
+                    self.pending = true;
+                    self.status = "loading…".into();
+                    self.send_io(IoRequest::Load {
+                        lens: lens.to_string(),
+                        path: path.to_string(),
+                        chunk,
+                    });
+                }
+                _ => {
+                    let msg = format!("invalid chunk size {chunk_str:?}");
+                    self.status = msg.clone();
+                    self.log.push(LogEntry {
+                        query: String::new(),
+                        response: msg,
+                        is_err: true,
+                    });
+                }
+            },
             ["exit"] | ["quit"] => {
                 self.should_quit = true;
             }
@@ -118,6 +147,15 @@ impl App {
                     query: String::new(),
                     response: format!("ERR {e}"),
                     is_err: true,
+                });
+            }
+            IoResponse::Done(s) => {
+                self.pending = false;
+                self.status = s.clone();
+                self.log.push(LogEntry {
+                    query: String::new(),
+                    response: s,
+                    is_err: false,
                 });
             }
             IoResponse::Response(resp) => {

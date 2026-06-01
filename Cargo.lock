@@ -836,7 +836,7 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "libharness"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "criterion",
  "hegeltest",
@@ -850,7 +850,7 @@ dependencies = [
 
 [[package]]
 name = "libtau"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "aes-gcm",
  "argon2",

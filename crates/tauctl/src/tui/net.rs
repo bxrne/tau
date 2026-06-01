@@ -26,6 +26,12 @@ pub enum IoRequest {
     Disconnect(String),
     /// Switch the active connection.
     Use(String),
+    /// Bulk-load a local CSV into a lens.
+    Load {
+        lens: String,
+        path: String,
+        chunk: usize,
+    },
     /// Terminate the I/O thread.
     Quit,
 }
@@ -41,6 +47,8 @@ pub enum IoResponse {
     Info(String),
     /// The list of connections changed (re-render the connection pane).
     Connections(Vec<(String, String, bool, bool)>),
+    /// A multi-step operation finished successfully (clears pending).
+    Done(String),
 }
 
 pub struct NetHandle {
@@ -135,6 +143,112 @@ fn handle_query(mgr: &mut TcpManager, line: String, tx: &Sender<IoResponse>) {
     }
 }
 
+fn handle_load(
+    mgr: &mut TcpManager,
+    lens: String,
+    path: String,
+    chunk: usize,
+    tx: &Sender<IoResponse>,
+) {
+    use std::fs::File;
+    use std::io::{BufRead, BufReader};
+
+    use crate::commands::{flush_chunk, parse_csv_line};
+
+    let conn = match mgr.active_mut() {
+        Some(c) => c,
+        None => {
+            let _ = tx.send(IoResponse::Error(
+                "no active connection — use `connect <name> <host:port>`".into(),
+            ));
+            return;
+        }
+    };
+
+    let file = match File::open(&path) {
+        Ok(f) => f,
+        Err(e) => {
+            let _ = tx.send(IoResponse::Error(format!("open {path}: {e}")));
+            return;
+        }
+    };
+
+    match conn.send("START TRANSACTION") {
+        Err(e) => {
+            let _ = tx.send(IoResponse::Error(format!("io: {e}")));
+            return;
+        }
+        Ok(r) if r.is_err() => {
+            let _ = tx.send(IoResponse::Error(format!("START TRANSACTION: {r}")));
+            return;
+        }
+        Ok(_) => {}
+    }
+
+    let reader = BufReader::new(file);
+    let mut buffer: Vec<String> = Vec::with_capacity(chunk);
+    let mut total: u64 = 0;
+    let mut chunks_sent: u64 = 0;
+    let mut load_err: Option<String> = None;
+
+    'rows: for (lineno, raw) in reader.lines().enumerate() {
+        let raw = match raw {
+            Ok(r) => r,
+            Err(e) => {
+                load_err = Some(format!("read {path} line {}: {e}", lineno + 1));
+                break 'rows;
+            }
+        };
+        match parse_csv_line(&raw, &path, lineno) {
+            Err(e) => {
+                load_err = Some(e);
+                break 'rows;
+            }
+            Ok(None) => continue,
+            Ok(Some(triple)) => buffer.push(triple),
+        }
+        if buffer.len() >= chunk
+            && let Err(e) = flush_chunk(conn, &lens, &mut buffer, &mut total, &mut chunks_sent)
+        {
+            load_err = Some(e);
+            break 'rows;
+        }
+    }
+
+    if load_err.is_none()
+        && let Err(e) = flush_chunk(conn, &lens, &mut buffer, &mut total, &mut chunks_sent)
+    {
+        load_err = Some(e);
+    }
+
+    if let Some(e) = load_err {
+        let _ = conn.send("ROLLBACK");
+        let _ = tx.send(IoResponse::Error(e));
+        return;
+    }
+
+    match conn.send("COMMIT") {
+        Err(e) => {
+            let _ = tx.send(IoResponse::Error(format!("io: {e}")));
+            return;
+        }
+        Ok(r) if r.is_err() => {
+            let _ = tx.send(IoResponse::Error(format!("COMMIT: {r}")));
+            return;
+        }
+        Ok(_) => {}
+    }
+
+    let s = format!(
+        "loaded {} rows into {} ({} chunk{})",
+        total,
+        lens,
+        chunks_sent,
+        if chunks_sent == 1 { "" } else { "s" }
+    );
+    let _ = tx.send(IoResponse::Done(s));
+}
+
 fn io_thread(rx: Receiver<IoRequest>, tx: Sender<IoResponse>) {
     let mut mgr = TcpManager::new();
     for req in rx {
@@ -146,6 +260,7 @@ fn io_thread(rx: Receiver<IoRequest>, tx: Sender<IoResponse>) {
             IoRequest::Disconnect(name) => handle_disconnect(&mut mgr, name, &tx),
             IoRequest::Use(name) => handle_use(&mut mgr, name, &tx),
             IoRequest::Query(line) => handle_query(&mut mgr, line, &tx),
+            IoRequest::Load { lens, path, chunk } => handle_load(&mut mgr, lens, path, chunk, &tx),
         }
     }
 }

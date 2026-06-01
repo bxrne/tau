@@ -213,7 +213,11 @@ pub fn use_command() -> Command {
 
 /// Parse one CSV data line (`start,end,value`) into a tau triple string.
 /// Returns `None` for blank lines or `#` comments; returns `Err` for malformed lines.
-fn parse_csv_line(raw: &str, path: &str, lineno: usize) -> Result<Option<String>, String> {
+pub(crate) fn parse_csv_line(
+    raw: &str,
+    path: &str,
+    lineno: usize,
+) -> Result<Option<String>, String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() || trimmed.starts_with('#') {
         return Ok(None);
@@ -236,7 +240,7 @@ fn parse_csv_line(raw: &str, path: &str, lineno: usize) -> Result<Option<String>
 
 /// Flush `buffer` to the server as one `APPEND` statement.  Updates `total`
 /// and `chunks` on success; returns `Err` on server rejection or I/O failure.
-fn flush_chunk(
+pub(crate) fn flush_chunk(
     conn: &mut crate::tcpmgr::Connection,
     lens: &str,
     buffer: &mut Vec<String>,
@@ -346,7 +350,7 @@ pub fn load_command() -> Command {
 }
 
 /// Build and send one `APPEND LENS <lens> s e v, s e v, ...` statement.
-fn ship(
+pub(crate) fn ship(
     conn: &mut crate::tcpmgr::Connection,
     lens: &str,
     taus: &[String],
