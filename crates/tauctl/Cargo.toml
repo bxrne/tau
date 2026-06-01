@@ -14,7 +14,6 @@ path = "src/main.rs"
 libtau.workspace = true
 clap.workspace = true
 rustls.workspace = true
-rustyline.workspace = true
 ratatui = "0.28"
 crossterm.workspace = true
 tui-textarea = { version = "0.6", features = ["crossterm"] }

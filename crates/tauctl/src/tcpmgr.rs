@@ -239,11 +239,6 @@ impl TcpManager {
         self.conns.get_mut(&name)
     }
 
-    /// Mutable handle to the named connection, regardless of active.
-    pub fn get_mut(&mut self, name: &str) -> Option<&mut Connection> {
-        self.conns.get_mut(name)
-    }
-
     /// `(name, addr, is_active, is_tls)` snapshot of every registered
     /// connection.
     pub fn list(&self) -> Vec<(String, String, bool, bool)> {

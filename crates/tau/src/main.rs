@@ -4,19 +4,52 @@
 //! username/password authentication.  One statement per line in; one response
 //! line out.
 //!
-//! # Security
+//! # Configuration
 //!
-//! * `--tls` - enables TLS. Provide `--tls-cert` / `--tls-key` PEM files or
-//!   omit both to generate an ephemeral self-signed certificate (dev only).
-//! * `--auth` - enables authentication. Requires `--username` and `--password`.
-//!   The first message from every client must be `AUTH <user> <pass>\n`.
-//! * `TAU_ENCRYPTION_KEY` env var - 64 hex chars (32 bytes). When set, WAL
-//!   entries are AES-256-GCM encrypted before being written to disk.
+//! The server reads `config.toml` in the current directory, or a path given
+//! with `--config PATH`.  All fields have built-in defaults; an absent config
+//! file starts an in-memory server on `127.0.0.1:7070`.
+//!
+//! Example config.toml:
+//!
+//! ```toml
+//! bind = "127.0.0.1:7070"
+//! log_level = "info"
+//! compact_threshold = 8
+//!
+//! [wal]
+//! enabled = true
+//! path = "/var/lib/tau/tau.wal"
+//! no_fsync_each = false
+//! no_rewrite_on_compact = false
+//! no_auto_checkpoint = false
+//!
+//! [tls]
+//! enabled = true
+//! cert = "/etc/tau/cert.pem"
+//! key  = "/etc/tau/key.pem"
+//!
+//! [auth]
+//! enabled = true
+//! username = "admin"
+//! password = "secret"
+//! # users_file = "/etc/tau/users"
+//!
+//! [metrics]
+//! port = 9100
+//!
+//! [limits]
+//! max_connections = 1024
+//! idle_timeout_secs = 300
+//! ```
+//!
+//! Set `TAU_ENCRYPTION_KEY` (64 hex chars = 32 bytes) for AES-256-GCM
+//! at-rest WAL encryption.
 //!
 //! # Wire format
 //!
 //! ```text
-//! → AUTH admin s3cr3t                  (if --auth is set)
+//! → AUTH admin s3cr3t                  (if [auth] enabled = true)
 //! ← OK
 //! → CREATE DATABASE main
 //! ← OK
@@ -57,120 +90,131 @@ use rustls::{
     pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
     server::ServerConnection,
 };
+use serde::Deserialize;
 use tracing::{debug, error, info, trace, warn};
 
 /// Tau time-series database TCP server.
 #[derive(Parser, Debug)]
-#[command(name = "tau")]
-#[command(author, version)]
+#[command(name = "tau", author, version)]
 #[command(about = "A time-series database TCP server", long_about = None)]
-pub struct Config {
-    /// TCP address to bind to (host:port).
-    #[arg(value_name = "ADDR", default_value = "127.0.0.1:7070")]
-    pub bind: String,
-
-    /// Enable write-ahead logging for durability.
-    #[arg(long)]
-    pub wal: bool,
-
-    /// Path for WAL file (required if --wal is set).
-    #[arg(short = 'w', long, value_name = "PATH")]
-    pub wal_path: Option<PathBuf>,
-
-    /// Log level (error, warn, info, debug, trace).
-    #[arg(short, long, default_value = "info")]
-    pub log_level: String,
-
-    /// Number of layers per lens before automatic compaction into one.
-    #[arg(long, default_value = "8")]
-    pub compact_threshold: usize,
-
-    /// Enable TLS (encryption in transit).
-    #[arg(long)]
-    pub tls: bool,
-
-    /// Path to PEM-encoded TLS certificate. Generates an ephemeral self-signed
-    /// cert when omitted (requires --tls).
+struct Cli {
+    /// Path to config.toml. Defaults to ./config.toml if present; uses built-in defaults otherwise.
     #[arg(long, value_name = "PATH")]
-    pub tls_cert: Option<PathBuf>,
+    config: Option<PathBuf>,
+}
 
-    /// Path to PEM-encoded TLS private key (requires --tls).
-    #[arg(long, value_name = "PATH")]
-    pub tls_key: Option<PathBuf>,
+#[derive(Deserialize, Debug)]
+#[serde(default)]
+struct Config {
+    bind: String,
+    log_level: String,
+    compact_threshold: usize,
+    wal: WalConfig,
+    tls: TlsConfig,
+    auth: AuthConfig,
+    metrics: MetricsConfig,
+    limits: LimitsConfig,
+}
 
-    /// Enable username/password authentication.  Without --users-file, a
-    /// single in-memory user is bootstrapped from --username/--password as a
-    /// global admin.  With --users-file, the file is the source of truth.
-    #[arg(long)]
-    pub auth: bool,
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            bind: "127.0.0.1:7070".to_string(),
+            log_level: "info".to_string(),
+            compact_threshold: 8,
+            wal: WalConfig::default(),
+            tls: TlsConfig::default(),
+            auth: AuthConfig::default(),
+            metrics: MetricsConfig::default(),
+            limits: LimitsConfig::default(),
+        }
+    }
+}
 
-    /// Username for the bootstrap admin (when --users-file is missing or new).
-    /// Requires --auth.
-    #[arg(long, value_name = "NAME")]
-    pub username: Option<String>,
+#[derive(Deserialize, Debug, Default)]
+#[serde(default)]
+struct WalConfig {
+    enabled: bool,
+    path: Option<PathBuf>,
+    no_fsync_each: bool,
+    no_rewrite_on_compact: bool,
+    no_auto_checkpoint: bool,
+}
 
-    /// Password for the bootstrap admin.  Hashed with argon2id at startup; the
-    /// plaintext is not retained.  Requires --auth.
-    #[arg(long, value_name = "PASS")]
-    pub password: Option<String>,
+#[derive(Deserialize, Debug, Default)]
+#[serde(default)]
+struct TlsConfig {
+    enabled: bool,
+    cert: Option<PathBuf>,
+    key: Option<PathBuf>,
+}
 
-    /// Persistent multi-user database file (plain text).  When set, loads
-    /// users on startup and persists every CREATE/DROP USER and GRANT/REVOKE
-    /// back to the file.  When the file does not yet exist, --username and
-    /// --password seed it with an initial global admin.
-    #[arg(long, value_name = "PATH")]
-    pub users_file: Option<PathBuf>,
+#[derive(Deserialize, Debug, Default)]
+#[serde(default)]
+struct AuthConfig {
+    enabled: bool,
+    username: Option<String>,
+    password: Option<String>,
+    users_file: Option<PathBuf>,
+}
 
-    /// Expose a Prometheus metrics endpoint on this port (e.g. 9100).
-    /// Serves GET /metrics in the text/plain; version=0.0.4 format.
-    /// Disabled when omitted.
-    #[arg(long, value_name = "PORT")]
-    pub metrics_port: Option<u16>,
+#[derive(Deserialize, Debug, Default)]
+#[serde(default)]
+struct MetricsConfig {
+    port: Option<u16>,
+}
 
-    /// Maximum number of concurrent client connections.  New connections that
-    /// would exceed the limit are accepted and immediately closed with an
-    /// `ERR server at connection limit` response so callers see a clear cause
-    /// and the OS does not silently queue the connection.
-    #[arg(long, value_name = "N", default_value_t = 1024)]
-    pub max_connections: usize,
+#[derive(Deserialize, Debug)]
+#[serde(default)]
+struct LimitsConfig {
+    max_connections: usize,
+    idle_timeout_secs: u64,
+}
 
-    /// Idle timeout per client connection, in seconds. Connections that go
-    /// this long without sending a complete line are closed. 0 disables.
-    #[arg(long, value_name = "SECS", default_value_t = 300)]
-    pub idle_timeout_secs: u64,
+impl Default for LimitsConfig {
+    fn default() -> Self {
+        Self {
+            max_connections: 1024,
+            idle_timeout_secs: 300,
+        }
+    }
+}
 
-    // These trade durability for throughput.  Use only on trusted, non-critical
-    // workloads or when an external durability boundary (e.g. a replica) exists.
-    /// Skip per-record WAL flush+sync_data.  The WAL is still written but only
-    /// synced to disk on a background interval, not on every APPEND.  Risk:
-    /// up to one flush interval of data loss on an unclean shutdown.
-    #[arg(long)]
-    pub no_fsync_each: bool,
-
-    /// After compaction, skip the full disk-file rewrite.  The file grows
-    /// until a manual checkpoint or restart; saves fsync cost on heavy-write
-    /// workloads.  Only affects the disk backend.
-    #[arg(long)]
-    pub no_rewrite_on_compact: bool,
-
-    /// After compaction, skip the WAL checkpoint rewrite.  The WAL grows
-    /// beyond the live layer set until the server restarts.
-    #[arg(long)]
-    pub no_auto_checkpoint: bool,
+fn load_config(cli_config: Option<PathBuf>) -> io::Result<Config> {
+    match cli_config {
+        Some(path) => {
+            let text = std::fs::read_to_string(&path).map_err(|e| {
+                io::Error::new(
+                    e.kind(),
+                    format!("failed to read {}: {}", path.display(), e),
+                )
+            })?;
+            toml::from_str(&text).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        }
+        None => {
+            let default_path = PathBuf::from("config.toml");
+            if default_path.exists() {
+                let text = std::fs::read_to_string(&default_path)?;
+                toml::from_str(&text).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+            } else {
+                Ok(Config::default())
+            }
+        }
+    }
 }
 
 fn build_executor(config: &Config, enc_key: Option<[u8; 32]>) -> io::Result<Arc<RwLock<Executor>>> {
-    let exec = if config.wal {
-        let wal_path = config.wal_path.clone().ok_or_else(|| {
+    let exec = if config.wal.enabled {
+        let wal_path = config.wal.path.clone().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "WAL enabled but no path provided (use -w/--wal-path)",
+                "[wal] enabled = true but no path set (add path = \"...\" under [wal])",
             )
         })?;
         info!(wal_path = %wal_path.display(), compact_threshold = config.compact_threshold, "starting with WAL");
         let mut e = Executor::with_wal_threshold(wal_path, config.compact_threshold, enc_key)?;
-        if config.no_fsync_each {
-            warn!("--no-fsync-each: WAL sync disabled — data may be lost on unclean shutdown");
+        if config.wal.no_fsync_each {
+            warn!("no_fsync_each: WAL sync disabled — data may be lost on unclean shutdown");
             e.set_wal_fsync_each(false);
         }
         e
@@ -186,7 +230,7 @@ fn build_executor(config: &Config, enc_key: Option<[u8; 32]>) -> io::Result<Arc<
 
     // Group-commit flush thread: when fsync-per-record is disabled, a
     // background thread syncs the WAL every 50 ms so durability lag is bounded.
-    if config.wal && config.no_fsync_each {
+    if config.wal.enabled && config.wal.no_fsync_each {
         let exec_weak = Arc::downgrade(&exec);
         thread::spawn(move || {
             while let Some(e) = exec_weak.upgrade() {
@@ -203,12 +247,12 @@ fn build_executor(config: &Config, enc_key: Option<[u8; 32]>) -> io::Result<Arc<
 }
 
 fn setup_auth(config: &Config, executor: &Arc<RwLock<Executor>>) -> io::Result<()> {
-    let mut store = match config.users_file.as_ref() {
+    let mut store = match config.auth.users_file.as_ref() {
         Some(path) => UserStore::open(path)?,
         None => UserStore::new(),
     };
     if store.names().is_empty()
-        && let (Some(u), Some(p)) = (config.username.as_ref(), config.password.as_ref())
+        && let (Some(u), Some(p)) = (config.auth.username.as_ref(), config.auth.password.as_ref())
     {
         let mut grants = HashMap::new();
         grants.insert("*".to_string(), Perm::ALL);
@@ -220,7 +264,7 @@ fn setup_auth(config: &Config, executor: &Arc<RwLock<Executor>>) -> io::Result<(
     if store.names().is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "--auth: no users configured. Provide --username/--password to bootstrap a global admin or supply a populated --users-file",
+            "[auth] enabled = true but no users configured. Add username/password or users_file under [auth]",
         ));
     }
     info!(users = store.names().len(), "authentication enabled");
@@ -281,7 +325,8 @@ fn accept_loop(
 }
 
 fn main() -> io::Result<()> {
-    let config = Config::parse();
+    let cli = Cli::parse();
+    let config = load_config(cli.config)?;
 
     let level = config.log_level.parse().unwrap_or(tracing::Level::INFO);
     tracing_subscriber::fmt()
@@ -299,21 +344,21 @@ fn main() -> io::Result<()> {
 
     let executor = build_executor(&config, enc_key)?;
 
-    let auth_enabled = config.auth;
+    let auth_enabled = config.auth.enabled;
     if auth_enabled {
         setup_auth(&config, &executor)?;
     }
 
-    let tls_config: Option<Arc<ServerConfig>> = if config.tls {
-        let server_cfg = build_tls_config(config.tls_cert.as_deref(), config.tls_key.as_deref())?;
-        info!(cert = ?config.tls_cert, key = ?config.tls_key, "TLS enabled");
+    let tls_config: Option<Arc<ServerConfig>> = if config.tls.enabled {
+        let server_cfg = build_tls_config(config.tls.cert.as_deref(), config.tls.key.as_deref())?;
+        info!(cert = ?config.tls.cert, key = ?config.tls.key, "TLS enabled");
         Some(Arc::new(server_cfg))
     } else {
         debug!("TLS disabled (plain TCP)");
         None
     };
 
-    if let Some(port) = config.metrics_port {
+    if let Some(port) = config.metrics.port {
         let metrics = executor
             .read()
             .expect("executor lock poisoned")
@@ -330,10 +375,10 @@ fn main() -> io::Result<()> {
     let listener = TcpListener::bind(&bind)?;
     info!(%bind, "tau server listening");
 
-    let idle_timeout = if config.idle_timeout_secs == 0 {
+    let idle_timeout = if config.limits.idle_timeout_secs == 0 {
         None
     } else {
-        Some(Duration::from_secs(config.idle_timeout_secs))
+        Some(Duration::from_secs(config.limits.idle_timeout_secs))
     };
 
     accept_loop(
@@ -341,7 +386,7 @@ fn main() -> io::Result<()> {
         executor,
         tls_config,
         auth_enabled,
-        config.max_connections,
+        config.limits.max_connections,
         idle_timeout,
     )
 }
@@ -488,7 +533,7 @@ fn build_tls_config(cert_path: Option<&Path>, key_path: Option<&Path>) -> io::Re
         _ => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "--tls-cert and --tls-key must both be provided (or both omitted for ephemeral)",
+                "tls.cert and tls.key must both be set (or both omitted for ephemeral)",
             ));
         }
     };
