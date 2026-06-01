@@ -873,4 +873,211 @@ mod tests {
         }));
         let _ = parse_auth_line(&input); // never panics; result may be None or Some
     }
+
+    #[test]
+    fn is_quit_cmd_recognizes_quit_and_exit() {
+        assert!(is_quit_cmd("QUIT"));
+        assert!(is_quit_cmd("quit"));
+        assert!(is_quit_cmd("Quit"));
+        assert!(is_quit_cmd("EXIT"));
+        assert!(is_quit_cmd("exit"));
+        assert!(is_quit_cmd("Exit"));
+    }
+
+    #[test]
+    fn is_quit_cmd_rejects_others() {
+        assert!(!is_quit_cmd(""));
+        assert!(!is_quit_cmd("QUIT NOW"));
+        assert!(!is_quit_cmd("AT LENS x 0"));
+        assert!(!is_quit_cmd("CREATE DATABASE x"));
+    }
+
+    #[hegel::test]
+    fn is_quit_cmd_false_for_arbitrary_non_quit(tc: TestCase) {
+        let s = tc.draw(
+            gs::text()
+                .max_size(32)
+                .filter(|s| !s.eq_ignore_ascii_case("QUIT") && !s.eq_ignore_ascii_case("EXIT")),
+        );
+        assert!(!is_quit_cmd(&s), "expected false for {s:?}");
+    }
+
+    fn metrics_response(request: &[u8]) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let metrics = exec().read().unwrap().metrics.clone();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            handle_metrics_request(&mut stream, &metrics);
+        });
+        let mut client = TcpStream::connect(addr).unwrap();
+        client.write_all(request).unwrap();
+        client.flush().unwrap();
+        let mut resp = String::new();
+        BufReader::new(&mut client)
+            .read_to_string(&mut resp)
+            .unwrap();
+        resp
+    }
+
+    #[test]
+    fn metrics_get_metrics_returns_200_with_content_type() {
+        let resp = metrics_response(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        assert!(resp.starts_with("HTTP/1.1 200 OK"), "got: {resp}");
+        assert!(resp.contains("text/plain; version=0.0.4"), "got: {resp}");
+    }
+
+    #[test]
+    fn metrics_get_healthz_returns_200() {
+        let resp = metrics_response(b"GET /healthz HTTP/1.1\r\n\r\n");
+        assert!(resp.starts_with("HTTP/1.1 200 OK"), "got: {resp}");
+        assert!(resp.contains("tau metrics endpoint ready"), "got: {resp}");
+    }
+
+    #[test]
+    fn metrics_get_root_returns_200() {
+        let resp = metrics_response(b"GET / HTTP/1.1\r\n\r\n");
+        assert!(resp.starts_with("HTTP/1.1 200 OK"), "got: {resp}");
+    }
+
+    #[test]
+    fn metrics_unknown_path_returns_404() {
+        let resp = metrics_response(b"GET /nope HTTP/1.1\r\n\r\n");
+        assert!(resp.starts_with("HTTP/1.1 404 Not Found"), "got: {resp}");
+    }
+
+    #[test]
+    fn metrics_post_returns_405() {
+        let resp = metrics_response(b"POST /metrics HTTP/1.1\r\n\r\n");
+        assert!(
+            resp.starts_with("HTTP/1.1 405 Method Not Allowed"),
+            "got: {resp}"
+        );
+    }
+
+    #[test]
+    fn metrics_head_metrics_returns_200_empty_body() {
+        let resp = metrics_response(b"HEAD /metrics HTTP/1.1\r\n\r\n");
+        assert!(resp.starts_with("HTTP/1.1 200 OK"), "got: {resp}");
+        let body_start = resp.find("\r\n\r\n").map(|i| i + 4).unwrap_or(resp.len());
+        assert_eq!(&resp[body_start..], "", "HEAD must have empty body");
+    }
+
+    #[test]
+    fn build_tls_config_fails_when_only_cert_provided() {
+        use std::path::Path;
+        let r = build_tls_config(Some(Path::new("/nonexistent/cert.pem")), None);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn build_tls_config_fails_when_only_key_provided() {
+        use std::path::Path;
+        let r = build_tls_config(None, Some(Path::new("/nonexistent/key.pem")));
+        assert!(r.is_err());
+    }
+
+    fn connected_pair() -> (TcpStream, TcpStream, SocketAddr) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr).unwrap();
+        let (server, peer) = listener.accept().unwrap();
+        (client, server, peer)
+    }
+
+    #[test]
+    fn run_query_loop_sends_ok_bye_on_quit() {
+        let (client, server, peer) = connected_pair();
+        let e = exec();
+        thread::spawn(move || {
+            let mut reader = BufReader::new(server);
+            let _ = run_query_loop(&mut reader, peer, &e, false);
+        });
+        let mut br = BufReader::new(client);
+        writeln!(br.get_mut(), "QUIT").unwrap();
+        br.get_mut().flush().unwrap();
+        let mut resp = String::new();
+        br.read_line(&mut resp).unwrap();
+        assert_eq!(resp.trim(), "OK BYE");
+    }
+
+    #[test]
+    fn run_query_loop_exit_also_sends_ok_bye() {
+        let (client, server, peer) = connected_pair();
+        let e = exec();
+        thread::spawn(move || {
+            let mut reader = BufReader::new(server);
+            let _ = run_query_loop(&mut reader, peer, &e, false);
+        });
+        let mut br = BufReader::new(client);
+        writeln!(br.get_mut(), "EXIT").unwrap();
+        br.get_mut().flush().unwrap();
+        let mut resp = String::new();
+        br.read_line(&mut resp).unwrap();
+        assert_eq!(resp.trim(), "OK BYE");
+    }
+
+    #[test]
+    fn run_query_loop_skips_empty_lines() {
+        let (client, server, peer) = connected_pair();
+        let e = exec();
+        thread::spawn(move || {
+            let mut reader = BufReader::new(server);
+            let _ = run_query_loop(&mut reader, peer, &e, false);
+        });
+        let mut br = BufReader::new(client);
+        writeln!(br.get_mut()).unwrap();
+        writeln!(br.get_mut(), "   ").unwrap();
+        writeln!(br.get_mut(), "CREATE DATABASE skip_test").unwrap();
+        br.get_mut().flush().unwrap();
+        let mut resp = String::new();
+        br.read_line(&mut resp).unwrap();
+        assert_eq!(resp.trim(), "OK");
+    }
+
+    #[test]
+    fn run_query_loop_auth_rejects_non_auth_first_message() {
+        use std::collections::HashMap;
+        let (client, server, peer) = connected_pair();
+        let e = exec();
+        {
+            let mut g = e.write().unwrap();
+            let mut grants = HashMap::new();
+            grants.insert("*".to_string(), Perm::ALL);
+            g.users.add(User::new("admin", "pw", grants)).unwrap();
+        }
+        thread::spawn(move || {
+            let mut reader = BufReader::new(server);
+            let _ = run_query_loop(&mut reader, peer, &e, true);
+        });
+        let mut br = BufReader::new(client);
+        writeln!(br.get_mut(), "CREATE DATABASE nope").unwrap();
+        br.get_mut().flush().unwrap();
+        let mut resp = String::new();
+        br.read_line(&mut resp).unwrap();
+        assert!(resp.contains("ERR authentication required"), "got: {resp}");
+    }
+
+    #[test]
+    fn run_query_loop_auth_rejects_wrong_credentials() {
+        use std::collections::HashMap;
+        let (client, server, peer) = connected_pair();
+        let e = exec();
+        {
+            let mut g = e.write().unwrap();
+            let mut grants = HashMap::new();
+            grants.insert("*".to_string(), Perm::ALL);
+            g.users.add(User::new("admin", "correct", grants)).unwrap();
+        }
+        thread::spawn(move || {
+            let mut reader = BufReader::new(server);
+            let _ = run_query_loop(&mut reader, peer, &e, true);
+        });
+        let mut br = BufReader::new(client);
+        writeln!(br.get_mut(), "AUTH admin wrong").unwrap();
+        br.get_mut().flush().unwrap();
+        let mut resp = String::new();
+        br.read_line(&mut resp).unwrap();
+        assert!(resp.contains("ERR authentication failed"), "got: {resp}");
+    }
 }

@@ -544,6 +544,8 @@ fn parse_val_response(resp: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hegel::TestCase;
+    use hegel::generators as gs;
     use pretty_assertions::assert_eq;
 
     fn cfg(backend: Backend, faults: bool, rows: Option<u64>) -> RunConfig {
@@ -678,5 +680,100 @@ mod tests {
         let r = Report::failure("oops".to_string());
         assert!(!r.ok);
         assert_eq!(r.error.as_deref(), Some("oops"));
+    }
+
+    #[hegel::test]
+    fn escaped_alphanumeric_is_identity(tc: TestCase) {
+        let s = tc.draw(gs::from_regex("[a-zA-Z0-9]+").fullmatch(true));
+        assert_eq!(escaped(&s), s);
+    }
+
+    #[hegel::test]
+    fn escaped_maps_non_alphanumeric_to_underscore(tc: TestCase) {
+        let s = tc.draw(gs::text().max_size(64));
+        let result = escaped(&s);
+        assert_eq!(s.chars().count(), result.chars().count());
+        for (orig, esc) in s.chars().zip(result.chars()) {
+            if orig.is_ascii_alphanumeric() {
+                assert_eq!(esc, orig);
+            } else {
+                assert_eq!(esc, '_');
+            }
+        }
+    }
+
+    #[test]
+    fn exec_result_ok_for_empty_output() {
+        assert!(exec_result(&Output::Empty).is_ok());
+    }
+
+    #[test]
+    fn exec_result_err_for_value_output() {
+        assert!(exec_result(&Output::Value(Some(Value::Int(0)))).is_err());
+    }
+
+    #[test]
+    fn parse_at_output_extracts_positive_int() {
+        assert_eq!(
+            parse_at_output(&Output::Value(Some(Value::Int(42)))),
+            Some(42)
+        );
+    }
+
+    #[test]
+    fn parse_at_output_extracts_negative_int() {
+        assert_eq!(
+            parse_at_output(&Output::Value(Some(Value::Int(-7)))),
+            Some(-7)
+        );
+    }
+
+    #[test]
+    fn parse_at_output_returns_none_for_nil() {
+        assert_eq!(parse_at_output(&Output::Value(None)), None);
+    }
+
+    #[test]
+    fn parse_at_output_returns_none_for_empty() {
+        assert_eq!(parse_at_output(&Output::Empty), None);
+    }
+
+    #[hegel::test]
+    fn parse_val_response_roundtrips_ints(tc: TestCase) {
+        let n = tc.draw(
+            gs::integers::<i64>()
+                .min_value(-1_000_000)
+                .max_value(1_000_000),
+        );
+        let resp = format!("VAL i{n}");
+        assert_eq!(parse_val_response(&resp), Some(n));
+    }
+
+    #[test]
+    fn parse_val_response_returns_none_for_err_response() {
+        assert_eq!(parse_val_response("ERR no such lens"), None);
+    }
+
+    #[test]
+    fn parse_val_response_returns_none_for_nil() {
+        assert_eq!(parse_val_response("VAL NIL"), None);
+    }
+
+    #[test]
+    fn parse_val_response_returns_none_for_ok() {
+        assert_eq!(parse_val_response("OK"), None);
+    }
+
+    #[test]
+    fn tcp_nano_passes() {
+        let r = run(&cfg(Backend::Tcp, false, None));
+        assert!(r.ok, "TCP nano failed: {:?}", r.error);
+    }
+
+    #[test]
+    fn tcp_nano_with_faults_passes() {
+        let r = run(&cfg(Backend::Tcp, true, Some(6_000)));
+        assert!(r.ok, "TCP+faults nano failed: {:?}", r.error);
+        assert!(r.result.unwrap().faults > 0);
     }
 }

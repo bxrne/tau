@@ -22,3 +22,5 @@ tempfile.workspace = true
 
 [dev-dependencies]
 pretty_assertions.workspace = true
+hegeltest.workspace = true
+hegeltest-macros.workspace = true
