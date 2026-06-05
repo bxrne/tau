@@ -6,6 +6,10 @@ license.workspace = true
 description.workspace = true
 publish = false
 
+[lib]
+name = "tau"
+path = "src/lib.rs"
+
 [[bin]]
 name = "tau"
 path = "src/main.rs"

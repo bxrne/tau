@@ -10,7 +10,7 @@ Three primitive types form everything:
 |------|-------------|
 | `Tau<V>` | An immutable value `V` over the half-open interval `[start, end)` |
 | `Layer<V>` | A sorted, non-overlapping batch of taus, `Arc`-backed so clones are pointer bumps |
-| `Lens<V>` | A named handle — `Base` (storage-backed) or `Derived(Eval<V>)` (lazy AST closure) |
+| lens | A named temporal function. **Base** lenses are storage-backed with a declared `Type`; **derived** lenses are a TauQL `Expr` AST evaluated lazily at query time (no caching). The executor tracks the two kinds in separate `DbState` maps — there is no single `Lens` type. |
 
 Layers are append-only; **newest-layer-wins** on overlap at query time. Auto-compaction merges N layers into one canonical layer when a per-lens threshold is crossed.
 
@@ -18,7 +18,7 @@ Layers are append-only; **newest-layer-wins** on overlap at query time. Auto-com
 
 | Module | Purpose |
 |--------|---------|
-| `model` | `Tau`, `Layer`, `Lens` — the core types |
+| `model` | `Tau`, `Layer` — the core temporal types |
 | `executor` | `Executor` — owns named databases, dispatches TauQL statements |
 | `query` | Pure query evaluator — `eval_lens`, `eval_expr`, aggregations |
 | `database` | `Database<V>` — wraps a store + optional WAL |

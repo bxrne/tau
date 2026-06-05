@@ -1,4 +1,3 @@
-**/target
 *.wal
 **/.hegel
 /docs/public/
@@ -9,3 +8,4 @@
 crates/fuzztau/artifacts
 crates/fuzztau/corpus
 
+/target

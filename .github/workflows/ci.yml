@@ -33,7 +33,29 @@ jobs:
           tool: nextest
       - run: cargo nextest run --release
 
+  dst:
+    name: DST (all libtau profiles + concurrent)
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+          cache-on-failure: "true"
+      - run: cargo test -p libdst -p dst --release
+      - name: DST smoke (--ci, seed 1)
+        run: RUST_LOG=warn cargo run --release --bin dst -- --ci --seed 1
+      - name: DST smoke (--ci, seed 2)
+        run: RUST_LOG=warn cargo run --release --bin dst -- --ci --seed 2 --concurrency 0
+      - name: DST standard tier
+        run: RUST_LOG=warn cargo run --release --bin dst -- --ci --seed 1 --tier standard
+      - name: DST nightly tier (wire/TLS/auth)
+        run: RUST_LOG=warn cargo run --release --bin dst -- --ci --seed 1 --tier nightly --concurrency 0
+
   container:
+    needs: dst
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

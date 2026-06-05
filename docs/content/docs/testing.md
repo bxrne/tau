@@ -4,7 +4,7 @@ date = 2026-05-28
 template = "page.html"
 +++
 
-Tau uses three distinct testing layers. Each one finds a different class of bug; together they provide confidence across correctness, input coverage, and emergent system behaviour.
+Tau uses four distinct testing layers. Each one finds a different class of bug; together they provide confidence across correctness, input coverage, emergent system behaviour, and crash recovery.
 
 ---
 
@@ -28,6 +28,8 @@ Tau uses three distinct testing layers. Each one finds a different class of bug;
 ```bash
 cargo nextest run --release                        # all tests (preferred)
 cargo nextest run --release --lib                  # libtau unit tests only
+cargo nextest run --release -p libdst              # DST framework tests
+cargo nextest run --release -p dst                 # Tau DST driver tests
 cargo nextest run --release -E 'binary(tau)'       # server tests only
 cargo nextest run --release -E 'binary(tauctl)'    # tauctl tests only
 cargo test --release                               # fallback if nextest is not installed
@@ -53,6 +55,7 @@ cargo test --release                               # fallback if nextest is not 
 - `Response::parse` never panics on arbitrary UTF-8 text
 - `Response::display → parse` roundtrip for `VAL`, `RANGE`, and `NAMES` variants
 - WAL rotation archive is replayable and contains pre-rotation layer state
+- `libdst` behavior-tree guards, deterministic scheduler, shrink correctness, and Tau oracle compaction / TTL properties
 
 **How to run:**
 
@@ -64,7 +67,25 @@ Hegel auto-installs a Python shim (`~/.cache/hegel`) on first run. Each property
 
 ---
 
-## Layer 3: Fuzz Testing (cargo-fuzz / LibFuzzer)
+## Layer 3: Deterministic Simulation Testing (libdst + dst)
+
+**Location:** `crates/libdst` (framework), `crates/dst` (Tau driver binary).
+
+**What they test:** End-to-end agreement between `libtau::Executor` and an independent reference oracle (no libtau code) under random workloads — including derived lenses, TTL, multi-database switching, WAL replay, and truncated-WAL recovery. Divergences are structured ([`Divergence`](https://github.com/bxrne/tau/tree/master/crates/libdst/src/divergence.rs)) with step index, description, and expected/got values. Failing traces are minimised via delta-debug shrinking.
+
+**How to run:**
+
+```bash
+cargo run --release --bin dst -- --seed 42
+RUST_LOG=warn cargo run --release --bin dst -- --ci --seed 42
+cargo test -p libdst -p dst
+```
+
+See [Deterministic Simulation Testing](/docs/dst/) for architecture and operation tables.
+
+---
+
+## Layer 4: Fuzz Testing (cargo-fuzz / LibFuzzer)
 
 **Location:** `crates/fuzztau/fuzz_targets/`
 
@@ -109,4 +130,5 @@ cargo +nightly fuzz run --fuzz-dir crates/fuzztau wire crates/fuzztau/artifacts/
 |-------|----------------|-------------|
 | Unit tests | Regressions on known-shape behaviour | Always (CI) |
 | Hegel PBT | Invariant violations across random inputs | Always (inline with unit tests) |
+| libdst / dst | SUT vs reference divergence under emergent workloads | CI (after nextest, before Docker) |
 | cargo-fuzz | Panics and crashes from adversarial byte sequences | On demand / nightly CI |

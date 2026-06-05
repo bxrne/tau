@@ -70,7 +70,7 @@ fn is_quit_cmd(s: &str) -> bool {
 /// Enforces authentication (when `auth_enabled`) as the very first exchange,
 /// then routes every subsequent statement through `exec_as` so the matched
 /// user's per-database CRUDA grants are enforced.
-pub(crate) fn run_query_loop<S: Read + Write>(
+pub fn run_query_loop<S: Read + Write>(
     reader: &mut BufReader<S>,
     peer: SocketAddr,
     exec: &Arc<RwLock<Executor>>,

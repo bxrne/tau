@@ -8,6 +8,7 @@ pub(crate) mod query;
 pub mod storage;
 pub(crate) mod users;
 pub(crate) mod value;
+pub mod wall_clock;
 pub(crate) mod wire;
 
 pub use database::Database;
@@ -15,6 +16,7 @@ pub use executor::{ExecError, Executor, LayerInfo, Output, StorageBackend};
 pub use metrics::Metrics;
 pub use model::{Layer, LayerId, Tau, Timestamp};
 pub use ql::{AggFunc, Stmt, needs_registry_lock, parse};
+pub use query::{at_layers, collect_bounds_from_layers};
 pub use storage::{Disk, InMemory, Wal};
 pub use users::{Perm, User, UserStore};
 pub use value::Value;

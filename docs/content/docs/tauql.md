@@ -300,7 +300,7 @@ Point lookup restricted to a single layer identified by its integer ID. Returns 
 
 ```
 HISTORY LENS temperature
-→ LAYERS 3; 1:0:0:3600 2:0:3600:7200 3:0:7200:10800
+→ LAYERS 3; 1:0:0:3600; 2:0:3600:7200; 3:0:7200:10800
 
 AT LENS temperature 1800 LAYER 1
 → VAL f18.5
@@ -363,23 +363,24 @@ Requires `R` permission.
 
 ### `HISTORY LENS <name> [<start> <end>]`
 
-Lists all layers for a lens, optionally filtered to those whose time range overlaps `[start, end)`. Returns layer metadata: ID, write timestamp, earliest start, latest end, and tau count.
+Lists all layers for a lens, optionally filtered to those whose time range overlaps `[start, end)`. Returns layer metadata: ID, write timestamp, earliest start, and latest end.
 
 ```
 HISTORY LENS cpu
-→ LAYERS 3; 1:1717000000000:0:3600:60 2:1717001000000:3600:7200:60 3:1717002000000:7200:10800:60
+→ LAYERS 3; 1:1717000000000:0:3600; 2:1717001000000:3600:7200; 3:1717002000000:7200:10800
 
 HISTORY LENS cpu 3600 7200
-→ LAYERS 1; 2:1717001000000:3600:7200:60
+→ LAYERS 1; 2:1717001000000:3600:7200
 ```
 
-Response format: `LAYERS <n>; <id>:<written_at>:<min_start>:<max_end>:<tau_count>; …`
+Response format: `LAYERS <n>; <id>:<written_at>:<min_start>:<max_end>; …`
 
 - `id` — monotonic layer identifier assigned at write time
 - `written_at` — wall-clock milliseconds since Unix epoch (`0` for legacy WAL entries)
 - `min_start` — earliest tau start in the layer
 - `max_end` — latest tau end in the layer
-- `tau_count` — number of taus in the layer
+
+The per-layer tau count is not carried on the wire — it stays server-side in the `LayerInfo` struct.
 
 Requires `R` permission.
 
@@ -550,7 +551,7 @@ min(cpu, -3600, 0)  ← minimum cpu over the last hour
 | `RANGE <n>; <s>:<e>:<v>; ...` | `n` segments from `RANGE` |
 | `NAMES <n>; <name>; ...` | List from `SHOW DATABASES`, `SHOW LENSES`, `SHOW USERS` |
 | `GRANTS <n>; <user> <db>:<perms>; ...` | Output of `SHOW GRANTS` |
-| `LAYERS <n>; <id>:<written_at>:<min>:<max>:<count>; ...` | Layer metadata from `HISTORY LENS` |
+| `LAYERS <n>; <id>:<written_at>:<min>:<max>; ...` | Layer metadata from `HISTORY LENS` |
 | `STATUS <n>; <key>:<value>; ...` | Key-value pairs from `SHOW STATUS` |
 | `ERR <message>` | Parse, executor, or permission error |
 

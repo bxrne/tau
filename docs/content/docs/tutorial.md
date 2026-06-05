@@ -122,10 +122,10 @@ The aggregate now reflects the correction.
 
 ```
 τ: HISTORY LENS temperature
-→ LAYERS 2; 1:<ts>:0:7200:2 2:<ts>:0:3600:1
+→ LAYERS 2; 1:<ts>:0:7200; 2:<ts>:0:3600
 ```
 
-Each entry: `<layer_id>:<written_at_ms>:<min_start>:<max_end>:<tau_count>`.
+Each entry: `<layer_id>:<written_at_ms>:<min_start>:<max_end>`.
 
 To see what the lens looked like before the correction, query against a specific layer:
 
@@ -197,7 +197,7 @@ After compaction:
 
 ```
 τ: HISTORY LENS temperature
-→ LAYERS 1; 4:<ts>:0:7200:3
+→ LAYERS 1; 4:<ts>:0:7200
 ```
 
 The lens now has one canonical layer containing three taus: `[0,1800)`, `[1800,3600)`, `[3600,7200)`. Every previous `AT`, `RANGE`, and `REDUCE` result is identical — compaction is a provable normalisation, checked by property tests on every build.

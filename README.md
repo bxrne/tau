@@ -7,7 +7,7 @@
 3. **TauQL.** A tiny query language. One statement in, one response line out. Derived lenses compose as lazy closures. Rolling window aggregations are first class expressions.
 4. **Library or server.** Embed `libtau` in a Rust process or run the standalone TCP server. Same engine.
 
-Time series data is not static. Sensors drift. Prices get restated. Audit records get amended. Tau models this directly. Values live in intervals `[start, end)` that tile without gaps or overlap. Corrections append as new layers. The newest layer wins at query time. Compaction collapses any stack of layers into a single canonical form with every query result preserved exactly. The invariants that make this correct are not asserted by hand. They are verified by randomised property tests and a deterministic simulation tester driven against a reference oracle.
+Time series data is not static. Sensors drift. Prices get restated. Audit records get amended. Tau models this directly. Values live in intervals `[start, end)` that tile without gaps or overlap. Corrections append as new layers. The newest layer wins at query time. Compaction collapses any stack of layers into a single canonical form with every query result preserved exactly. The invariants that make this correct are not asserted by hand. They are verified by randomised property tests and [`libdst`](crates/libdst/) — a deterministic simulation testing framework with closure-based behavior trees, structured divergence reporting, and delta-debug shrinking — exercised on Tau by the [`dst`](crates/dst/) driver against an independent reference oracle that shares no code with `libtau`.
 
 **Documentation:** [tau.bxrne.com](https://tau.bxrne.com)
 
@@ -70,7 +70,8 @@ VAL f20.5                                # aggregate reflects the correction
 - [TauQL Reference](https://tau.bxrne.com/docs/tauql/). Every statement and operator.
 - [How it works](https://tau.bxrne.com/docs/how-it-works/). Storage, WAL, compaction, concurrency.
 - [Configuration](https://tau.bxrne.com/docs/configuration/). TOML config file reference.
-- [Testing](https://tau.bxrne.com/docs/testing/). Property based tests and unit anchors.
+- [Testing](https://tau.bxrne.com/docs/testing/). Property based tests, unit anchors, and DST.
+- [DST](https://tau.bxrne.com/docs/dst/). `libdst` framework and the Tau `dst` driver.
 
 
 ## Development
@@ -84,6 +85,8 @@ cargo run --release --bin tauctl          # interactive client
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo nextest run --release               # preferred runner (used in CI)
+cargo run --release --bin dst -- --seed 42   # deterministic simulation test (Tau)
+cargo test -p libdst -p dst               # DST framework + Tau driver unit/PBT tests
 
 # Parser fuzzing (requires nightly + cargo-fuzz)
 cargo install cargo-fuzz

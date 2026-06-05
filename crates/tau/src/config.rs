@@ -43,7 +43,7 @@ use std::path::PathBuf;
 
 #[derive(Deserialize, Serialize, Debug, PartialEq, Clone)]
 #[serde(default)]
-pub(crate) struct Config {
+pub struct Config {
     pub(crate) bind: String,
     pub(crate) log_level: String,
     pub(crate) compact_threshold: usize,
