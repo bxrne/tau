@@ -11,25 +11,43 @@ Time series data is not static. Sensors drift. Prices get restated. Audit record
 
 **Documentation:** [tau.bxrne.com](https://tau.bxrne.com)
 
-> **Work in progress.** No tagged release or container image has been published yet. The API and wire format are liable to change without notice.
+
+## Install
+
+```bash
+# From a release binary (Linux x86_64)
+curl -fsSL https://github.com/bxrne/tau/releases/latest/download/tau-x86_64-linux -o tau
+chmod +x tau && sudo mv tau /usr/local/bin/
+
+# The interactive client
+curl -fsSL https://github.com/bxrne/tau/releases/latest/download/tauctl-x86_64-linux -o tauctl
+chmod +x tauctl && sudo mv tauctl /usr/local/bin/
+
+# Via cargo install (builds from source)
+cargo install --git https://github.com/bxrne/tau tau
+cargo install --git https://github.com/bxrne/tau tauctl
+
+# Docker
+docker pull ghcr.io/bxrne/tau:latest
+docker run -p 7070:7070 ghcr.io/bxrne/tau:latest
+```
 
 
 ## Quick start
 
 ```bash
-# From source — no config file needed, starts in-memory on 127.0.0.1:7070
-git clone https://github.com/bxrne/tau && cd tau
-cargo run --release --bin tau
+# No config file needed — starts in-memory on 127.0.0.1:7070
+tau
 
 # With a config file
 cp config.toml my.toml && $EDITOR my.toml
-cargo run --release --bin tau -- --config my.toml
+tau --config my.toml
 ```
 
 Connect with the interactive client (`tauctl`) and try a correction:
 
 ```bash
-cargo run --release --bin tauctl
+tauctl
 τ connect demo 127.0.0.1:7070
 τ CREATE DATABASE sensors
 τ CREATE LENS temperature float
@@ -58,6 +76,11 @@ VAL f20.5                                # aggregate reflects the correction
 ## Development
 
 ```bash
+# Run from source (developer workflow)
+git clone https://github.com/bxrne/tau && cd tau
+cargo run --release --bin tau             # in-memory server on 127.0.0.1:7070
+cargo run --release --bin tauctl          # interactive client
+
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo nextest run --release               # preferred runner (used in CI)

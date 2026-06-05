@@ -2,6 +2,17 @@
 
 Interactive TUI client for tau databases.
 
+## Install
+
+```bash
+# Release binary (Linux x86_64)
+curl -fsSL https://github.com/bxrne/tau/releases/latest/download/tauctl-x86_64-linux -o tauctl
+chmod +x tauctl && sudo mv tauctl /usr/local/bin/
+
+# Via cargo install (builds from source)
+cargo install --git https://github.com/bxrne/tau tauctl
+```
+
 ## TUI
 
 Launches a ratatui TUI when stdout is a TTY. Exits with an error if stdout is not a terminal.
@@ -24,6 +35,9 @@ Any other input is forwarded as a TauQL statement to the active connection.
 ## Running
 
 ```bash
+tauctl
+
+# From source (developer workflow)
 cargo run --release --bin tauctl
 ```
 
