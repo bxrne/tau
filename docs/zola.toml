@@ -33,9 +33,10 @@ main_menu = [
           {url="/docs/overview/", name="Overview"},
           {url="/docs/how-it-works/", name="How it works"},
           {url="/docs/tauql/", name="TauQL"},
+          {url="/docs/dst/", name="DST"},
+          {url="/docs/testing/", name="Testing"},
           {url="/docs/configuration/", name="Configuration"},
           {url="/docs/containers/", name="Containers"},
-          {url="/docs/testing/", name="Testing"},
 ]
 
 menu_more = "show more"

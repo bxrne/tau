@@ -82,6 +82,20 @@ impl Response {
         matches!(self, Response::Err(_))
     }
 
+    /// Map a wire response back to executor output (for DST / clients).
+    pub fn into_output(self) -> Result<Output, ExecError> {
+        match self {
+            Response::Ok => Ok(Output::Empty),
+            Response::Val(v) => Ok(Output::Value(v)),
+            Response::Range(segs) => Ok(Output::Range(segs)),
+            Response::Names(n) => Ok(Output::Names(n)),
+            Response::Grants(g) => Ok(Output::Grants(g)),
+            Response::Layers(l) => Ok(Output::LayerHistory(l)),
+            Response::Status(kv) => Ok(Output::Status(kv)),
+            Response::Err(msg) => Err(decode_exec_error(&msg)),
+        }
+    }
+
     /// Parse one response line (a trailing newline is tolerated).
     pub fn parse(line: &str) -> Result<Response, WireError> {
         let line = line.trim_end_matches(['\n', '\r']);
@@ -244,6 +258,22 @@ impl fmt::Display for Response {
 }
 
 /// Render an [`ExecError`] to its wire message (without the `ERR ` prefix).
+fn decode_exec_error(msg: &str) -> ExecError {
+    if let Some(name) = msg.strip_prefix("unknown lens: ") {
+        return ExecError::UnknownLens(name.into());
+    }
+    if let Some(name) = msg.strip_prefix("unknown database: ") {
+        return ExecError::UnknownDatabase(name.into());
+    }
+    if msg == "transaction already active" {
+        return ExecError::TransactionAlreadyActive;
+    }
+    if msg == "no active transaction" {
+        return ExecError::NoActiveTransaction;
+    }
+    ExecError::InvalidExpr(msg.into())
+}
+
 pub fn encode_error(e: &ExecError) -> String {
     match e {
         ExecError::NoActiveDatabase => "no active database".into(),

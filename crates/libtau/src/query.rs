@@ -51,12 +51,22 @@ pub(crate) fn would_cycle(
     false
 }
 
+fn ttl_cutoff(state: &DbState, lens: &str) -> Option<Timestamp> {
+    state
+        .ttl_secs
+        .get(lens)
+        .map(|&secs| crate::wall_clock::now_secs() - secs)
+}
+
 pub(crate) fn eval_lens(
     state: &DbState,
     name: &str,
     t: Timestamp,
 ) -> Result<Option<Value>, ExecError> {
     if state.base_types.contains_key(name) {
+        if ttl_cutoff(state, name).is_some_and(|c| t < c) {
+            return Ok(None);
+        }
         Ok(state.db.at_name(name, t))
     } else if let Some(expr) = state.derived.get(name) {
         eval_expr(state, expr, t)
@@ -322,7 +332,7 @@ pub(crate) fn build_range_segments(
 /// Uses each layer's `min_start`/`max_end` range to skip non-covering layers
 /// before chasing the Arc pointer into the tau slice.
 #[inline]
-pub(crate) fn at_layers(layers: &[Layer<Value>], t: Timestamp) -> Option<Value> {
+pub fn at_layers(layers: &[Layer<Value>], t: Timestamp) -> Option<Value> {
     layers
         .iter()
         .rev()
@@ -335,7 +345,7 @@ pub(crate) fn at_layers(layers: &[Layer<Value>], t: Timestamp) -> Option<Value> 
         .cloned()
 }
 
-pub(crate) fn collect_bounds_from_layers(
+pub fn collect_bounds_from_layers(
     layers: &[Layer<Value>],
     start: Timestamp,
     end: Timestamp,

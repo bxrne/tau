@@ -15,7 +15,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::handler::run_query_loop;
 
-pub(crate) fn build_tls_config(
+pub fn build_tls_config(
     cert_path: Option<&Path>,
     key_path: Option<&Path>,
 ) -> io::Result<ServerConfig> {
@@ -60,7 +60,7 @@ pub(crate) fn build_tls_config(
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
-pub(crate) fn accept_loop(
+pub fn accept_loop(
     listener: TcpListener,
     executor: Arc<RwLock<Executor>>,
     tls_config: Option<Arc<ServerConfig>>,
@@ -75,8 +75,7 @@ pub(crate) fn accept_loop(
             Ok(stream) => {
                 let peer = stream
                     .peer_addr()
-                    .map(|a| a.to_string())
-                    .unwrap_or_else(|_| "?".into());
+                    .unwrap_or_else(|_| "0.0.0.0:0".parse().expect("fallback addr"));
                 let in_flight = active_connections.fetch_add(1, Ordering::AcqRel) + 1;
                 shared_metrics.set_active_connections(in_flight as u64);
                 if in_flight > connection_limit {
@@ -98,7 +97,9 @@ pub(crate) fn accept_loop(
                 thread::Builder::new()
                     .name("tau-conn".into())
                     .spawn(move || {
-                        if let Err(e) = handle(stream, exec, tls, auth_enabled, idle_timeout) {
+                        if let Err(e) =
+                            handle_connection(stream, peer, exec, tls, auth_enabled, idle_timeout)
+                        {
                             warn!(error = %e, "connection ended with error");
                         }
                         let remaining = active_clone.fetch_sub(1, Ordering::AcqRel) - 1;
@@ -112,14 +113,14 @@ pub(crate) fn accept_loop(
     Ok(())
 }
 
-fn handle(
+pub fn handle_connection(
     stream: TcpStream,
+    peer: std::net::SocketAddr,
     exec: Arc<RwLock<Executor>>,
     tls_config: Option<Arc<ServerConfig>>,
     auth_enabled: bool,
     idle_timeout: Option<Duration>,
 ) -> io::Result<()> {
-    let peer = stream.peer_addr()?;
     stream.set_nodelay(true)?;
     if let Some(timeout) = idle_timeout {
         stream.set_read_timeout(Some(timeout))?;

@@ -7,6 +7,8 @@ on:
       - 'tau-v*'
       - 'tauctl-v*'
       - 'libtau-v*'
+      - 'libdst-v*'
+      - 'dst-v*'
 
 permissions:
   contents: write

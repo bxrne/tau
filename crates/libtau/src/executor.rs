@@ -242,15 +242,11 @@ pub struct Executor {
     started_at: std::time::Instant,
 }
 
-fn now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
-}
-
 fn ttl_cutoff(state: &DbState, lens: &str) -> Option<Timestamp> {
-    state.ttl_secs.get(lens).map(|&secs| now_secs() - secs)
+    state
+        .ttl_secs
+        .get(lens)
+        .map(|&secs| crate::wall_clock::now_secs() - secs)
 }
 
 fn apply_offset_limit<T>(v: Vec<T>, offset: Option<usize>, limit: Option<usize>) -> Vec<T> {

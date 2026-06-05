@@ -81,6 +81,8 @@ VAL i45
 - [Overview](/docs/overview/). The data model.
 - [How it works](/docs/how-it-works/). Storage, WAL, compaction, concurrency.
 - [TauQL reference](/docs/tauql/). Every statement and operator.
+- [DST](/docs/dst/). `libdst` framework and Tau `dst` driver.
+- [Testing](/docs/testing/). Unit tests, Hegel PBT, DST, and fuzzing.
 - [Configuration](/docs/configuration/). All flags and environment variables.
 
 ---

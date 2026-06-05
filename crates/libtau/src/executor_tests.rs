@@ -1548,6 +1548,26 @@ fn ttl_hides_expired_range_queries() {
 }
 
 #[test]
+fn ttl_on_base_operand_hides_derived_lens_values() {
+    let mut e = Executor::new();
+    run(&mut e, "CREATE DATABASE main").unwrap();
+    run(&mut e, "CREATE LENS a int").unwrap();
+    run(&mut e, "CREATE LENS b int").unwrap();
+    run(&mut e, "APPEND LENS a 0 5000 10").unwrap();
+    run(&mut e, "APPEND LENS b 0 5000 20").unwrap();
+    run(&mut e, "DERIVE LENS ds AS a + b").unwrap();
+    run(&mut e, "SET TTL LENS a 1").unwrap();
+    let Output::Value(v) = run(&mut e, "AT LENS ds 1000").unwrap() else {
+        panic!()
+    };
+    assert_eq!(v, None, "TTL on operand a should hide derived ds at t");
+    let Output::Range(segs) = run(&mut e, "RANGE LENS ds 0 2000").unwrap() else {
+        panic!()
+    };
+    assert!(segs.is_empty(), "TTL on operand should empty derived range");
+}
+
+#[test]
 fn unset_ttl_restores_visibility() {
     let mut e = Executor::new();
     run(&mut e, "CREATE DATABASE main").unwrap();

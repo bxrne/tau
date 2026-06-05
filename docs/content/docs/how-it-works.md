@@ -28,7 +28,7 @@ The cost is that every query must resolve which layer wins at each point in time
 
 ## Architecture
 
-Tau is structured as a library (`libtau`) consumed by three binaries: the TCP server (`tau`), the interactive client (`tauctl`, ratatui TUI with `--headless` fallback). The library exposes a clean `Executor` API; auth, TLS, and network concerns live exclusively in the server.
+Tau is structured as a library (`libtau`) consumed by two binaries: the TCP server (`tau`) and the interactive client (`tauctl`, a ratatui TUI with a `--headless` fallback). The library exposes a clean `Executor` API; auth, TLS, and network concerns live exclusively in the server.
 
 ```
 Stmt → Executor → Database<Value> → Store<V> + optional Wal
@@ -66,18 +66,18 @@ Layers are immutable once created. Cloning a layer is an atomic reference-count 
 
 Within the slice, a binary search (`partition_point` on `tau.end <= t`) locates the candidate in O(log n).
 
-### `Lens<V>`
+### Lenses
 
-A named temporal function: either a `Base` lens backed by a store, or a `Derived` lens backed by a lazy closure.
+A lens is a named temporal function. It is not a single type — the executor tracks the two kinds in separate maps on each `DbState`:
 
 ```
-Lens::Base          # delegates to the store layer stack
-Lens::Derived(f)    # f: Arc<dyn Fn(Timestamp) -> Option<V>>
+base_types: HashMap<name, Type>   # base lens — declared value type; data lives in the store
+derived:    HashMap<name, Expr>   # derived lens — the TauQL expression AST
 ```
 
-Derived lenses are closures compiled at `DERIVE` time. At query time they call `f(t)`. The closure captures references to other lenses so derivations chain: `DERIVE c AS a + b` compiles into a closure that calls the closures of `a` and `b`.
+A **base** lens delegates to the store's layer stack for its declared `Type`. A **derived** lens stores the parsed `Expr` directly; there is no compilation step and no caching. At query time `eval_expr` walks the AST live, resolving identifier nodes to other lenses, so derivations chain: `DERIVE c AS a + b` re-evaluates `a` and `b` at the requested timestamp on every lookup.
 
-Cycle detection runs at `DERIVE` time by walking the dependency graph.
+Cycle detection runs at `DERIVE` time by walking the dependency graph (`would_cycle`).
 
 ---
 
