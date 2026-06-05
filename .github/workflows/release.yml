@@ -1,16 +1,33 @@
-name: Publish
+name: Release
 
 on:
-  release:
-    types: [published]
+  push:
+    branches: [master]
+    tags:
+      - 'tau-v*'
+      - 'tauctl-v*'
+      - 'libtau-v*'
 
 permissions:
   contents: write
   packages: write
+  pull-requests: write
 
 jobs:
-  # Detect which crate was released and emit outputs for downstream jobs.
+  # Runs on every push to master — opens/updates a release PR per crate.
+  release-please:
+    if: github.ref_type == 'branch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+          token: ${{ secrets.RELEASE_TOKEN }}
+
+  # Detect which crate the tag belongs to and emit outputs for downstream jobs.
   prepare:
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     outputs:
       binary: ${{ steps.detect.outputs.binary }}
@@ -22,19 +39,19 @@ jobs:
         run: |
           TAG="${GITHUB_REF_NAME}"
           if [[ "$TAG" == tau-v* ]]; then
-            echo "binary=tau"          >> "$GITHUB_OUTPUT"
-            echo "version=${TAG#tau-v}" >> "$GITHUB_OUTPUT"
-            echo "is_tau=true"         >> "$GITHUB_OUTPUT"
-            echo "has_binary=true"     >> "$GITHUB_OUTPUT"
+            echo "binary=tau"               >> "$GITHUB_OUTPUT"
+            echo "version=${TAG#tau-v}"     >> "$GITHUB_OUTPUT"
+            echo "is_tau=true"             >> "$GITHUB_OUTPUT"
+            echo "has_binary=true"         >> "$GITHUB_OUTPUT"
           elif [[ "$TAG" == tauctl-v* ]]; then
-            echo "binary=tauctl"             >> "$GITHUB_OUTPUT"
-            echo "version=${TAG#tauctl-v}"   >> "$GITHUB_OUTPUT"
-            echo "is_tau=false"              >> "$GITHUB_OUTPUT"
-            echo "has_binary=true"           >> "$GITHUB_OUTPUT"
+            echo "binary=tauctl"           >> "$GITHUB_OUTPUT"
+            echo "version=${TAG#tauctl-v}" >> "$GITHUB_OUTPUT"
+            echo "is_tau=false"            >> "$GITHUB_OUTPUT"
+            echo "has_binary=true"         >> "$GITHUB_OUTPUT"
           else
-            echo "binary="        >> "$GITHUB_OUTPUT"
-            echo "version="       >> "$GITHUB_OUTPUT"
-            echo "is_tau=false"   >> "$GITHUB_OUTPUT"
+            echo "binary="         >> "$GITHUB_OUTPUT"
+            echo "version="        >> "$GITHUB_OUTPUT"
+            echo "is_tau=false"    >> "$GITHUB_OUTPUT"
             echo "has_binary=false" >> "$GITHUB_OUTPUT"
           fi
 
