@@ -2,6 +2,21 @@
 
 The TCP server binary. Exposes a `libtau` executor over a line-oriented TCP protocol.
 
+## Install
+
+```bash
+# Release binary (Linux x86_64)
+curl -fsSL https://github.com/bxrne/tau/releases/latest/download/tau-x86_64-linux -o tau
+chmod +x tau && sudo mv tau /usr/local/bin/
+
+# Via cargo install (builds from source)
+cargo install --git https://github.com/bxrne/tau tau
+
+# Docker
+docker pull ghcr.io/bxrne/tau:latest
+docker run -p 7070:7070 ghcr.io/bxrne/tau:latest
+```
+
 ## Configuration
 
 The server reads `config.toml` in the current working directory, or a path supplied with `--config`:
@@ -48,7 +63,7 @@ on disk; without it an encrypted WAL cannot be replayed.
 
 ```bash
 export TAU_ENCRYPTION_KEY=$(openssl rand -hex 32)
-cargo run --release --bin tau -- --config /etc/tau/config.toml
+tau --config /etc/tau/config.toml
 ```
 
 See [docs/configuration](https://tau.bxrne.com/docs/configuration/) for the full reference.
@@ -87,6 +102,10 @@ Lock routing in `handle_query`:
 ## Running
 
 ```bash
+tau                          # in-memory, defaults
+tau --config cfg.toml        # with config file
+
+# From source (developer workflow)
 cargo run --release --bin tau                       # in-memory, defaults
 cargo run --release --bin tau -- --config cfg.toml  # with config file
 ```

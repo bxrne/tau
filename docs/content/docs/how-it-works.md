@@ -170,7 +170,7 @@ The split is intentional: embedding Tau as a library bypasses auth entirely. Aut
 
 TauQL is a line-oriented command language: one statement in, one response line out. The grammar is minimal: no implicit join, no subquery. Multi-statement atomicity is provided by `START TRANSACTION / COMMIT / ROLLBACK`.
 
-The parser is a `nom` combinator in `libtau::ql::parser`. Adding a new statement requires changes to four files: `ast.rs` (new variant + `Display`), `parser.rs` (production + `alt` entry), `executor.rs` (handler + `check_permission` arm), and `libtau::wire` (`Response::from_output` and `Response::parse`). See `CONTRIBUTING.md` for the step-by-step checklist.
+The parser is a `nom` combinator in `libtau::ql::parser`. Adding a new statement requires changes to four files: `ast.rs` (new variant + `Display`), `parser.rs` (production + `alt` entry), `executor.rs` (handler + `check_permission` arm), and `libtau::wire` (`Response::from_output` and `Response::parse`).
 
 Operator precedence from low to high: `||`, `&&`, comparison, additive, multiplicative, unary, primary.
 

@@ -16,7 +16,7 @@ $EDITOR tau-config.toml
 docker compose up -d
 
 # Connect via tauctl
-cargo run --release --bin tauctl
+tauctl
 # τ connect prod 127.0.0.1:7070
 # τ AUTH admin <your password from tau-config.toml>
 
@@ -66,7 +66,7 @@ encryption key) belong in `.env`. Copy `.env.example` to `.env` and fill in:
 ```sh
 docker pull ghcr.io/bxrne/tau:latest
 # Pin to a release tag for reproducibility
-docker pull ghcr.io/bxrne/tau:latest
+docker pull ghcr.io/bxrne/tau:v0.1.0
 ```
 
 `docker-compose.yml` uses `ghcr.io/bxrne/tau:${TAU_IMAGE_TAG:-latest}` by default.

@@ -39,17 +39,31 @@ The second `APPEND` is a correction. The original layer is still on disk. The ne
 
 ## Get started
 
-Build from source (no tagged release or container image published yet):
+Install the server and client:
 
 ```bash
-git clone https://github.com/bxrne/tau && cd tau
-cargo run --release --bin tau          # in-memory server on 127.0.0.1:7070
+# Release binary (Linux x86_64)
+curl -fsSL https://github.com/bxrne/tau/releases/latest/download/tau-x86_64-linux -o tau
+chmod +x tau && sudo mv tau /usr/local/bin/
+
+# Or via cargo
+cargo install --git https://github.com/bxrne/tau tau
+
+# Or via Docker
+docker pull ghcr.io/bxrne/tau:latest
+docker run -p 7070:7070 ghcr.io/bxrne/tau:latest
+```
+
+Start an in-memory server on `127.0.0.1:7070`:
+
+```bash
+tau
 ```
 
 Connect with `tauctl`:
 
 ```bash
-cargo run --release --bin tauctl
+tauctl
 τ: connect demo 127.0.0.1:7070
 τ: CREATE DATABASE demo
 τ: CREATE LENS cpu int
