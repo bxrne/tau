@@ -1,0 +1,161 @@
+name: Publish
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  # Detect which crate was released and emit outputs for downstream jobs.
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      binary: ${{ steps.detect.outputs.binary }}
+      version: ${{ steps.detect.outputs.version }}
+      is_tau: ${{ steps.detect.outputs.is_tau }}
+      has_binary: ${{ steps.detect.outputs.has_binary }}
+    steps:
+      - id: detect
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if [[ "$TAG" == tau-v* ]]; then
+            echo "binary=tau"          >> "$GITHUB_OUTPUT"
+            echo "version=${TAG#tau-v}" >> "$GITHUB_OUTPUT"
+            echo "is_tau=true"         >> "$GITHUB_OUTPUT"
+            echo "has_binary=true"     >> "$GITHUB_OUTPUT"
+          elif [[ "$TAG" == tauctl-v* ]]; then
+            echo "binary=tauctl"             >> "$GITHUB_OUTPUT"
+            echo "version=${TAG#tauctl-v}"   >> "$GITHUB_OUTPUT"
+            echo "is_tau=false"              >> "$GITHUB_OUTPUT"
+            echo "has_binary=true"           >> "$GITHUB_OUTPUT"
+          else
+            echo "binary="        >> "$GITHUB_OUTPUT"
+            echo "version="       >> "$GITHUB_OUTPUT"
+            echo "is_tau=false"   >> "$GITHUB_OUTPUT"
+            echo "has_binary=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # Cross-compile for all four platforms and attach binaries to the release.
+  build-binaries:
+    needs: prepare
+    if: needs.prepare.outputs.has_binary == 'true'
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            suffix: x86_64-linux
+            cross: false
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            suffix: aarch64-linux
+            cross: true
+          - os: macos-13
+            target: x86_64-apple-darwin
+            suffix: x86_64-macos
+            cross: false
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            suffix: aarch64-macos
+            cross: false
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install musl tools
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get install -y musl-tools
+
+      - name: Install cross
+        if: matrix.cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: Build
+        env:
+          BINARY: ${{ needs.prepare.outputs.binary }}
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }} --bin "$BINARY"
+          else
+            cargo build --release --target ${{ matrix.target }} --bin "$BINARY"
+          fi
+          cp "target/${{ matrix.target }}/release/${BINARY}" "${BINARY}-${{ matrix.suffix }}"
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ needs.prepare.outputs.binary }}-${{ matrix.suffix }}
+
+  # Build and push multi-arch Docker image for tau server releases only.
+  docker:
+    needs: prepare
+    if: needs.prepare.outputs.is_tau == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: container/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/tau:${{ needs.prepare.outputs.version }}
+            ghcr.io/${{ github.repository_owner }}/tau:latest
+
+  # Append curl download instructions to the release notes once binaries are uploaded.
+  install-instructions:
+    needs: [prepare, build-binaries]
+    if: needs.prepare.outputs.has_binary == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Append install instructions
+        env:
+          BINARY: ${{ needs.prepare.outputs.binary }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ github.ref_name }}"
+          REPO="${{ github.repository }}"
+          BASE="https://github.com/${REPO}/releases/download/${TAG}"
+
+          gh release view "$TAG" --repo "$REPO" --json body -q .body > /tmp/notes.md
+
+          printf '\n---\n\n## Install\n\n' >> /tmp/notes.md
+
+          printf '**Linux x86_64**\n```bash\ncurl -fsSL %s/%s-x86_64-linux -o %s\nchmod +x %s && sudo mv %s /usr/local/bin/\n```\n\n' \
+            "$BASE" "$BINARY" "$BINARY" "$BINARY" "$BINARY" >> /tmp/notes.md
+
+          printf '**Linux aarch64**\n```bash\ncurl -fsSL %s/%s-aarch64-linux -o %s\nchmod +x %s && sudo mv %s /usr/local/bin/\n```\n\n' \
+            "$BASE" "$BINARY" "$BINARY" "$BINARY" "$BINARY" >> /tmp/notes.md
+
+          printf '**macOS x86_64**\n```bash\ncurl -fsSL %s/%s-x86_64-macos -o %s\nchmod +x %s && sudo mv %s /usr/local/bin/\n```\n\n' \
+            "$BASE" "$BINARY" "$BINARY" "$BINARY" "$BINARY" >> /tmp/notes.md
+
+          printf '**macOS aarch64 (Apple Silicon)**\n```bash\ncurl -fsSL %s/%s-aarch64-macos -o %s\nchmod +x %s && sudo mv %s /usr/local/bin/\n```\n' \
+            "$BASE" "$BINARY" "$BINARY" "$BINARY" "$BINARY" >> /tmp/notes.md
+
+          gh release edit "$TAG" --repo "$REPO" --notes-file /tmp/notes.md
