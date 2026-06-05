@@ -1,6 +1,6 @@
 [package]
 name = "tau"
-version = "0.0.0" # x-release-please-version
+version = "0.1.0" # x-release-please-version
 edition.workspace = true
 license.workspace = true
 description.workspace = true
