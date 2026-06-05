@@ -61,10 +61,7 @@
         {%- endif -%}
 
         <div class="{{ container }}">
-            <div class="wip-banner">
-                Work in progress &mdash; no tagged release or container image has been published yet. The API and wire format are liable to change without notice.
-            </div>
-            {%- block header -%}
+{%- block header -%}
                 {{ header::header() }}
             {%- endblock header -%}
             <div class="content">

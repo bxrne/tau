@@ -12,17 +12,23 @@ The scenario: a temperature sensor was miscalibrated for the first hour of a dep
 
 ## Prerequisites
 
-Build and start the server:
+Install the server and client (see [the README](https://github.com/bxrne/tau#install) for release binaries, `cargo install`, and Docker):
 
 ```bash
-git clone https://github.com/bxrne/tau && cd tau
-cargo run --release --bin tau
+cargo install --git https://github.com/bxrne/tau tau
+cargo install --git https://github.com/bxrne/tau tauctl
+```
+
+Start the server:
+
+```bash
+tau
 ```
 
 In a second terminal, open the client:
 
 ```bash
-cargo run --release --bin tauctl
+tauctl
 ```
 
 ---

@@ -1,6 +1,7 @@
 +++
 title = "Containers"
 date = 2026-05-28
+weight = 60
 template = "page.html"
 +++
 
@@ -8,14 +9,31 @@ Tau ships a production Docker stack: **Tau + Prometheus + Grafana**, wired up ou
 
 ---
 
-## Quick start
+## Docker (standalone)
 
 ```bash
 docker pull ghcr.io/bxrne/tau:latest
-docker run --rm -p 7070:7070 \
-  -v $PWD/config.toml:/data/config.toml:ro \
+
+# Ephemeral, in-memory, defaults
+docker run --rm -p 7070:7070 ghcr.io/bxrne/tau:latest
+
+# With a config file and a named volume for data persistence (WAL + users DB)
+docker run -d --name tau \
+  -p 7070:7070 -p 9100:9100 \
+  -v tau_data:/data \
+  -v "$PWD/config.toml:/data/config.toml:ro" \
+  -e TAU_ENCRYPTION_KEY="$(openssl rand -hex 32)" \
   ghcr.io/bxrne/tau:latest --config /data/config.toml
 ```
+
+The image is a `scratch` base with a single static musl binary; its entrypoint is
+`/tau` and it defaults to `--config /data/config.toml`. The `/data` directory is a
+declared volume — mount a named volume or host path there to persist the WAL and
+the users database across restarts.
+
+| env var | purpose |
+|---------|---------|
+| `TAU_ENCRYPTION_KEY` | 64 hex chars (32 bytes); enables AES-256-GCM encryption at rest for the WAL and disk store |
 
 For the full observability stack:
 
@@ -31,16 +49,39 @@ $EDITOR tau-config.toml
 docker compose up -d
 ```
 
-Connect:
+Connect with `tauctl` (install it from a release binary or `cargo install --git https://github.com/bxrne/tau tauctl`):
 
 ```bash
-cargo run --release --bin tauctl
+tauctl
 τ connect prod 127.0.0.1:7070
 τ AUTH admin <your password from tau-config.toml>
 τ CREATE DATABASE sensors
 ```
 
 Open Grafana: `http://localhost:3000` (credentials from your `.env`).
+
+---
+
+## Compose services
+
+`container/docker-compose.yml` defines three services on an internal bridge network:
+
+| service | image | role |
+|---------|-------|------|
+| `tau` | `ghcr.io/bxrne/tau` | The database. Mounts `tau_data:/data` for the WAL and users DB. Exposes 7070 (TauQL) and 9100 (metrics). |
+| `prometheus` | `prom/prometheus` | Scrapes `tau:9100/metrics`, evaluates `prometheus/alerts.yml`. Web UI on 9090. |
+| `grafana` | `grafana/grafana` | Dashboards from `grafana/provisioning`. Web UI on 3000. Credentials from `GRAFANA_USER`/`GRAFANA_PASSWORD`. |
+
+Tag defaults to `latest`; pin with `TAU_IMAGE_TAG=v0.1.0` in `.env`.
+
+Host-visible ports default to `127.0.0.1` so nothing is exposed beyond loopback unless you override the bind addresses in `.env`:
+
+| port | service | purpose |
+|------|---------|---------|
+| 7070 | tau | TauQL query port (TCP, optionally TLS) |
+| 9100 | tau | Prometheus `/metrics` and `/healthz` |
+| 9090 | prometheus | Prometheus web UI |
+| 3000 | grafana | Grafana dashboards |
 
 ---
 
@@ -165,7 +206,7 @@ Panels: Overview · Throughput · Latency · Security · Resources.
 **Client-side (file on your laptop)** — use tauctl's `load` command:
 
 ```bash
-cargo run --release --bin tauctl
+tauctl
 τ connect prod 127.0.0.1:7070
 τ AUTH admin <pass>
 τ CREATE DATABASE metrics
@@ -270,7 +311,7 @@ kubectl get svc tau --watch
 
 ```bash
 ADDR=$(kubectl get svc tau -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-cargo run --release --bin tauctl
+tauctl
 τ connect k8s ${ADDR}:7070
 ```
 

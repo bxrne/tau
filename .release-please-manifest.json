@@ -1,0 +1,5 @@
+{
+  "crates/libtau": "0.0.0",
+  "crates/tau": "0.0.0",
+  "crates/tauctl": "0.0.0"
+}
