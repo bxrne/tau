@@ -9,4 +9,4 @@ Tau is a Cargo workspace. One engine library, two binaries, and one fuzz harness
 | [`tauctl`](tauctl/README.md) | binary (`tauctl`) | Interactive client: named connection pool, client-side CSV load. |
 | [`fuzztau`](fuzztau/README.md) | fuzz harness | LibFuzzer targets for `libtau::parse` and `libtau::Response::parse`; requires a nightly toolchain. |
 
-Binary names are unique across the workspace, so `cargo run --bin tau|tauctl` works from the repo root. See [`CONTRIBUTING.md`](../CONTRIBUTING.md) for build instructions.
+Binary names are unique across the workspace, so `cargo run --bin tau|tauctl` works from the repo root.

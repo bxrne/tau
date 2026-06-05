@@ -90,7 +90,6 @@ cargo install cargo-fuzz
 cargo +nightly fuzz run parse             # run from repo root
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for full setup and workflow details.
 
 
 ## License
