@@ -1,8 +1,10 @@
 name: Publish
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - 'tau-v*'
+      - 'libtau-v*'
 
 permissions:
   contents: write
