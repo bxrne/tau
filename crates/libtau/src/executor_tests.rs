@@ -1619,7 +1619,8 @@ fn show_status_wire_roundtrip() {
 
 /// Disk backend: schema DDL (CREATE/DERIVE) and layer data survive a restart.
 /// The "restart" drops the executor and opens a fresh one over the same dir.
-/// Nine appends force a compaction, which is the disk backend's flush trigger.
+/// A single append (no compaction) must persist — the backend flushes on every
+/// write — so one tau is queryable afterwards with no re-issued DDL.
 #[test]
 fn disk_backend_persists_schema_and_data_across_restart() {
     let dir = tempfile::tempdir().unwrap();
@@ -1629,18 +1630,7 @@ fn disk_backend_persists_schema_and_data_across_restart() {
         run(&mut e, "CREATE DATABASE main").unwrap();
         run(&mut e, "CREATE LENS temp int").unwrap();
         run(&mut e, "DERIVE LENS hot AS temp > 20").unwrap();
-        for i in 0..=(threshold as i64) {
-            run(
-                &mut e,
-                &format!(
-                    "APPEND LENS temp {} {} {}",
-                    i * 1000,
-                    i * 1000 + 1000,
-                    i * 10
-                ),
-            )
-            .unwrap();
-        }
+        run(&mut e, "APPEND LENS temp 0 1000 42").unwrap();
     }
     // Fresh executor over the same directory; re-opening replays the schema.
     let mut e = Executor::with_disk_backend(dir.path(), threshold, 3, None).unwrap();
@@ -1649,10 +1639,10 @@ fn disk_backend_persists_schema_and_data_across_restart() {
     // Base + derived lenses are queryable with no re-issued DDL.
     assert_eq!(
         run(&mut e, "AT LENS temp 500").unwrap(),
-        Output::Value(Some(Value::Int(0)))
+        Output::Value(Some(Value::Int(42)))
     );
     assert_eq!(
-        run(&mut e, "AT LENS hot 8500").unwrap(),
+        run(&mut e, "AT LENS hot 500").unwrap(),
         Output::Value(Some(Value::Bool(true)))
     );
     let Output::Names(lenses) = run(&mut e, "SHOW LENSES").unwrap() else {
@@ -1672,18 +1662,12 @@ fn disk_backend_persists_ttl_across_restart() {
         run(&mut e, "CREATE DATABASE main").unwrap();
         run(&mut e, "CREATE LENS old int").unwrap();
         run(&mut e, "SET TTL LENS old 10").unwrap();
-        // Data far in the past (relative to wall clock); compaction forces a flush.
-        for i in 0..=(threshold as i64) {
-            run(
-                &mut e,
-                &format!("APPEND LENS old {} {} {}", i * 1000, i * 1000 + 1000, i),
-            )
-            .unwrap();
-        }
+        // Data far in the past relative to the wall clock; persisted immediately.
+        run(&mut e, "APPEND LENS old 0 1000 7").unwrap();
     }
     let mut e = Executor::with_disk_backend(dir.path(), threshold, 3, None).unwrap();
     run(&mut e, "CREATE DATABASE main").unwrap();
-    // With the TTL replayed, the ancient datum is hidden (would be Some(0) otherwise).
+    // With the TTL replayed, the ancient datum is hidden (would be Some(7) otherwise).
     assert_eq!(run(&mut e, "AT LENS old 500").unwrap(), Output::Value(None));
 }
 
