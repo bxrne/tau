@@ -465,7 +465,7 @@ mod tests {
     // CREATE LENS + DERIVE LENS are the two statements that round-trip through
     // Display (they're persisted in the schema WAL and replayed on startup).
     #[hegel::test]
-    fn create_lens_display_roundtrips(tc: TestCase) {
+    fn pbt_create_lens_display_roundtrips(tc: TestCase) {
         let name = tc.draw(ident_gen());
         let ty = tc.draw(gs::sampled_from(vec![
             Type::Int,
@@ -484,7 +484,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn derive_lens_display_roundtrips(tc: TestCase) {
+    fn pbt_derive_lens_display_roundtrips(tc: TestCase) {
         let name = tc.draw(ident_gen());
         let src = tc.draw(ident_gen());
         let stmt = Stmt::Derive {

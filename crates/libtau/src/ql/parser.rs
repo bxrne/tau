@@ -784,7 +784,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn parse_never_panics_on_arbitrary_input(tc: TestCase) {
+    fn pbt_parse_never_panics_on_arbitrary_input(tc: TestCase) {
         let s = tc.draw(gs::text().max_size(256));
         // The parser must return an `IResult` for every possible input - no
         // panics, no infinite loops, no allocation explosions.
@@ -792,7 +792,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn create_database_roundtrips(tc: TestCase) {
+    fn pbt_create_database_roundtrips(tc: TestCase) {
         let name = tc.draw(ident_gen());
         assert_eq!(
             parsed(&format!("CREATE DATABASE {name}")),
@@ -801,7 +801,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn drop_database_roundtrips(tc: TestCase) {
+    fn pbt_drop_database_roundtrips(tc: TestCase) {
         let name = tc.draw(ident_gen());
         assert_eq!(
             parsed(&format!("DROP DATABASE {name}")),
@@ -810,7 +810,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn use_database_roundtrips(tc: TestCase) {
+    fn pbt_use_database_roundtrips(tc: TestCase) {
         let name = tc.draw(ident_gen());
         assert_eq!(
             parsed(&format!("USE DATABASE {name}")),
@@ -819,7 +819,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn create_lens_roundtrips_for_every_type(tc: TestCase) {
+    fn pbt_create_lens_roundtrips_for_every_type(tc: TestCase) {
         let name = tc.draw(ident_gen());
         let (kw, ty) = tc.draw(type_keyword_gen());
         assert_eq!(
@@ -829,20 +829,20 @@ mod tests {
     }
 
     #[hegel::test]
-    fn drop_lens_roundtrips(tc: TestCase) {
+    fn pbt_drop_lens_roundtrips(tc: TestCase) {
         let name = tc.draw(ident_gen());
         assert_eq!(parsed(&format!("DROP LENS {name}")), Stmt::Drop { name });
     }
 
     #[hegel::test]
-    fn at_lens_roundtrips_with_any_timestamp(tc: TestCase) {
+    fn pbt_at_lens_roundtrips_with_any_timestamp(tc: TestCase) {
         let name = tc.draw(ident_gen());
         let t = tc.draw(gs::integers::<i64>());
         assert_eq!(parsed(&format!("AT LENS {name} {t}")), Stmt::At { name, t });
     }
 
     #[hegel::test]
-    fn range_lens_roundtrips_without_filter(tc: TestCase) {
+    fn pbt_range_lens_roundtrips_without_filter(tc: TestCase) {
         let name = tc.draw(ident_gen());
         let start = tc.draw(
             gs::integers::<i64>()
@@ -868,7 +868,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn reduce_roundtrips_for_every_func(tc: TestCase) {
+    fn pbt_reduce_roundtrips_for_every_func(tc: TestCase) {
         let name = tc.draw(ident_gen());
         let start = tc.draw(
             gs::integers::<i64>()
@@ -893,7 +893,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn append_lens_int_roundtrips(tc: TestCase) {
+    fn pbt_append_lens_int_roundtrips(tc: TestCase) {
         let name = tc.draw(ident_gen());
         let s = tc.draw(
             gs::integers::<i64>()
@@ -916,7 +916,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn append_lens_bool_and_null_roundtrip(tc: TestCase) {
+    fn pbt_append_lens_bool_and_null_roundtrip(tc: TestCase) {
         let name = tc.draw(ident_gen());
         let b = tc.draw(gs::booleans());
         let null_or_bool = tc.draw(gs::booleans());
@@ -935,7 +935,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn keywords_are_case_insensitive(tc: TestCase) {
+    fn pbt_keywords_are_case_insensitive(tc: TestCase) {
         let name = tc.draw(ident_gen());
         let upper = format!("CREATE LENS {name} int");
         let lower = upper.to_lowercase();
@@ -945,7 +945,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn extra_whitespace_is_tolerated(tc: TestCase) {
+    fn pbt_extra_whitespace_is_tolerated(tc: TestCase) {
         let pad_a = " ".repeat(tc.draw(gs::integers::<usize>().min_value(0).max_value(8)));
         let pad_b = " ".repeat(tc.draw(gs::integers::<usize>().min_value(1).max_value(8)));
         let pad_c = " ".repeat(tc.draw(gs::integers::<usize>().min_value(1).max_value(8)));
@@ -961,7 +961,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn parse_rejects_unknown_leading_token(tc: TestCase) {
+    fn pbt_parse_rejects_unknown_leading_token(tc: TestCase) {
         let junk = tc.draw(gs::from_regex("[A-Z]{3,8}").fullmatch(true).filter(|s| {
             !matches!(
                 s.as_str(),

@@ -167,7 +167,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn tau_new_preserves_fields_for_any_valid_range(tc: TestCase) {
+    fn pbt_tau_new_preserves_fields_for_any_valid_range(tc: TestCase) {
         let t = tc.draw(tau_gen());
         assert!(t.start < t.end);
         assert!(t.contains(t.start));
@@ -175,7 +175,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn tau_contains_iff_in_half_open_range(tc: TestCase) {
+    fn pbt_tau_contains_iff_in_half_open_range(tc: TestCase) {
         let t = tc.draw(tau_gen());
         let probe = tc.draw(gs::integers::<i64>());
         let expected = t.start <= probe && probe < t.end;
@@ -189,7 +189,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn layer_new_sorts_taus(tc: TestCase) {
+    fn pbt_layer_new_sorts_taus(tc: TestCase) {
         let taus = tc.draw(non_overlapping_taus());
         // Even after deliberate shuffling via a sort permutation, Layer::new
         // re-establishes start-order.
@@ -200,7 +200,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn layer_bounds_match_first_and_last(tc: TestCase) {
+    fn pbt_layer_bounds_match_first_and_last(tc: TestCase) {
         let taus = tc.draw(non_overlapping_taus().filter(|v| !v.is_empty()));
         let layer = Layer::new(1, taus);
         assert_eq!(layer.min_start, layer.taus.first().unwrap().start);
@@ -208,7 +208,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn layer_empty_has_sentinel_bounds(tc: TestCase) {
+    fn pbt_layer_empty_has_sentinel_bounds(tc: TestCase) {
         let _ = tc;
         let layer: Layer<i32> = Layer::new(1, vec![]);
         assert_eq!(layer.min_start, Timestamp::MAX);
@@ -217,7 +217,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn layer_at_matches_linear_scan(tc: TestCase) {
+    fn pbt_layer_at_matches_linear_scan(tc: TestCase) {
         let taus = tc.draw(non_overlapping_taus());
         let probe = tc.draw(gs::integers::<i64>().min_value(-10_000).max_value(10_000));
         let layer = Layer::new(1, taus.clone());

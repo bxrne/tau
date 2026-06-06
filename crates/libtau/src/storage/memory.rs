@@ -127,7 +127,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn empty_store_returns_none_for_any_lens(tc: TestCase) {
+    fn pbt_empty_store_returns_none_for_any_lens(tc: TestCase) {
         let lens = tc.draw(gs::text().max_size(16));
         let t = tc.draw(gs::integers::<i64>());
         let store: InMemory<i32> = InMemory::new();
@@ -136,7 +136,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn append_then_at_matches_layer_lookup(tc: TestCase) {
+    fn pbt_append_then_at_matches_layer_lookup(tc: TestCase) {
         let taus = tc.draw(taus_gen().filter(|v| !v.is_empty()));
         let probe = tc.draw(gs::integers::<i64>().min_value(-5).max_value(500));
         let mut store: InMemory<i8> = InMemory::with_threshold(1024);
@@ -150,7 +150,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn newest_layer_wins(tc: TestCase) {
+    fn pbt_newest_layer_wins(tc: TestCase) {
         let stack = tc.draw(layer_stack_gen());
         let probe = tc.draw(gs::integers::<i64>().min_value(-10).max_value(500));
         let mut store: InMemory<i8> = InMemory::with_threshold(1024);
@@ -161,7 +161,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn compaction_preserves_point_lookups(tc: TestCase) {
+    fn pbt_compaction_preserves_point_lookups(tc: TestCase) {
         let stack = tc.draw(layer_stack_gen());
         let probe = tc.draw(gs::integers::<i64>().min_value(-10).max_value(500));
 
@@ -173,7 +173,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn compaction_never_grows_layer_count(tc: TestCase) {
+    fn pbt_compaction_never_grows_layer_count(tc: TestCase) {
         let stack = tc.draw(layer_stack_gen());
         let before_len = stack.len();
         let mut compacted = stack;
@@ -182,7 +182,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn compaction_yields_at_most_one_layer(tc: TestCase) {
+    fn pbt_compaction_yields_at_most_one_layer(tc: TestCase) {
         let stack = tc.draw(layer_stack_gen().filter(|v| !v.is_empty()));
         let mut compacted = stack;
         compact_layers(&mut compacted);
@@ -190,7 +190,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn compaction_layer_has_non_overlapping_taus(tc: TestCase) {
+    fn pbt_compaction_layer_has_non_overlapping_taus(tc: TestCase) {
         let stack = tc.draw(layer_stack_gen());
         let mut compacted = stack;
         compact_layers(&mut compacted);
@@ -202,7 +202,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn compaction_merges_adjacent_equal_values(tc: TestCase) {
+    fn pbt_compaction_merges_adjacent_equal_values(tc: TestCase) {
         let stack = tc.draw(layer_stack_gen().filter(|v| v.len() >= 2));
         let mut compacted = stack;
         compact_layers(&mut compacted);
@@ -216,7 +216,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn compaction_triggers_above_threshold(tc: TestCase) {
+    fn pbt_compaction_triggers_above_threshold(tc: TestCase) {
         // For any threshold k and any (k+1) single-tau layers, the store
         // ends with at most one layer (compaction always runs).
         let k = tc.draw(gs::integers::<usize>().min_value(1).max_value(16));
@@ -230,7 +230,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn lenses_are_independent(tc: TestCase) {
+    fn pbt_lenses_are_independent(tc: TestCase) {
         let a_taus = tc.draw(taus_gen().filter(|v| !v.is_empty()));
         let b_taus = tc.draw(taus_gen().filter(|v| !v.is_empty()));
         let probe = tc.draw(gs::integers::<i64>().min_value(-5).max_value(500));
@@ -245,7 +245,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn append_returns_did_compact_consistent_with_layer_count(tc: TestCase) {
+    fn pbt_append_returns_did_compact_consistent_with_layer_count(tc: TestCase) {
         // append() returns true iff post-append len < prior+1, i.e. compaction
         // shortened the stack.
         let k = tc.draw(gs::integers::<usize>().min_value(1).max_value(8));

@@ -268,7 +268,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn type_name_matches_variant(tc: TestCase) {
+    fn pbt_type_name_matches_variant(tc: TestCase) {
         let v = tc.draw(value_gen());
         let expected = match &v {
             Value::Int(_) => "int",
@@ -281,7 +281,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn ty_returns_type_for_non_null(tc: TestCase) {
+    fn pbt_ty_returns_type_for_non_null(tc: TestCase) {
         let v = tc.draw(value_gen());
         match (&v, v.ty()) {
             (Value::Int(_), Some(Type::Int)) => {}
@@ -294,7 +294,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn from_literal_owned_and_ref_agree(tc: TestCase) {
+    fn pbt_from_literal_owned_and_ref_agree(tc: TestCase) {
         let v = tc.draw(value_gen());
         let lit: Literal = match v.clone() {
             Value::Int(i) => Literal::Int(i),
@@ -310,7 +310,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn codec_roundtrips_every_value(tc: TestCase) {
+    fn pbt_codec_roundtrips_every_value(tc: TestCase) {
         let v = tc.draw(value_gen());
         // Float NaN is filtered out by the generator; for everything else
         // PartialEq must hold across encode + decode.
@@ -320,7 +320,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn codec_encode_into_matches_encode(tc: TestCase) {
+    fn pbt_codec_encode_into_matches_encode(tc: TestCase) {
         let v = tc.draw(value_gen());
         let mut buf = String::new();
         v.encode_into(&mut buf);
@@ -328,7 +328,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn codec_str_encoding_never_contains_separators(tc: TestCase) {
+    fn pbt_codec_str_encoding_never_contains_separators(tc: TestCase) {
         let s = tc.draw(gs::text().max_size(128));
         let v = Value::Str(Arc::from(s.as_str()));
         let enc = v.encode();
@@ -345,13 +345,13 @@ mod tests {
     }
 
     #[hegel::test]
-    fn codec_decode_never_panics_on_arbitrary_input(tc: TestCase) {
+    fn pbt_codec_decode_never_panics_on_arbitrary_input(tc: TestCase) {
         let s = tc.draw(gs::text().max_size(128));
         let _ = Value::decode(&s);
     }
 
     #[hegel::test]
-    fn codec_rejects_unknown_or_malformed_tags(tc: TestCase) {
+    fn pbt_codec_rejects_unknown_or_malformed_tags(tc: TestCase) {
         // Any first byte outside the known tag set must yield None.
         let known: [char; 5] = ['i', 'f', 's', 'b', 'n'];
         let tag = tc.draw(gs::characters().filter(move |c| !known.contains(c)));

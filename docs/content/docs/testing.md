@@ -63,7 +63,7 @@ cargo test --release                               # fallback if nextest is not 
 cargo nextest run --release   # Hegel runs inline alongside example tests
 ```
 
-Hegel auto-installs a Python shim (`~/.cache/hegel`) on first run. Each property runs 100+ randomised cases by default. Use `HEGEL_MAX_EXAMPLES=500` to increase the draw count.
+All such tests are named `pbt_*` for easy log filtering. Hegel auto-installs a Python shim (`~/.cache/hegel`) on first run. Each property runs 100+ randomised cases by default. Use `HEGEL_MAX_EXAMPLES=500` to increase the draw count.
 
 ---
 

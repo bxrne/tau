@@ -897,7 +897,7 @@ fn appends_within_transaction_not_visible_before_commit() {
 }
 
 #[hegel::test]
-fn committed_transaction_matches_direct_writes(tc: TestCase) {
+fn pbt_committed_transaction_matches_direct_writes(tc: TestCase) {
     let n = tc.draw(gs::integers::<usize>().min_value(1).max_value(6));
     let mut segs: Vec<(i64, i64, i64)> = Vec::new();
     let mut cursor: i64 = 0;
@@ -936,7 +936,7 @@ fn committed_transaction_matches_direct_writes(tc: TestCase) {
 }
 
 #[hegel::test]
-fn rollback_leaves_lens_unchanged(tc: TestCase) {
+fn pbt_rollback_leaves_lens_unchanged(tc: TestCase) {
     let base_val = tc.draw(gs::integers::<i64>().min_value(-10_000).max_value(10_000));
     let tx_val = tc.draw(gs::integers::<i64>().min_value(-10_000).max_value(10_000));
 
@@ -961,7 +961,7 @@ fn rollback_leaves_lens_unchanged(tc: TestCase) {
 }
 
 #[hegel::test]
-fn pending_writes_invisible_before_commit(tc: TestCase) {
+fn pbt_pending_writes_invisible_before_commit(tc: TestCase) {
     let val = tc.draw(gs::integers::<i64>().min_value(-10_000).max_value(10_000));
     let s = tc.draw(gs::integers::<i64>().min_value(1).max_value(1_000));
     let e_ts = s + tc.draw(gs::integers::<i64>().min_value(1).max_value(1_000));
@@ -980,7 +980,7 @@ fn pending_writes_invisible_before_commit(tc: TestCase) {
 }
 
 #[hegel::test]
-fn multiple_sequential_transactions_accumulate(tc: TestCase) {
+fn pbt_multiple_sequential_transactions_accumulate(tc: TestCase) {
     let n = tc.draw(gs::integers::<usize>().min_value(1).max_value(5));
     let vals: Vec<i64> = (0..n)
         .map(|_| tc.draw(gs::integers::<i64>().min_value(-10_000).max_value(10_000)))
@@ -1006,7 +1006,7 @@ fn multiple_sequential_transactions_accumulate(tc: TestCase) {
 }
 
 #[hegel::test]
-fn rollback_then_commit_independent(tc: TestCase) {
+fn pbt_rollback_then_commit_independent(tc: TestCase) {
     let discard_val = tc.draw(gs::integers::<i64>().min_value(-10_000).max_value(10_000));
     let keep_val = tc.draw(gs::integers::<i64>().min_value(-10_000).max_value(10_000));
 
@@ -1074,7 +1074,7 @@ fn batch_append_empty_block_succeeds() {
 }
 
 #[hegel::test]
-fn batch_append_matches_regular_append(tc: TestCase) {
+fn pbt_batch_append_matches_regular_append(tc: TestCase) {
     let n = tc.draw(gs::integers::<usize>().min_value(1).max_value(6));
     let mut segs: Vec<(i64, i64, i64)> = Vec::new();
     let mut cursor: i64 = 0;
@@ -1162,7 +1162,7 @@ fn history_lens_time_filter_excludes_non_overlapping_layers() {
 }
 
 #[hegel::test]
-fn history_lens_layer_count_matches_appends(tc: TestCase) {
+fn pbt_history_lens_layer_count_matches_appends(tc: TestCase) {
     let n = tc.draw(gs::integers::<usize>().min_value(1).max_value(8));
     let mut e = setup();
     run(&mut e, "CREATE LENS x int").unwrap();
@@ -1265,7 +1265,7 @@ fn backup_restore_roundtrip_preserves_data() {
 }
 
 #[hegel::test]
-fn at_as_of_with_large_timestamp_matches_at(tc: TestCase) {
+fn pbt_at_as_of_with_large_timestamp_matches_at(tc: TestCase) {
     let n = tc.draw(gs::integers::<usize>().min_value(1).max_value(6));
     let mut segs: Vec<(i64, i64, i64)> = Vec::new();
     let mut cursor: i64 = 0;
@@ -1296,7 +1296,7 @@ fn at_as_of_with_large_timestamp_matches_at(tc: TestCase) {
 }
 
 #[hegel::test]
-fn at_layer_for_single_layer_matches_at(tc: TestCase) {
+fn pbt_at_layer_for_single_layer_matches_at(tc: TestCase) {
     let s = tc.draw(gs::integers::<i64>().min_value(0).max_value(1_000));
     let len = tc.draw(gs::integers::<i64>().min_value(1).max_value(1_000));
     let val = tc.draw(gs::integers::<i64>().min_value(-10_000).max_value(10_000));
@@ -1323,7 +1323,7 @@ fn at_layer_for_single_layer_matches_at(tc: TestCase) {
 }
 
 #[hegel::test]
-fn backup_restore_at_matches_original(tc: TestCase) {
+fn pbt_backup_restore_at_matches_original(tc: TestCase) {
     let n = tc.draw(gs::integers::<usize>().min_value(1).max_value(6));
     let mut segs: Vec<(i64, i64, i64)> = Vec::new();
     let mut cursor: i64 = 0;
@@ -1432,7 +1432,7 @@ fn reduce_min_max_on_derived_lens() {
 }
 
 #[hegel::test]
-fn range_limit_truncates_segments(tc: TestCase) {
+fn pbt_range_limit_truncates_segments(tc: TestCase) {
     let n = tc.draw(gs::integers::<usize>().min_value(2).max_value(10));
     let limit = tc.draw(gs::integers::<usize>().min_value(1).max_value(n - 1));
     let mut e = Executor::new();

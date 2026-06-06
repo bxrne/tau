@@ -380,14 +380,14 @@ mod tests {
     }
 
     #[hegel::test]
-    fn perm_display_parse_roundtrip(tc: TestCase) {
+    fn pbt_perm_display_parse_roundtrip(tc: TestCase) {
         let p = tc.draw(perm_gen());
         let s = p.to_string();
         assert_eq!(Perm::parse(&s).unwrap(), p);
     }
 
     #[hegel::test]
-    fn perm_parse_letter_order_is_irrelevant(tc: TestCase) {
+    fn pbt_perm_parse_letter_order_is_irrelevant(tc: TestCase) {
         // Any permutation of a subset of CRUDA parses to the same Perm.
         let p = tc.draw(perm_gen());
         let s = p.to_string();
@@ -404,7 +404,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn perm_parse_case_insensitive(tc: TestCase) {
+    fn pbt_perm_parse_case_insensitive(tc: TestCase) {
         let p = tc.draw(perm_gen());
         let upper = p.to_string();
         let lower = upper.to_lowercase();
@@ -419,7 +419,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn perm_parse_rejects_unknown_letter(tc: TestCase) {
+    fn pbt_perm_parse_rejects_unknown_letter(tc: TestCase) {
         let bad = tc.draw(
             gs::characters().filter(|c| !"CRUDAcruda \t".contains(*c) && *c != '*' && *c != '-'),
         );
@@ -429,7 +429,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn perm_bitops_are_commutative_and_associative(tc: TestCase) {
+    fn pbt_perm_bitops_are_commutative_and_associative(tc: TestCase) {
         let a = tc.draw(perm_gen());
         let b = tc.draw(perm_gen());
         let c = tc.draw(perm_gen());
@@ -440,7 +440,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn perm_contains_iff_bits_are_subset(tc: TestCase) {
+    fn pbt_perm_contains_iff_bits_are_subset(tc: TestCase) {
         let p = tc.draw(perm_gen());
         let q = tc.draw(perm_gen());
         let expected = (p.bits() & q.bits()) == q.bits();
@@ -448,7 +448,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn perm_insert_remove_inverse(tc: TestCase) {
+    fn pbt_perm_insert_remove_inverse(tc: TestCase) {
         let mut p = tc.draw(perm_gen());
         let q = tc.draw(perm_gen());
         let original = p;
@@ -460,7 +460,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn user_verify_accepts_correct_password_only(tc: TestCase) {
+    fn pbt_user_verify_accepts_correct_password_only(tc: TestCase) {
         let name = tc.draw(name_gen());
         let pw = tc.draw(gs::text().min_size(1).max_size(32));
         let other = tc.draw(gs::text().min_size(1).max_size(32).filter({
@@ -473,7 +473,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn user_effective_equals_direct_union_wildcard(tc: TestCase) {
+    fn pbt_user_effective_equals_direct_union_wildcard(tc: TestCase) {
         let grants = tc.draw(grants_gen());
         let db = tc.draw(name_gen());
         let u = User::new("u", "p", grants.clone()); // codeql[rust/hard-coded-cryptographic-value]
@@ -486,7 +486,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn user_is_global_admin_iff_admin_on_wildcard(tc: TestCase) {
+    fn pbt_user_is_global_admin_iff_admin_on_wildcard(tc: TestCase) {
         let grants = tc.draw(grants_gen());
         let u = User::new("u", "p", grants.clone()); // codeql[rust/hard-coded-cryptographic-value]
         let expected = grants
@@ -497,7 +497,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn user_to_from_line_roundtrip(tc: TestCase) {
+    fn pbt_user_to_from_line_roundtrip(tc: TestCase) {
         let name = tc.draw(name_gen());
         let pw = tc.draw(gs::text().min_size(1).max_size(32));
         let grants = tc.draw(grants_gen());
@@ -511,7 +511,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn store_add_then_get_returns_user(tc: TestCase) {
+    fn pbt_store_add_then_get_returns_user(tc: TestCase) {
         let name = tc.draw(name_gen());
         let mut s = UserStore::new();
         s.add(User::new(&name, "p", HashMap::new())).unwrap(); // codeql[rust/hard-coded-cryptographic-value]
@@ -520,7 +520,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn store_remove_then_get_returns_none(tc: TestCase) {
+    fn pbt_store_remove_then_get_returns_none(tc: TestCase) {
         let name = tc.draw(name_gen());
         let mut s = UserStore::new();
         s.add(User::new(&name, "p", HashMap::new())).unwrap(); // codeql[rust/hard-coded-cryptographic-value]
@@ -530,7 +530,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn store_grant_then_revoke_is_identity_on_perms(tc: TestCase) {
+    fn pbt_store_grant_then_revoke_is_identity_on_perms(tc: TestCase) {
         let name = tc.draw(name_gen());
         let db = tc.draw(name_gen());
         let to_add = tc.draw(perm_gen());
@@ -544,7 +544,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn store_grant_unions_into_existing_perms(tc: TestCase) {
+    fn pbt_store_grant_unions_into_existing_perms(tc: TestCase) {
         let name = tc.draw(name_gen());
         let db = tc.draw(name_gen());
         let p1 = tc.draw(perm_gen());
@@ -558,7 +558,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn store_persists_round_trip(tc: TestCase) {
+    fn pbt_store_persists_round_trip(tc: TestCase) {
         let n = tc.draw(gs::integers::<usize>().min_value(0).max_value(5));
         let dir = tempdir().unwrap();
         let path = dir.path().join("u");

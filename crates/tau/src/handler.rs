@@ -201,14 +201,14 @@ mod tests {
     }
 
     #[hegel::test]
-    fn handle_query_never_panics(tc: TestCase) {
+    fn pbt_handle_query_never_panics(tc: TestCase) {
         let input = tc.draw(gs::text().max_size(256));
         let e = exec();
         let _ = q(&input, &e, None);
     }
 
     #[hegel::test]
-    fn at_after_append_returns_encoded_value(tc: TestCase) {
+    fn pbt_at_after_append_returns_encoded_value(tc: TestCase) {
         let v = tc.draw(
             gs::integers::<i64>()
                 .min_value(-1_000_000)
@@ -226,7 +226,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn at_uncovered_timestamp_yields_nil(tc: TestCase) {
+    fn pbt_at_uncovered_timestamp_yields_nil(tc: TestCase) {
         let probe = tc.draw(gs::integers::<i64>().min_value(101).max_value(1_000_000));
         let e = exec();
         q("CREATE DATABASE main", &e, None);
@@ -236,7 +236,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn parse_failure_starts_with_err_parse(tc: TestCase) {
+    fn pbt_parse_failure_starts_with_err_parse(tc: TestCase) {
         let junk = tc.draw(gs::from_regex("[A-Z]{4,12}").fullmatch(true).filter(|s| {
             !matches!(
                 s.as_str(),
@@ -259,7 +259,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn trailing_input_is_reported(tc: TestCase) {
+    fn pbt_trailing_input_is_reported(tc: TestCase) {
         let extra = tc.draw(gs::from_regex("[A-Z][A-Z]+").fullmatch(true));
         let r = q(&format!("CREATE DATABASE a {extra}"), &exec(), None);
         assert!(r.starts_with("ERR trailing input"), "got: {r}");
@@ -342,7 +342,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn parse_auth_line_roundtrips_for_valid_input(tc: TestCase) {
+    fn pbt_parse_auth_line_roundtrips_for_valid_input(tc: TestCase) {
         let user = tc.draw(gs::from_regex("[a-z][a-z0-9_]{0,10}").fullmatch(true));
         let pass = tc.draw(gs::from_regex("[A-Za-z0-9!@#$%^&*]{1,16}").fullmatch(true));
         let line = format!("AUTH {user} {pass}");

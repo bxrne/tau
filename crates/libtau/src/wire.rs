@@ -425,7 +425,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn parse_never_panics_on_arbitrary_text(tc: TestCase) {
+    fn pbt_parse_never_panics_on_arbitrary_text(tc: TestCase) {
         let s = tc.draw(gs::text().max_size(512));
         let _ = Response::parse(&s);
     }
@@ -448,7 +448,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn parse_roundtrips_val(tc: TestCase) {
+    fn pbt_parse_roundtrips_val(tc: TestCase) {
         let v = tc.draw(value_gen());
         let r = Response::Val(Some(v));
         let line = r.to_string();
@@ -457,7 +457,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn parse_roundtrips_range(tc: TestCase) {
+    fn pbt_parse_roundtrips_range(tc: TestCase) {
         let segs: Vec<(i64, i64, Value)> = tc
             .draw(
                 gs::vecs(
@@ -490,7 +490,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn parse_roundtrips_names(tc: TestCase) {
+    fn pbt_parse_roundtrips_names(tc: TestCase) {
         let names: Vec<String> =
             tc.draw(gs::vecs(gs::from_regex(r"[a-z][a-z0-9_]{0,8}").fullmatch(true)).max_size(8));
         let r = Response::Names(names);

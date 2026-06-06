@@ -667,7 +667,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn entry_serialise_deserialise_roundtrips_i64(tc: TestCase) {
+    fn pbt_entry_serialise_deserialise_roundtrips_i64(tc: TestCase) {
         let entry = tc.draw(entry_gen_i64());
         let line = entry.serialise();
         let decoded = WalEntry::<i64>::deserialise(&line).expect("decode own serialisation");
@@ -675,7 +675,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn entry_serialise_starts_with_checksum_digits(tc: TestCase) {
+    fn pbt_entry_serialise_starts_with_checksum_digits(tc: TestCase) {
         let entry = tc.draw(entry_gen_i64());
         let line = entry.serialise();
         assert!(
@@ -685,7 +685,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn entry_deserialise_never_panics_on_arbitrary_text(tc: TestCase) {
+    fn pbt_entry_deserialise_never_panics_on_arbitrary_text(tc: TestCase) {
         let s = tc.draw(gs::text().max_size(256));
         // Both i64 and bool decoders must tolerate any text without panicking.
         let _ = WalEntry::<i64>::deserialise(&s);
@@ -693,7 +693,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn entry_deserialise_rejects_checksum_corruption(tc: TestCase) {
+    fn pbt_entry_deserialise_rejects_checksum_corruption(tc: TestCase) {
         let entry = tc.draw(entry_gen_i64());
         let line = entry.serialise();
         // Pick a non-zero corruption to bump the leading digit.  Any single
@@ -710,20 +710,20 @@ mod tests {
     }
 
     #[hegel::test]
-    fn codec_i64_roundtrips_every_value(tc: TestCase) {
+    fn pbt_codec_i64_roundtrips_every_value(tc: TestCase) {
         let v = tc.draw(gs::integers::<i64>());
         assert_eq!(i64::decode(&v.encode()), Some(v));
     }
 
     #[hegel::test]
-    fn codec_f64_roundtrips_finite_values(tc: TestCase) {
+    fn pbt_codec_f64_roundtrips_finite_values(tc: TestCase) {
         let v = tc.draw(gs::floats::<f64>().filter(|f| f.is_finite()));
         let decoded = f64::decode(&v.encode()).unwrap();
         assert!((decoded - v).abs() <= f64::EPSILON * v.abs().max(1.0));
     }
 
     #[hegel::test]
-    fn codec_bool_roundtrips(tc: TestCase) {
+    fn pbt_codec_bool_roundtrips(tc: TestCase) {
         let v = tc.draw(gs::booleans());
         assert_eq!(bool::decode(&v.encode()), Some(v));
     }
@@ -735,17 +735,17 @@ mod tests {
     }
 
     #[hegel::test]
-    fn codec_i64_encode_into_matches_encode(tc: TestCase) {
+    fn pbt_codec_i64_encode_into_matches_encode(tc: TestCase) {
         check_encode_into(&tc.draw(gs::integers::<i64>()));
     }
 
     #[hegel::test]
-    fn codec_f64_encode_into_matches_encode(tc: TestCase) {
+    fn pbt_codec_f64_encode_into_matches_encode(tc: TestCase) {
         check_encode_into(&tc.draw(gs::floats::<f64>().filter(|f| f.is_finite())));
     }
 
     #[hegel::test]
-    fn codec_bool_encode_into_matches_encode(tc: TestCase) {
+    fn pbt_codec_bool_encode_into_matches_encode(tc: TestCase) {
         check_encode_into(&tc.draw(gs::booleans()));
     }
 
@@ -766,7 +766,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn codec_i64_decode_returns_none_on_unparseable(tc: TestCase) {
+    fn pbt_codec_i64_decode_returns_none_on_unparseable(tc: TestCase) {
         let s = tc
             .draw(gs::text().max_size(32))
             .replace(|c: char| c.is_ascii_digit() || c == '-', "x");
@@ -820,12 +820,12 @@ mod tests {
     }
 
     #[hegel::test]
-    fn wal_unencrypted_replay_matches_inmemory(tc: TestCase) {
+    fn pbt_wal_unencrypted_replay_matches_inmemory(tc: TestCase) {
         wal_replay_matches_inmemory(tc, None);
     }
 
     #[hegel::test]
-    fn wal_encrypted_replay_matches_inmemory(tc: TestCase) {
+    fn pbt_wal_encrypted_replay_matches_inmemory(tc: TestCase) {
         let key_bytes = tc.draw(gs::vecs(gs::integers::<u8>()).min_size(32).max_size(32));
         let mut key = [0u8; 32];
         key.copy_from_slice(&key_bytes);
@@ -833,7 +833,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn wal_encrypted_lines_start_with_e_prefix(tc: TestCase) {
+    fn pbt_wal_encrypted_lines_start_with_e_prefix(tc: TestCase) {
         let key_bytes = tc.draw(gs::vecs(gs::integers::<u8>()).min_size(32).max_size(32));
         let entry = tc.draw(entry_gen_i64().filter(|e| !e.taus.is_empty()));
         let mut key = [0u8; 32];
@@ -849,7 +849,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn wal_encrypted_replay_without_key_skips_entries(tc: TestCase) {
+    fn pbt_wal_encrypted_replay_without_key_skips_entries(tc: TestCase) {
         let key_bytes = tc.draw(gs::vecs(gs::integers::<u8>()).min_size(32).max_size(32));
         let entry = tc.draw(entry_gen_i64().filter(|e| !e.taus.is_empty()));
         let mut key = [0u8; 32];
@@ -890,7 +890,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn wal_skips_corrupted_entries_during_replay(tc: TestCase) {
+    fn pbt_wal_skips_corrupted_entries_during_replay(tc: TestCase) {
         let good_a = tc.draw(entry_gen_i64().filter(|e| !e.taus.is_empty()));
         let good_b = tc.draw(entry_gen_i64().filter(|e| !e.taus.is_empty()));
         let tmp = NamedTempFile::new().unwrap();
@@ -931,7 +931,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn wal_schema_roundtrips_unencrypted(tc: TestCase) {
+    fn pbt_wal_schema_roundtrips_unencrypted(tc: TestCase) {
         let stmts = tc.draw(
             gs::vecs(
                 gs::from_regex(r"CREATE LENS [a-z]+ (int|float|str|bool|bytes)").fullmatch(true),
@@ -950,7 +950,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn wal_schema_roundtrips_encrypted(tc: TestCase) {
+    fn pbt_wal_schema_roundtrips_encrypted(tc: TestCase) {
         let key_bytes = tc.draw(gs::vecs(gs::integers::<u8>()).min_size(32).max_size(32));
         let stmts = tc.draw(
             gs::vecs(
@@ -977,7 +977,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn wal_rotate_creates_archive_with_pre_rotation_layers(tc: TestCase) {
+    fn pbt_wal_rotate_creates_archive_with_pre_rotation_layers(tc: TestCase) {
         let initial: Vec<WalEntry<i64>> = (0..tc
             .draw(gs::integers::<usize>().min_value(1).max_value(4)))
             .map(|_| tc.draw(entry_gen_i64().filter(|e| !e.taus.is_empty())))
@@ -1044,7 +1044,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn wal_rotate_retains_only_supplied_entries(tc: TestCase) {
+    fn pbt_wal_rotate_retains_only_supplied_entries(tc: TestCase) {
         let schemas = tc
             .draw(gs::vecs(gs::from_regex(r"CREATE LENS [a-z]+ int").fullmatch(true)).max_size(3));
         let initial: Vec<WalEntry<i64>> = (0..tc

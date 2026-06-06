@@ -401,7 +401,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn base_lookup_matches_layer_lookup(tc: TestCase) {
+    fn pbt_base_lookup_matches_layer_lookup(tc: TestCase) {
         let taus = tc.draw(taus_gen());
         let probe = tc.draw(gs::integers::<i64>().min_value(-5).max_value(500));
         let db = db();
@@ -413,7 +413,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn newest_layer_wins_after_multiple_appends(tc: TestCase) {
+    fn pbt_newest_layer_wins_after_multiple_appends(tc: TestCase) {
         let taus_a = tc.draw(taus_gen().filter(|v| !v.is_empty()));
         let taus_b = tc.draw(taus_gen().filter(|v| !v.is_empty()));
         let probe = tc.draw(gs::integers::<i64>().min_value(-5).max_value(500));
@@ -430,7 +430,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn database_clone_shares_store(tc: TestCase) {
+    fn pbt_database_clone_shares_store(tc: TestCase) {
         let taus = tc.draw(taus_gen().filter(|v| !v.is_empty()));
         let probe = tc.draw(gs::integers::<i64>().min_value(-5).max_value(500));
         let db1 = db();

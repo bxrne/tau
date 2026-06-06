@@ -431,7 +431,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn record_op_increments_count_and_ns(tc: TestCase) {
+    fn pbt_record_op_increments_count_and_ns(tc: TestCase) {
         let samples = tc
             .draw(gs::vecs(gs::integers::<u64>().min_value(0).max_value(10_000_000)).max_size(16));
         let m = Metrics::new();
@@ -485,7 +485,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn prometheus_text_exposes_every_documented_family(tc: TestCase) {
+    fn pbt_prometheus_text_exposes_every_documented_family(tc: TestCase) {
         let _ = tc;
         let m = Metrics::new();
         m.record_op(Op::Append, 100);
@@ -507,7 +507,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn prometheus_text_count_matches_counters(tc: TestCase) {
+    fn pbt_prometheus_text_count_matches_counters(tc: TestCase) {
         let n = tc.draw(gs::integers::<u64>().min_value(0).max_value(20));
         let m = Metrics::new();
         for _ in 0..n {
