@@ -51,7 +51,7 @@ pub(crate) fn would_cycle(
     false
 }
 
-fn ttl_cutoff(state: &DbState, lens: &str) -> Option<Timestamp> {
+pub(crate) fn ttl_cutoff(state: &DbState, lens: &str) -> Option<Timestamp> {
     state
         .ttl_secs
         .get(lens)

@@ -423,7 +423,7 @@ dependencies = [
 
 [[package]]
 name = "dst"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "clap",
  "hegeltest",
@@ -713,7 +713,7 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "libdst"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "hegeltest",
  "hegeltest-macros",
@@ -724,7 +724,7 @@ dependencies = [
 
 [[package]]
 name = "libtau"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -1395,7 +1395,7 @@ dependencies = [
 
 [[package]]
 name = "tau"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "hegeltest",

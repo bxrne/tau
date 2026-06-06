@@ -710,12 +710,9 @@ fn stmt_history(i: &str) -> IResult<&str, Stmt> {
     let (i, _) = kw("HISTORY").parse(i)?;
     let (i, _) = kw("LENS").parse(i)?;
     let (i, name) = ident(i)?;
-    let (i, range) = opt(map(
-        pair(
-            preceded(multispace1, integer),
-            preceded(multispace1, integer),
-        ),
-        |(start, end)| (start, end),
+    let (i, range) = opt(pair(
+        preceded(multispace1, integer),
+        preceded(multispace1, integer),
     ))
     .parse(i)?;
     Ok((i, Stmt::HistoryLens { name, range }))
