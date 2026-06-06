@@ -3,11 +3,15 @@
 //! Binary format:
 //!   Header:  MAGIC (4 bytes: "TAUZ") + VERSION (1 byte) + FLAGS (1 byte) +
 //!            CRC32 (4 bytes, covers magic+version+flags)
-//!   Body:    zstd-compressed entries; if FLAGS bit 0 is set, the body is
+//!   Body:    zstd-compressed payload; if FLAGS bit 0 is set, the body is
 //!            AES-256-GCM encrypted before compression (compress-then-encrypt).
-//!   Entries: layer_id (8 bytes, u64) + lens_name_len (4 bytes) + lens_name +
-//!            tau_count (4 bytes) + repeated taus
-//!            Each tau: start (8 bytes, i64) + end (8 bytes, i64) + value (encoded)
+//!   Payload (VERSION >= 2): schema section then entries.
+//!     Schema:  schema_count (4 bytes, u32) + repeated DDL strings
+//!              Each string: len (4 bytes, u32) + UTF-8 bytes
+//!     Entries: layer_id (8 bytes, u64) + lens_name_len (4 bytes) + lens_name +
+//!              tau_count (4 bytes) + repeated taus
+//!              Each tau: start (8 bytes, i64) + end (8 bytes, i64) + value (encoded)
+//!   VERSION 1 files carry no schema section; they still open (schema is empty).
 
 use crate::crypto;
 use crate::model::{Layer, LayerId, Tau};
@@ -21,7 +25,9 @@ use std::path::{Path, PathBuf};
 use crc32fast::Hasher;
 
 const MAGIC: &[u8] = b"TAUZ";
-const VERSION: u8 = 1;
+/// Current on-disk format version. Version 1 had no schema section; version 2
+/// prefixes the entry stream with persisted schema DDL. Both versions open.
+const VERSION: u8 = 2;
 const FLAG_ENCRYPTED: u8 = 0x01;
 const HEADER_LEN: usize = 4 + 1 + 1 + 4; // magic + version + flags + crc32
 /// Default zstd compression level. Valid range is 1–22; higher = better ratio, slower.
@@ -45,6 +51,27 @@ fn read_str<R: Read>(reader: &mut R) -> io::Result<String> {
     let mut buf = vec![0u8; len];
     reader.read_exact(&mut buf)?;
     String::from_utf8(buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
+/// Write the schema section: a `u32` count followed by each length-prefixed string.
+fn write_schema<W: Write>(writer: &mut W, schema: &[String]) -> io::Result<()> {
+    writer.write_all(&(schema.len() as u32).to_le_bytes())?;
+    for stmt in schema {
+        write_str(writer, stmt)?;
+    }
+    Ok(())
+}
+
+/// Read the schema section written by [`write_schema`].
+fn read_schema<R: Read>(reader: &mut R) -> io::Result<Vec<String>> {
+    let mut count_buf = [0u8; 4];
+    reader.read_exact(&mut count_buf)?;
+    let count = u32::from_le_bytes(count_buf) as usize;
+    let mut schema = Vec::with_capacity(count);
+    for _ in 0..count {
+        schema.push(read_str(reader)?);
+    }
+    Ok(schema)
 }
 
 /// Trait for binary encoding/decoding of values.
@@ -142,6 +169,9 @@ impl<V: Codec> DiskEntry<V> {
 pub struct Disk<V> {
     path: PathBuf,
     lenses: HashMap<String, Vec<Layer<V>>>,
+    /// Persisted schema DDL statements in write order. Replayed by the executor
+    /// on restart so `CREATE LENS` / `DERIVE LENS` / `SET TTL` survive.
+    schema: Vec<String>,
     compact_threshold: usize,
     key: Option<[u8; 32]>,
     compression_level: i32,
@@ -152,6 +182,7 @@ impl<V: Clone + Codec> Disk<V> {
     pub fn open(path: impl AsRef<Path>, key: Option<[u8; 32]>) -> io::Result<Self> {
         let path = path.as_ref().to_path_buf();
         let mut lenses: HashMap<String, Vec<Layer<V>>> = HashMap::new();
+        let mut schema: Vec<String> = Vec::new();
 
         if path.exists() {
             let file = File::open(&path)?;
@@ -169,10 +200,11 @@ impl<V: Clone + Codec> Disk<V> {
                     ),
                 ));
             }
-            if header[4] != VERSION {
+            let version = header[4];
+            if version == 0 || version > VERSION {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("unsupported version: expected {VERSION}, got {}", header[4]),
+                    format!("unsupported version: expected 1..={VERSION}, got {version}"),
                 ));
             }
             let flags = header[5];
@@ -204,8 +236,12 @@ impl<V: Clone + Codec> Disk<V> {
                 body
             };
 
-            let entries_bytes = zstd::decode_all(compressed.as_slice())?;
-            let mut cursor = Cursor::new(entries_bytes);
+            let payload_bytes = zstd::decode_all(compressed.as_slice())?;
+            let mut cursor = Cursor::new(payload_bytes);
+            // Version 2+ prefixes the entry stream with the schema section.
+            if version >= 2 {
+                schema = read_schema(&mut cursor)?;
+            }
             loop {
                 match DiskEntry::read(&mut cursor) {
                     Ok(entry) => {
@@ -223,6 +259,7 @@ impl<V: Clone + Codec> Disk<V> {
         Ok(Self {
             path,
             lenses,
+            schema,
             compact_threshold: COMPACT_THRESHOLD,
             key,
             compression_level: DEFAULT_ZSTD_LEVEL,
@@ -238,6 +275,7 @@ impl<V: Clone + Codec> Disk<V> {
         let store = Self {
             path,
             lenses: HashMap::new(),
+            schema: Vec::new(),
             compact_threshold: COMPACT_THRESHOLD,
             key,
             compression_level: DEFAULT_ZSTD_LEVEL,
@@ -260,6 +298,7 @@ impl<V: Clone + Codec> Disk<V> {
     /// Flush all in-memory state to disk atomically (compress → optionally encrypt → write).
     pub fn flush(&self) -> io::Result<()> {
         let mut entries = Vec::new();
+        write_schema(&mut entries, &self.schema)?;
         for (lens_name, layers) in &self.lenses {
             for layer in layers {
                 let entry = DiskEntry {
@@ -334,6 +373,16 @@ impl<V: Clone + PartialEq + Codec + Send + Sync + 'static> Store<V> for Disk<V> 
 
     fn lens_names(&self) -> Vec<String> {
         self.lenses.keys().cloned().collect()
+    }
+
+    fn append_schema(&mut self, stmt: &str) -> io::Result<()> {
+        self.schema.push(stmt.to_string());
+        // Persist immediately so DDL survives an unclean shutdown.
+        self.flush()
+    }
+
+    fn schema_stmts(&self) -> Vec<String> {
+        self.schema.clone()
     }
 }
 

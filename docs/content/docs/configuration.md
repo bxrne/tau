@@ -34,6 +34,8 @@ log_level = "info"         # error | warn | info | debug | trace
 compact_threshold = 8      # layers per lens before auto-compaction fires
 
 [disk]
+backend = "memory"         # "memory" (default) or "disk" (persist to <path>/<db>.dat)
+# path = "/var/lib/tau/data"  # required when backend = "disk"
 compression_level = 3      # zstd level 1–22; higher = better ratio, slower writes
 
 [wal]
@@ -78,7 +80,17 @@ idle_timeout_secs = 300     # 0 disables
 
 | field | default | description |
 |-------|---------|-------------|
+| `backend` | `memory` | Storage backend. `memory` keeps layers in RAM (pair with `[wal]` for durability). `disk` gives every database its own compressed `<path>/<name>.dat` file. |
+| `path` | (none) | Directory for the per-database `.dat` files — required when `backend = "disk"`. |
 | `compression_level` | `3` | zstd compression level applied when the disk store flushes. Range 1–22: 1 is fastest with least compression, 22 is best ratio but slowest. |
+
+With `backend = "disk"`, each `.dat` file persists both layer data and the
+schema DDL (`CREATE LENS`, `DERIVE LENS`, `SET TTL`, `DROP LENS`). Issuing
+`CREATE DATABASE <name>` re-opens an existing `<name>.dat` and replays its
+schema, so lenses and policies survive a restart without re-issuing DDL. The
+disk store rewrites its file atomically on every append and every schema
+change, so an acknowledged write is durable before the response returns; the
+`[wal]` settings are ignored when this backend is active.
 
 ---
 

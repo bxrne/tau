@@ -6,13 +6,13 @@ The core engine library. All binaries depend only on this crate.
 
 | Module | Purpose |
 |--------|---------|
-| `model` | `Tau<V>`, `Layer<V>`, `Lens<V>` — the three data primitives |
+| `model` | `Tau<V>`, `Layer<V>` — the core temporal primitives (a "lens" is a named base/derived entry tracked by the executor, not a standalone type) |
 | `value` | `Value` enum (Int/Float/Str/Bool/Null) + tagged wire encoding |
 | `ql/ast` | TauQL AST (`Stmt`, `Expr`, `Literal`, `Type`, `BinOp` …) |
 | `ql/parser` | `nom`-based parser; entry point `parse()`, scalar helper `parse_literal()` |
 | `storage/store` | `Store<V>` trait; sweep-line compaction (`compact_layers`) |
 | `storage/memory` | `InMemory<V>` — `FxHashMap`-backed, zero I/O |
-| `storage/disk` | `Disk<V>` — binary flat file with AES-256-GCM encryption option |
+| `storage/disk` | `Disk<V>` — compressed binary file persisting layer data **and** schema DDL; optional AES-256-GCM encryption |
 | `storage/wal` | `Wal` — write-ahead log with schema DDL replay |
 | `database` | `Database<V>` — owns a `Store` + optional `Wal`; `Arc<Vec<Layer>>` snapshots |
 | `executor` | `Executor` — registry of named databases + dispatch + permissions |

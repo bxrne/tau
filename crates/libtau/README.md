@@ -61,6 +61,6 @@ let result = exec.exec_read(&stmt).unwrap();
 | Flag / setter | Effect |
 |---------------|--------|
 | `Database::set_wal_fsync_each(false)` + `wal_flush()` | Group-commit mode: batch WAL flushes every 50 ms |
-| `Disk::set_rewrite_on_compact(false)` | Skip disk-file rewrite after compaction |
+| `Disk::set_compression_level(n)` | zstd level 1–22 for the disk backend (1 = fastest, 22 = best ratio) |
 | `Database::set_auto_checkpoint(false)` | Skip WAL checkpoint after compaction |
 | `Database::set_wal_max_bytes(n)` | Trigger a WAL checkpoint rewrite when the file exceeds `n` bytes, bounding on-disk WAL growth between compactions |

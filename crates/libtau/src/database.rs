@@ -216,28 +216,37 @@ where
         }
     }
 
-    /// Write a schema DDL statement (e.g. `CREATE LENS temp int`) to the WAL.
-    ///
-    /// No-op when no WAL is configured.
+    /// Write a schema DDL statement (e.g. `CREATE LENS temp int`) to durable
+    /// storage.  Persisted in the WAL when one is attached, otherwise in the
+    /// store's own file (the disk backend).  No-op for a pure in-memory store.
     pub fn append_schema(&self, stmt_text: &str) -> io::Result<()> {
         if let Some(wal) = &self.wal {
             wal.lock()
                 .map_err(|_| io::Error::other("WAL mutex poisoned"))?
                 .append_schema(stmt_text)?;
+        } else {
+            self.store
+                .write()
+                .map_err(|_| io::Error::other("store lock poisoned"))?
+                .append_schema(stmt_text)?;
         }
         Ok(())
     }
 
-    /// Return the schema DDL statements stored in the WAL (in write order).
-    ///
-    /// Returns an empty vec when no WAL is configured.
+    /// Return the persisted schema DDL statements in write order, from the WAL
+    /// when attached, otherwise from the store's own file.  Empty for a pure
+    /// in-memory store.
     pub fn schema_stmts(&self) -> io::Result<Vec<String>> {
         match &self.wal {
             Some(wal) => wal
                 .lock()
                 .map_err(|_| io::Error::other("WAL mutex poisoned"))?
                 .replay_schemas(),
-            None => Ok(Vec::new()),
+            None => Ok(self
+                .store
+                .read()
+                .map_err(|_| io::Error::other("store lock poisoned"))?
+                .schema_stmts()),
         }
     }
 
