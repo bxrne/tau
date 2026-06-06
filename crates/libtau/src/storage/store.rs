@@ -44,4 +44,20 @@ where
     fn lens_names(&self) -> Vec<String> {
         Vec::new()
     }
+
+    /// Durably record a schema DDL statement (e.g. `CREATE LENS temp int`) so
+    /// it can be replayed on restart.
+    ///
+    /// Only backends that own their own on-disk file need this; for
+    /// WAL-backed setups schema persistence lives in the WAL and this is never
+    /// called.  The default is a no-op (in-memory stores keep no schema).
+    fn append_schema(&mut self, _stmt: &str) -> io::Result<()> {
+        Ok(())
+    }
+
+    /// Return the persisted schema DDL statements in write order.  Default is
+    /// empty; backends that persist schema override this.
+    fn schema_stmts(&self) -> Vec<String> {
+        Vec::new()
+    }
 }

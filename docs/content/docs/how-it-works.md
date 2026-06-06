@@ -28,7 +28,7 @@ The cost is that every query must resolve which layer wins at each point in time
 
 ## Architecture
 
-Tau is structured as a library (`libtau`) consumed by two binaries: the TCP server (`tau`) and the interactive client (`tauctl`, a ratatui TUI with a `--headless` fallback). The library exposes a clean `Executor` API; auth, TLS, and network concerns live exclusively in the server.
+Tau is structured as a library (`libtau`) consumed by two binaries: the TCP server (`tau`) and the interactive client (`tauctl`, a ratatui TUI that requires an interactive terminal). The library exposes a clean `Executor` API; auth, TLS, and network concerns live exclusively in the server.
 
 ```
 Stmt → Executor → Database<Value> → Store<V> + optional Wal
@@ -87,19 +87,24 @@ Cycle detection runs at `DERIVE` time by walking the dependency graph (`would_cy
 
 **`InMemory`**: a `HashMap<name, Vec<Layer<V>>>` with no I/O. Used for tests and ephemeral workloads.
 
-**`Disk`**: a binary file:
+**`Disk`**: one compressed binary file per database (`<name>.dat`):
 
 ```
-magic (3 bytes)  "TAU" (plaintext) or "TAUE" (encrypted)
-[entries...]
-  length (u32 LE)
-  crc32 (u32 LE) or nonce+tag (encrypted)
-  payload bytes
+header
+  magic   "TAUZ" (4 bytes)
+  version u8         # 2; version 1 (no schema section) still opens
+  flags   u8         # bit 0 = encrypted body
+  crc32   u32 LE     # over magic+version+flags
+body  zstd-compressed payload, AES-256-GCM-encrypted after compression when flagged
+  payload
+    schema_count u32 LE        # persisted DDL statements
+    [ len u32 LE, utf8 bytes ] # CREATE LENS / DERIVE LENS / SET TTL / DROP LENS
+    [ DiskEntry... ]           # layer_id, lens name, taus — until EOF
 ```
 
-On open, the file is read entry by entry, integrity-checked, and replayed into the in-memory layer stack. The file handle stays open in append mode.
+On open, the header is integrity-checked, the body decompressed (and decrypted when flagged), the schema section read, then layer entries replayed into the in-memory layer stack. The file is rewritten atomically (`.tmp` + rename) on each flush — a flush fires on every append and every schema change, so an acknowledged write is durable before the call returns. Because schema DDL is part of the file, `CREATE DATABASE <name>` re-opens an existing `<name>.dat` and replays its schema, so lenses and TTL policies survive a restart.
 
-Encryption is AES-256-GCM with a random 12-byte nonce per entry. The key is never stored; it must be supplied via `TAU_ENCRYPTION_KEY` at startup. The `TAUE` magic prevents accidentally opening an encrypted file without a key.
+Encryption is AES-256-GCM with a random 12-byte nonce. The key is never stored; it must be supplied via `TAU_ENCRYPTION_KEY` at startup. The `FLAG_ENCRYPTED` bit prevents accidentally opening an encrypted file without a key.
 
 ### Write-Ahead Log
 
@@ -113,7 +118,7 @@ S:<checksum> <CREATE LENS ...>     # schema DDL
 SE:<crc32hex> <base64-encrypted>   # encrypted schema DDL
 ```
 
-Schema entries carry the raw TauQL text of `CREATE LENS` and `DERIVE LENS`. On replay, these are re-parsed and executed with `in_replay = true`, which suppresses re-appending them to the WAL.
+Schema entries carry the raw TauQL text of the DDL that defines a lens (`CREATE LENS`, `DERIVE LENS`, `SET TTL`, `UNSET TTL`, `DROP LENS`). On replay, these are re-parsed and executed with `in_replay = true`, which suppresses re-appending them to the WAL. The disk backend persists the same DDL set in its own file (see above).
 
 The WAL is checkpointed after compaction: a fresh snapshot of in-memory state is written to a new file and swapped in, bounding disk usage.
 

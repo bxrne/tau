@@ -131,8 +131,9 @@ pub enum StorageBackend {
     /// lost on clean shutdown without a WAL.
     Memory,
     /// Every database gets its own `<dir>/<name>.dat` compressed disk file.
-    /// Schema DDL (CREATE LENS / DERIVE LENS) is not persisted across restarts
-    /// in this release — re-issue DDL after startup.
+    /// Both layer data and schema DDL (CREATE LENS / DERIVE LENS / SET TTL) are
+    /// persisted; `CREATE DATABASE <name>` re-opens an existing file and replays
+    /// its schema, so lenses survive a restart.
     Disk {
         dir: std::path::PathBuf,
         compression_level: i32,
@@ -167,12 +168,14 @@ impl DbState {
         }
     }
 
+    /// Open (or create) a disk-backed database, returning the fresh state plus
+    /// any schema DDL persisted in the file so the executor can replay it.
     fn with_disk(
         path: impl AsRef<Path>,
         compact_threshold: usize,
         compression_level: i32,
         enc_key: Option<[u8; 32]>,
-    ) -> io::Result<Self> {
+    ) -> io::Result<(Self, Vec<String>)> {
         let path = path.as_ref();
         let mut store = if path.exists() {
             Disk::open(path, enc_key)?
@@ -183,13 +186,17 @@ impl DbState {
         store.set_compression_level(compression_level);
         let db = Database::new(store);
         let next_layer_id = db.max_layer_id() + 1;
-        Ok(Self {
-            db,
-            base_types: HashMap::default(),
-            next_layer_id,
-            derived: HashMap::default(),
-            ttl_secs: HashMap::default(),
-        })
+        let schema_stmts = db.schema_stmts().map_err(io::Error::other)?;
+        Ok((
+            Self {
+                db,
+                base_types: HashMap::default(),
+                next_layer_id,
+                derived: HashMap::default(),
+                ttl_secs: HashMap::default(),
+            },
+            schema_stmts,
+        ))
     }
 
     fn with_wal(
@@ -352,40 +359,15 @@ impl Executor {
         compact_threshold: usize,
         key: Option<[u8; 32]>,
     ) -> io::Result<Self> {
-        use crate::ql::parser::parse;
-
         let mut executor = Self::with_threshold(compact_threshold);
         let (db_state, schema_stmts) = DbState::with_wal(path, compact_threshold, key)?;
         executor
             .databases
             .insert("default".to_string(), Arc::new(RwLock::new(db_state)));
+        // Replay schema DDL (CREATE LENS / DERIVE LENS / SET TTL); in_replay
+        // suppresses writing these back to the WAL.
+        executor.replay_schema_stmts("default", &schema_stmts);
         executor.active = Some("default".to_string());
-
-        // Replay schema DDL (CREATE LENS / DERIVE LENS).
-        // in_replay suppresses writing these back to the WAL.
-        executor.in_replay = true;
-        for stmt_text in schema_stmts {
-            match parse(&stmt_text) {
-                Ok((_, stmt)) => {
-                    if let Err(e) = executor.exec(&stmt) {
-                        tracing::warn!(
-                            stmt = %stmt_text,
-                            error = ?e,
-                            "schema WAL replay: statement failed, skipping"
-                        );
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        stmt = %stmt_text,
-                        error = %e,
-                        "schema WAL replay: parse error, skipping"
-                    );
-                }
-            }
-        }
-        executor.in_replay = false;
-
         Ok(executor)
     }
 
@@ -813,8 +795,8 @@ impl Executor {
             return Err(ExecError::DuplicateDatabase(name.into()));
         }
         let metrics = self.metrics.clone();
-        let mut db_state = match &self.backend {
-            StorageBackend::Memory => DbState::new(self.compact_threshold),
+        let (mut db_state, schema_stmts) = match &self.backend {
+            StorageBackend::Memory => (DbState::new(self.compact_threshold), Vec::new()),
             StorageBackend::Disk {
                 dir,
                 compression_level,
@@ -828,10 +810,38 @@ impl Executor {
         db_state.db.set_metrics(metrics);
         self.databases
             .insert(name.into(), Arc::new(RwLock::new(db_state)));
+        // Rebuild lens schema (CREATE/DERIVE/SET TTL) for a re-opened disk file.
+        self.replay_schema_stmts(name, &schema_stmts);
         if self.active.is_none() {
             self.active = Some(name.into());
         }
         Ok(Output::Empty)
+    }
+
+    /// Re-execute persisted schema DDL against `db_name` with WAL/disk writes
+    /// suppressed (`in_replay`), restoring the previously active database
+    /// afterwards.  Shared by the WAL-open, disk-open, and RESTORE paths.
+    fn replay_schema_stmts(&mut self, db_name: &str, stmts: &[String]) {
+        if stmts.is_empty() {
+            return;
+        }
+        let prev_active = self.active.take();
+        self.active = Some(db_name.to_string());
+        self.in_replay = true;
+        for stmt_text in stmts {
+            match crate::ql::parser::parse(stmt_text) {
+                Ok((_, stmt)) => {
+                    if let Err(e) = self.exec(&stmt) {
+                        tracing::warn!(stmt = %stmt_text, error = ?e, "schema replay: statement failed, skipping");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(stmt = %stmt_text, error = %e, "schema replay: parse error, skipping");
+                }
+            }
+        }
+        self.in_replay = false;
+        self.active = prev_active;
     }
 
     fn drop_database(&mut self, name: &str) -> Result<Output, ExecError> {
@@ -1385,23 +1395,7 @@ impl Executor {
             })),
         );
 
-        let prev_active = self.active.clone();
-        self.active = Some(name.into());
-        self.in_replay = true;
-        for stmt_text in &schema_stmts {
-            match crate::ql::parser::parse(stmt_text) {
-                Ok((_, stmt)) => {
-                    if let Err(e) = self.exec(&stmt) {
-                        tracing::warn!(stmt = %stmt_text, error = ?e, "restore: schema replay failed");
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(stmt = %stmt_text, error = %e, "restore: schema parse error");
-                }
-            }
-        }
-        self.in_replay = false;
-        self.active = prev_active;
+        self.replay_schema_stmts(name, &schema_stmts);
         Ok(Output::Empty)
     }
 

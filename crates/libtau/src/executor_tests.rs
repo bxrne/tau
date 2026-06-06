@@ -1616,3 +1616,92 @@ fn show_status_wire_roundtrip() {
     let parsed = Response::parse(&line).unwrap();
     assert_eq!(parsed, r);
 }
+
+/// Disk backend: schema DDL (CREATE/DERIVE) and layer data survive a restart.
+/// The "restart" drops the executor and opens a fresh one over the same dir.
+/// Nine appends force a compaction, which is the disk backend's flush trigger.
+#[test]
+fn disk_backend_persists_schema_and_data_across_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let threshold = crate::storage::COMPACT_THRESHOLD;
+    {
+        let mut e = Executor::with_disk_backend(dir.path(), threshold, 3, None).unwrap();
+        run(&mut e, "CREATE DATABASE main").unwrap();
+        run(&mut e, "CREATE LENS temp int").unwrap();
+        run(&mut e, "DERIVE LENS hot AS temp > 20").unwrap();
+        for i in 0..=(threshold as i64) {
+            run(
+                &mut e,
+                &format!(
+                    "APPEND LENS temp {} {} {}",
+                    i * 1000,
+                    i * 1000 + 1000,
+                    i * 10
+                ),
+            )
+            .unwrap();
+        }
+    }
+    // Fresh executor over the same directory; re-opening replays the schema.
+    let mut e = Executor::with_disk_backend(dir.path(), threshold, 3, None).unwrap();
+    run(&mut e, "CREATE DATABASE main").unwrap();
+
+    // Base + derived lenses are queryable with no re-issued DDL.
+    assert_eq!(
+        run(&mut e, "AT LENS temp 500").unwrap(),
+        Output::Value(Some(Value::Int(0)))
+    );
+    assert_eq!(
+        run(&mut e, "AT LENS hot 8500").unwrap(),
+        Output::Value(Some(Value::Bool(true)))
+    );
+    let Output::Names(lenses) = run(&mut e, "SHOW LENSES").unwrap() else {
+        panic!("expected names");
+    };
+    assert_eq!(lenses, vec!["hot".to_string(), "temp".to_string()]);
+}
+
+/// Disk backend: a persisted `SET TTL` policy is replayed on restart, so data
+/// older than the TTL window stays hidden without re-issuing the policy.
+#[test]
+fn disk_backend_persists_ttl_across_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let threshold = crate::storage::COMPACT_THRESHOLD;
+    {
+        let mut e = Executor::with_disk_backend(dir.path(), threshold, 3, None).unwrap();
+        run(&mut e, "CREATE DATABASE main").unwrap();
+        run(&mut e, "CREATE LENS old int").unwrap();
+        run(&mut e, "SET TTL LENS old 10").unwrap();
+        // Data far in the past (relative to wall clock); compaction forces a flush.
+        for i in 0..=(threshold as i64) {
+            run(
+                &mut e,
+                &format!("APPEND LENS old {} {} {}", i * 1000, i * 1000 + 1000, i),
+            )
+            .unwrap();
+        }
+    }
+    let mut e = Executor::with_disk_backend(dir.path(), threshold, 3, None).unwrap();
+    run(&mut e, "CREATE DATABASE main").unwrap();
+    // With the TTL replayed, the ancient datum is hidden (would be Some(0) otherwise).
+    assert_eq!(run(&mut e, "AT LENS old 500").unwrap(), Output::Value(None));
+}
+
+/// Disk backend: a `DROP LENS` persisted before restart stays dropped.
+#[test]
+fn disk_backend_drop_lens_survives_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let threshold = crate::storage::COMPACT_THRESHOLD;
+    {
+        let mut e = Executor::with_disk_backend(dir.path(), threshold, 3, None).unwrap();
+        run(&mut e, "CREATE DATABASE main").unwrap();
+        run(&mut e, "CREATE LENS gone int").unwrap();
+        run(&mut e, "DROP LENS gone").unwrap();
+    }
+    let mut e = Executor::with_disk_backend(dir.path(), threshold, 3, None).unwrap();
+    run(&mut e, "CREATE DATABASE main").unwrap();
+    assert!(matches!(
+        run(&mut e, "AT LENS gone 0"),
+        Err(ExecError::UnknownLens(_))
+    ));
+}

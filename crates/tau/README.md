@@ -33,6 +33,11 @@ bind = "127.0.0.1:7070"
 log_level = "info"
 compact_threshold = 8
 
+[disk]
+backend = "memory"          # "memory" (default) or "disk"
+# path = "/var/lib/tau/data"  # required for backend = "disk"; one <db>.dat per database
+compression_level = 3       # zstd level 1–22 (disk backend)
+
 [wal]
 enabled = true
 path = "/var/lib/tau/tau.wal"
