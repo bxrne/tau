@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/bxrne/tau/compare/tau-v0.2.0...tau-v0.3.0) (2026-06-06)
+
+
+### Features
+
+* **tau, libtau:** fix outdated doc, add disk ddl persistence (full) ([42b22b6](https://github.com/bxrne/tau/commit/42b22b62b1e3fe8cb5d98a4eb1fc167faa0ef224))
+
 ## [0.2.0](https://github.com/bxrne/tau/compare/tau-v0.1.0...tau-v0.2.0) (2026-06-05)
 
 
