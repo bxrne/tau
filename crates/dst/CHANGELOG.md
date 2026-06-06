@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1](https://github.com/bxrne/tau/compare/dst-v0.1.0...dst-v0.1.1) (2026-06-06)
+
+
+### Bug Fixes
+
+* remove unwraps and use better comments ([5ceee8a](https://github.com/bxrne/tau/commit/5ceee8afbc400b4d2fddbab1a6027406afb5951d))
+
 ## 0.1.0 (2026-06-05)
 
 
