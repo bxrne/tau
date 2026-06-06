@@ -357,9 +357,10 @@ impl<V: Clone + PartialEq + Codec + Send + Sync + 'static> Store<V> for Disk<V> 
             compact_layers(layers);
             did_compact = layers.len() < before + 1;
         }
-        if did_compact {
-            self.flush()?;
-        }
+        // Persist on every append: the disk backend is the only durability
+        // mechanism when no WAL is attached, so an acknowledged write must hit
+        // disk before we return. (`flush` rewrites the whole file atomically.)
+        self.flush()?;
         Ok(did_compact)
     }
 
