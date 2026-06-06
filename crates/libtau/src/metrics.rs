@@ -126,15 +126,6 @@ pub struct Metrics {
     proc_uptime: Gauge,
 }
 
-macro_rules! op_method {
-    ($fn:ident, $op:ident) => {
-        #[inline]
-        pub fn $fn(&self, ns: u64) {
-            self.record_op(Op::$op, ns);
-        }
-    };
-}
-
 impl Default for Metrics {
     fn default() -> Self {
         Self::new()
@@ -300,13 +291,6 @@ impl Metrics {
     pub fn record_op(&self, op: Op, ns: u64) {
         self.ops[op as usize].record(ns);
     }
-
-    op_method!(record_append, Append);
-    op_method!(record_at, At);
-    op_method!(record_range, Range);
-    op_method!(record_reduce, Reduce);
-    op_method!(record_history, History);
-    op_method!(record_ddl, Database);
 
     #[inline]
     pub fn record_compaction(&self) {

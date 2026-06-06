@@ -39,7 +39,8 @@ use crate::metrics::Op;
 use crate::model::{Layer, LayerId, Tau, Timestamp};
 use crate::ql::ast::{AggFunc, Expr, Stmt, Type};
 use crate::query::{
-    at_layers, build_range_segments, collect_range_bounds, eval_agg, eval_lens, would_cycle,
+    at_layers, build_range_segments, collect_range_bounds, eval_agg, eval_lens, ttl_cutoff,
+    would_cycle,
 };
 use crate::storage::{
     Disk, InMemory, sweep_range,
@@ -240,13 +241,6 @@ pub struct Executor {
     /// Instant the executor was created — used to report `uptime_secs` in
     /// `SHOW STATUS`.
     started_at: std::time::Instant,
-}
-
-fn ttl_cutoff(state: &DbState, lens: &str) -> Option<Timestamp> {
-    state
-        .ttl_secs
-        .get(lens)
-        .map(|&secs| crate::wall_clock::now_secs() - secs)
 }
 
 fn apply_offset_limit<T>(v: Vec<T>, offset: Option<usize>, limit: Option<usize>) -> Vec<T> {
@@ -1055,12 +1049,7 @@ impl Executor {
         if !state.base_types.contains_key(name) && !state.derived.contains_key(name) {
             return Err(ExecError::UnknownLens(name.into()));
         }
-        let cutoff = ttl_cutoff(&state, name);
-        let effective_start = if let Some(c) = cutoff {
-            start.max(c)
-        } else {
-            start
-        };
+        let effective_start = ttl_cutoff(&state, name).map_or(start, |c| start.max(c));
         if effective_start >= end {
             return Ok(Output::Range(vec![]));
         }
@@ -1105,12 +1094,7 @@ impl Executor {
         if !state.base_types.contains_key(name) && !state.derived.contains_key(name) {
             return Err(ExecError::UnknownLens(name.into()));
         }
-        let cutoff = ttl_cutoff(&state, name);
-        let effective_start = if let Some(c) = cutoff {
-            start.max(c)
-        } else {
-            start
-        };
+        let effective_start = ttl_cutoff(&state, name).map_or(start, |c| start.max(c));
         if effective_start >= end {
             return Ok(Output::Value(None));
         }

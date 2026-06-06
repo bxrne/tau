@@ -1,6 +1,6 @@
 //! ratatui TUI for tauctl.
 //!
-//! Runs when stdout is a TTY (default). For scripts and pipes use `--headless`.
+//! Requires an interactive terminal; `main` exits early when stdout is not a TTY.
 //!
 //! Layout:
 //!   ┌─ Connections ─┬─ Results ──────────────────┐

@@ -257,7 +257,9 @@ impl fmt::Display for Response {
     }
 }
 
-/// Render an [`ExecError`] to its wire message (without the `ERR ` prefix).
+/// Reconstruct an [`ExecError`] from its wire message (the text after `ERR `).
+/// The inverse of [`encode_error`]; only the structured variants the client
+/// branches on are recovered, everything else collapses to [`ExecError::InvalidExpr`].
 fn decode_exec_error(msg: &str) -> ExecError {
     if let Some(name) = msg.strip_prefix("unknown lens: ") {
         return ExecError::UnknownLens(name.into());
