@@ -83,6 +83,14 @@ impl ProfileSpec {
         bootstrap_oracle_model(self, paths)
     }
 
+    /// Reopen the disk-backed executor from its existing `.dat` files without
+    /// re-issuing DDL — models a process restart for the persistence checks.
+    #[cfg(test)]
+    pub fn reopen_disk_executor(&self, paths: &ProfilePaths) -> Executor {
+        let d = paths.disk_dir.as_ref().expect("disk dir");
+        reopen_disk(d, self.compact_threshold(), self.enc_key())
+    }
+
     /// Shared executor + ephemeral tau server for wire transport profiles.
     pub fn spawn_wire_stack(
         &self,
@@ -163,6 +171,21 @@ fn bootstrap_disk(dir: &Path, threshold: usize, enc_key: Option<[u8; 32]>) -> Ex
     exec(&mut ex, "CREATE DATABASE aux");
     exec(&mut ex, "USE DATABASE aux");
     exec(&mut ex, &format!("CREATE LENS {} int", Lens::Aux.as_str()));
+    exec(&mut ex, "USE DATABASE default");
+    ex
+}
+
+/// Reopen an existing disk-backed executor **without** re-issuing schema DDL —
+/// `CREATE DATABASE` replays each `.dat` file's persisted schema, so lenses and
+/// policies come back automatically. Models a real process restart (used by the
+/// disk-persistence DST coverage).
+#[cfg(test)]
+pub fn reopen_disk(dir: &Path, threshold: usize, enc_key: Option<[u8; 32]>) -> Executor {
+    let mut ex =
+        Executor::with_disk_backend(dir, threshold, libtau::storage::DEFAULT_ZSTD_LEVEL, enc_key)
+            .expect("disk backend reopen");
+    exec(&mut ex, "CREATE DATABASE default");
+    exec(&mut ex, "CREATE DATABASE aux");
     exec(&mut ex, "USE DATABASE default");
     ex
 }

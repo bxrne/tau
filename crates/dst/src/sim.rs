@@ -448,4 +448,145 @@ mod profile_tests {
         );
         assert_eq!(r.errors, 0, "disk no-checkpoint had {} errors", r.errors);
     }
+
+    /// Faithful disk restart (no wipe, no op-log replay to target): after writes
+    /// that each flushed (per-append durability), re-opening the executor over the
+    /// existing .dat files must see the same data and schema that the oracle has.
+    /// This exercises the disk backend's append_schema + append paths + executor's
+    /// CREATE DATABASE schema replay for a real process restart.
+    #[test]
+    fn pbt_disk_persists_data_and_schema_across_reopen() {
+        use crate::apply::apply_dual_executor;
+        use crate::harness;
+        use crate::op::Op;
+        use crate::oracle::DeriveSpec;
+        use crate::target::DirectExecutor;
+
+        let disk = ProfileSpec {
+            storage: Storage::Disk,
+            compaction: Compaction::Default,
+            encryption: Encryption::Plain,
+            transport: Transport::Direct,
+            auth: crate::profile::Auth::Off,
+        };
+        let workspace = crate::profile::ProfileWorkspace::new(disk);
+        let paths = &workspace.paths;
+
+        let mut target = disk.bootstrap_executor(paths);
+        let mut model = disk.bootstrap_oracle(paths);
+
+        // A small, varied sequence exercising DDL (extra lenses, derive, drop) + DML (appends)
+        // and probes. All go through dual-apply so target and model stay in sync.
+        // Use lenses from the DST bootstrap set ("a","b" are the int ones) plus the new "p".
+        // (No TTL here; TTL persistence is covered by dedicated unit regression tests using
+        // an ancient datum + small TTL window relative to the fixed DST wall clock.)
+        let ops: Vec<Op> = vec![
+            Op::CreateLens {
+                name: "p".into(),
+                ty: "int",
+            },
+            Op::Append {
+                lens: "p".into(),
+                data: crate::op::Payload::Int(vec![(0, 100, 1), (100, 200, 2)]),
+            },
+            Op::Derive {
+                name: "p2".into(),
+                spec: DeriveSpec {
+                    a: "p".into(),
+                    b: "a".into(),
+                },
+            },
+            Op::Append {
+                lens: "a".into(),
+                data: crate::op::Payload::Int(vec![(10, 50, 99)]),
+            },
+            Op::DropLens { name: "p2".into() }, // dropped derived should stay dropped after restart
+        ];
+
+        for (i, op) in ops.iter().enumerate() {
+            let divs = apply_dual_executor(i, op, &mut target, &mut model);
+            assert!(divs.is_empty(), "pre-restart divergence at {i}: {divs:?}");
+            // Right after the append that populates p, the data must be visible on target (before later DDL).
+            if i == 1 {
+                let imm = harness::exec(&mut target, "AT LENS p 50");
+                let v = match imm {
+                    libtau::Output::Value(v) => v,
+                    other => panic!("immediate post-append-p AT unexpected: {other:?}"),
+                };
+                assert_eq!(
+                    v,
+                    Some(libtau::Value::Int(1)),
+                    "target cannot see data immediately after its append to p (step {i})"
+                );
+            }
+            // After each later DDL/DML, re-probe p to see if a subsequent op made prior data invisible.
+            if i >= 2 {
+                let probe = harness::exec(&mut target, "AT LENS p 50");
+                let v = match probe {
+                    libtau::Output::Value(v) => v,
+                    other => panic!("AT p 50 after op {i} unexpected variant: {other:?}"),
+                };
+                assert_eq!(
+                    v,
+                    Some(libtau::Value::Int(1)),
+                    "p data disappeared from target after op {i} (derive/append/drop side effect?)"
+                );
+            }
+        }
+
+        // Sanity: the original target (pre-drop) must itself see the data we just appended.
+        // If this fails, the problem is in apply/append visibility, not restart persistence.
+        let pre_p = harness::exec(&mut target, "AT LENS p 50");
+        let pre_p_val = match pre_p {
+            libtau::Output::Value(v) => v,
+            other => panic!("pre-restart AT p 50 unexpected: {other:?}"),
+        };
+        assert_eq!(
+            pre_p_val,
+            Some(libtau::Value::Int(1)),
+            "original target cannot see its own append to p"
+        );
+
+        // Drop the target (ensuring last flush completed) and reopen from the on-disk files.
+        drop(target);
+        let mut restarted = disk.reopen_disk_executor(paths);
+        // Ensure tx flags are consistent (no tx in this sequence, but keep the helper honest).
+        crate::apply::sync_transactions(&mut DirectExecutor(&mut restarted), &mut model);
+
+        // Post-restart, the reopened target must match the oracle for data and names.
+        // (Schema for p, the appends to p and i0, the TTL on p, and absence of p2 were all
+        // persisted via append_schema/append + flush on each write.)
+        for (lens, t, expected) in [
+            ("p", 50, Some(libtau::Value::Int(1))),
+            ("p", 150, Some(libtau::Value::Int(2))),
+            ("a", 30, Some(libtau::Value::Int(99))),
+            ("a", 1000, None),
+        ] {
+            let out = harness::exec(&mut restarted, &format!("AT LENS {lens} {t}"));
+            let got = match out {
+                libtau::Output::Value(v) => v,
+                other => panic!("expected Value for AT, got {other:?}"),
+            };
+            assert_eq!(got, expected, "AT LENS {lens} {t} mismatch after reopen");
+        }
+
+        // p2 was dropped before restart; it must still be unknown (DROP persisted).
+        let (_, stmt) = libtau::parse("AT LENS p2 0").expect("parse p2 at");
+        let direct_res = restarted.exec(&stmt);
+        assert!(
+            direct_res.is_err(),
+            "p2 should remain dropped after reopen: {direct_res:?}"
+        );
+
+        // SHOW LENSES should not include the dropped p2 (but will include the base set + p).
+        if let libtau::Output::Names(names) = harness::exec(&mut restarted, "SHOW LENSES") {
+            assert!(
+                !names.iter().any(|n| n == "p2"),
+                "p2 must not appear after restart"
+            );
+            assert!(names.iter().any(|n| n == "p"), "p must survive restart");
+        } else {
+            panic!("SHOW LENSES did not return Names");
+        }
+    }
 }
