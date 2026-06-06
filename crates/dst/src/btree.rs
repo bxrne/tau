@@ -119,7 +119,6 @@ fn build_tree() -> Tree<SimCtx, Op> {
                 },
             },
         ))
-        // Start transaction
         .leaf(Leaf::new(
             2,
             tags::WAL_EXCLUDED,
@@ -139,21 +138,18 @@ fn build_tree() -> Tree<SimCtx, Op> {
                 }
             },
         ))
-        // Commit
         .leaf(Leaf::new(
             2,
             tags::WAL_EXCLUDED,
             |c: &SimCtx| c.in_transaction,
             |_, _| Op::Commit,
         ))
-        // Rollback
         .leaf(Leaf::new(
             1,
             tags::WAL_EXCLUDED,
             |c: &SimCtx| c.in_transaction,
             |_, _| Op::Rollback,
         ))
-        // AT — int, any DB
         .leaf(Leaf::new(
             9,
             0,
@@ -163,7 +159,6 @@ fn build_tree() -> Tree<SimCtx, Op> {
                 t: rng.gen_range(-50..3000),
             },
         ))
-        // AT — derived lens
         .leaf(Leaf::new(
             3,
             0,
@@ -175,7 +170,6 @@ fn build_tree() -> Tree<SimCtx, Op> {
                 t: rng.gen_range(-50..3000),
             },
         ))
-        // AT — mixed typed lens
         .leaf(Leaf::new(
             3,
             0,
@@ -197,7 +191,6 @@ fn build_tree() -> Tree<SimCtx, Op> {
                 }
             },
         ))
-        // RANGE — int, any DB
         .leaf(Leaf::new(
             15,
             0,
@@ -211,7 +204,6 @@ fn build_tree() -> Tree<SimCtx, Op> {
                 }
             },
         ))
-        // RANGE — derived lens
         .leaf(Leaf::new(
             3,
             0,
@@ -227,7 +219,6 @@ fn build_tree() -> Tree<SimCtx, Op> {
                 }
             },
         ))
-        // REDUCE
         .leaf(Leaf::new(
             5,
             0,
@@ -248,7 +239,6 @@ fn build_tree() -> Tree<SimCtx, Op> {
                 }
             },
         ))
-        // CREATE / DROP dynamic lens
         .leaf(Leaf::new(
             3,
             0,
@@ -268,7 +258,6 @@ fn build_tree() -> Tree<SimCtx, Op> {
                 }
             },
         ))
-        // DERIVE lens
         .leaf(Leaf::new(
             2,
             0,
@@ -287,7 +276,6 @@ fn build_tree() -> Tree<SimCtx, Op> {
                 },
             },
         ))
-        // DROP derived lens
         .leaf(Leaf::new(
             1,
             0,

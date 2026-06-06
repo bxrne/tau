@@ -125,21 +125,25 @@ mod tests {
     use std::sync::RwLock;
 
     fn metrics_response(request: &[u8]) -> String {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").expect("test metrics bind");
+        let addr = listener.local_addr().expect("test metrics addr");
         let metrics = Arc::new(RwLock::new(Executor::new()))
             .read()
-            .unwrap()
+            .expect("test metrics read lock")
             .metrics();
         thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
+            let (mut stream, _) = listener.accept().expect("test metrics accept");
             handle_metrics_request(&mut stream, &metrics);
         });
-        let mut client = TcpStream::connect(addr).unwrap();
-        client.write_all(request).unwrap();
-        client.flush().unwrap();
+        let mut client = TcpStream::connect(addr).expect("test metrics connect");
+        client
+            .write_all(request)
+            .expect("test metrics request write");
+        client.flush().expect("test metrics flush");
         let mut resp = String::new();
-        client.read_to_string(&mut resp).unwrap();
+        client
+            .read_to_string(&mut resp)
+            .expect("test metrics response read");
         resp
     }
 

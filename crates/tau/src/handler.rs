@@ -302,7 +302,7 @@ mod tests {
             }));
         }
         for h in handles {
-            h.join().unwrap();
+            h.join().expect("reader thread panicked");
         }
     }
 
@@ -333,7 +333,7 @@ mod tests {
     #[test]
     fn exec_read_rejects_mutations() {
         let e = exec();
-        let guard = e.write().unwrap();
+        let guard = e.write().expect("test executor lock");
         let stmt = Stmt::CreateDatabase { name: "a".into() };
         assert!(matches!(
             guard.exec_read(&stmt),
@@ -368,10 +368,10 @@ mod tests {
     }
 
     fn connected_pair() -> (TcpStream, TcpStream, SocketAddr) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let client = TcpStream::connect(addr).unwrap();
-        let (server, peer) = listener.accept().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").expect("test bind on localhost:0");
+        let addr = listener.local_addr().expect("test listener has local addr");
+        let client = TcpStream::connect(addr).expect("test connect to ephemeral listener");
+        let (server, peer) = listener.accept().expect("test accept");
         (client, server, peer)
     }
 
@@ -384,10 +384,10 @@ mod tests {
             let _ = run_query_loop(&mut reader, peer, &e, false);
         });
         let mut br = BufReader::new(client);
-        writeln!(br.get_mut(), "QUIT").unwrap();
-        br.get_mut().flush().unwrap();
+        writeln!(br.get_mut(), "QUIT").expect("test write QUIT");
+        br.get_mut().flush().expect("test flush");
         let mut resp = String::new();
-        br.read_line(&mut resp).unwrap();
+        br.read_line(&mut resp).expect("test read response");
         assert_eq!(resp.trim(), "OK BYE");
     }
 
@@ -396,20 +396,22 @@ mod tests {
         let (client, server, peer) = connected_pair();
         let e = exec();
         {
-            let mut g = e.write().unwrap();
+            let mut g = e.write().expect("test executor lock");
             let mut grants = HashMap::new();
             grants.insert("*".to_string(), Perm::ALL);
-            g.users_mut().add(User::new("admin", "pw", grants)).unwrap();
+            g.users_mut()
+                .add(User::new("admin", "pw", grants))
+                .expect("add test admin user");
         }
         thread::spawn(move || {
             let mut reader = BufReader::new(server);
             let _ = run_query_loop(&mut reader, peer, &e, true);
         });
         let mut br = BufReader::new(client);
-        writeln!(br.get_mut(), "CREATE DATABASE nope").unwrap();
-        br.get_mut().flush().unwrap();
+        writeln!(br.get_mut(), "CREATE DATABASE nope").expect("test write");
+        br.get_mut().flush().expect("test flush");
         let mut resp = String::new();
-        br.read_line(&mut resp).unwrap();
+        br.read_line(&mut resp).expect("test read");
         assert!(resp.contains("ERR authentication required"), "got: {resp}");
     }
 }

@@ -1574,14 +1574,11 @@ fn unset_ttl_restores_visibility() {
     run(&mut e, "CREATE LENS sensor int").unwrap();
     run(&mut e, "APPEND LENS sensor 0 10 99").unwrap();
     run(&mut e, "SET TTL LENS sensor 1").unwrap();
-    // verify hidden
     let Output::Value(hidden) = run(&mut e, "AT LENS sensor 5").unwrap() else {
         panic!()
     };
     assert_eq!(hidden, None);
-    // remove TTL
     run(&mut e, "UNSET TTL LENS sensor").unwrap();
-    // now visible again
     let Output::Value(visible) = run(&mut e, "AT LENS sensor 5").unwrap() else {
         panic!()
     };

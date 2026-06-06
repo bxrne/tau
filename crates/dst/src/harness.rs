@@ -49,7 +49,7 @@ pub fn run_concurrent(n_writes: usize, n_readers: usize, seed: u64) -> RunResult
             thread::spawn(move || {
                 let mut rng = StdRng::seed_from_u64(seed ^ (id as u64).wrapping_mul(0xDEAD_BEEF));
                 loop {
-                    if *stop_arc.read().unwrap() {
+                    if *stop_arc.read().expect("stop flag lock poisoned") {
                         break;
                     }
                     let lens = if rng.gen_bool(0.5) { "a" } else { "b" };
@@ -65,11 +65,13 @@ pub fn run_concurrent(n_writes: usize, n_readers: usize, seed: u64) -> RunResult
                         for &(ss, se, _) in &segs {
                             if ss >= se {
                                 error!(reader = id, ss, se, "INVALID SEGMENT");
-                                *errs_arc.write().unwrap() += 1;
+                                *errs_arc.write().expect("error counter lock poisoned") += 1;
                             }
-                            if prev.is_some_and(|p| ss < p) {
-                                error!(reader = id, prev_end = prev.unwrap(), ss, "OVERLAP");
-                                *errs_arc.write().unwrap() += 1;
+                            if let Some(prev_end) = prev
+                                && ss < prev_end
+                            {
+                                error!(reader = id, prev_end, ss, "OVERLAP");
+                                *errs_arc.write().expect("error counter lock poisoned") += 1;
                             }
                             prev = Some(se);
                         }
@@ -94,7 +96,7 @@ pub fn run_concurrent(n_writes: usize, n_readers: usize, seed: u64) -> RunResult
         let taus = gen_int_taus(&mut write_rng, count);
         let data = Payload::Int(taus);
         {
-            let mut guard = executor.write().unwrap();
+            let mut guard = executor.write().expect("executor lock poisoned");
             let divs = apply_dual(
                 i,
                 &Op::Append {
@@ -112,15 +114,15 @@ pub fn run_concurrent(n_writes: usize, n_readers: usize, seed: u64) -> RunResult
         thread::sleep(Duration::from_micros(50));
     }
 
-    *stop.write().unwrap() = true;
+    *stop.write().expect("stop flag lock poisoned") = true;
     for h in reader_handles {
         h.join().expect("reader thread panicked");
     }
 
-    let reader_errs = *reader_errors.read().unwrap();
+    let reader_errs = *reader_errors.read().expect("reader errors lock poisoned");
     let mut reconcile_errs = 0;
     {
-        let guard = executor.read().unwrap();
+        let guard = executor.read().expect("executor lock poisoned");
         for lens in op::INT {
             for &t in &[100i64, 500, 1000, 1500, 2000, 2499] {
                 if let Ok(Output::Value(got)) = exec_read(&guard, &format!("AT LENS {lens} {t}"))

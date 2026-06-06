@@ -255,7 +255,7 @@ where
     /// Used during WAL-replay startup to restore `next_layer_id` so new
     /// layers never collide with replayed ones.
     pub fn max_layer_id(&self) -> LayerId {
-        let store = self.store.read().unwrap();
+        let store = self.store.read().expect("store lock poisoned");
         store
             .lens_names()
             .iter()
