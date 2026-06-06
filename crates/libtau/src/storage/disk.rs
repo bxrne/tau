@@ -429,7 +429,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn create_append_at_matches_in_memory(tc: TestCase) {
+    fn pbt_create_append_at_matches_in_memory(tc: TestCase) {
         let lens = tc.draw(lens_name_gen());
         let layer = Layer::new(1, tc.draw(taus_gen()));
         let probe = tc.draw(gs::integers::<i64>().min_value(-10).max_value(2000));
@@ -446,7 +446,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn open_after_flush_replays_data_unencrypted(tc: TestCase) {
+    fn pbt_open_after_flush_replays_data_unencrypted(tc: TestCase) {
         let lens = tc.draw(lens_name_gen());
         let layer = Layer::new(1, tc.draw(taus_gen()));
         let probe = tc.draw(gs::integers::<i64>().min_value(-10).max_value(2000));
@@ -466,7 +466,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn open_after_flush_replays_data_encrypted(tc: TestCase) {
+    fn pbt_open_after_flush_replays_data_encrypted(tc: TestCase) {
         let key_bytes = tc.draw(gs::vecs(gs::integers::<u8>()).min_size(32).max_size(32));
         let lens = tc.draw(lens_name_gen());
         let layer = Layer::new(1, tc.draw(taus_gen()));
@@ -493,7 +493,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn encrypted_file_rejects_open_without_key(tc: TestCase) {
+    fn pbt_encrypted_file_rejects_open_without_key(tc: TestCase) {
         let key_bytes = tc.draw(gs::vecs(gs::integers::<u8>()).min_size(32).max_size(32));
         let lens = tc.draw(lens_name_gen());
         let layer = Layer::new(1, tc.draw(taus_gen()));
@@ -509,7 +509,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn encrypted_file_rejects_open_with_wrong_key(tc: TestCase) {
+    fn pbt_encrypted_file_rejects_open_with_wrong_key(tc: TestCase) {
         let lens = tc.draw(lens_name_gen());
         let layer = Layer::new(1, tc.draw(taus_gen()));
         let key_bytes = tc.draw(gs::vecs(gs::integers::<u8>()).min_size(32).max_size(32));
@@ -527,7 +527,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn invalid_magic_rejected(tc: TestCase) {
+    fn pbt_invalid_magic_rejected(tc: TestCase) {
         let bytes = tc.draw(gs::vecs(gs::integers::<u8>()).min_size(4).max_size(64));
         if &bytes[..4] == b"TAUZ" {
             return; // skip valid prefix
@@ -539,7 +539,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn custom_compression_level_round_trips(tc: TestCase) {
+    fn pbt_custom_compression_level_round_trips(tc: TestCase) {
         let level = tc.draw(gs::integers::<i32>().min_value(1).max_value(22));
         let lens = tc.draw(lens_name_gen());
         let layer = Layer::new(1, tc.draw(taus_gen()));
@@ -577,7 +577,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn multiple_lenses_round_trip(tc: TestCase) {
+    fn pbt_multiple_lenses_round_trip(tc: TestCase) {
         let entries: Vec<(String, Layer<i32>)> = (0..3)
             .map(|i| {
                 let mut name = tc.draw(lens_name_gen());

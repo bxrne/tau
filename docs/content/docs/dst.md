@@ -86,12 +86,14 @@ Each profile in a run is driven with the same `--seed` (re-seeded per profile fo
 | Memory | Rebuild target + oracle, dual-replay op log |
 | WAL (odd) | Delete WAL + oracle replay; dual-replay op log |
 | WAL (even) | Truncate WAL at random offset; fresh target; reset op log |
-| Disk | Wipe target `.dat` trees, dual-replay op log |
+| Disk | Wipe target `.dat` files, dual-replay op log (tests replay equivalence). A separate `pbt_disk_persists_*_across_reopen` test exercises faithful restart over the real persisted files (no wipe) after per-append flushes. |
 | Wire | Memory-style replay (no WAL/disk files) |
 
 **Transactions** are enabled for memory/disk/wire profiles. WAL profiles use `WAL_EXCLUDED` tags in the behavior tree to skip transaction and multi-DB ops until single-DB WAL replay semantics are fully validated.
 
 For TTL, DST pins the wall clock via [`wall_clock::set_fixed_now_secs`](https://github.com/bxrne/tau/tree/master/crates/libtau/src/wall_clock.rs) (`1_700_000_000`).
+
+The `disk` backend (when selected) now flushes its `<db>.dat` atomically on *every* append and every schema DDL (`CREATE`/`DERIVE`/`SET TTL`/`DROP`). This makes acknowledged DML and lens definitions durable across clean restarts without a WAL; `CREATE DATABASE <name>` on a disk executor re-opens the `.dat` and replays its embedded schema section to restore base/derived lenses and TTL policies. The new `pbt_disk_persists_data_and_schema_across_reopen` test in `sim.rs` covers this path under the DST harness.
 
 ## Concurrent phase
 
@@ -114,5 +116,7 @@ Then the Docker image build.
 cargo nextest run --release -p libdst   # framework: btree, divergence, scheduler, shrink, ...
 cargo nextest run --release -p dst      # driver: oracle, apply, btree, sim profiles
 ```
+
+All `#[hegel::test]` property-based tests across crates are named with a `pbt_` prefix (e.g. `pbt_...`) so they are easy to filter in logs and CI output.
 
 See [Testing](/docs/testing/) for the full strategy.

@@ -587,7 +587,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn apply_unary_neg_int_negates(tc: TestCase) {
+    fn pbt_apply_unary_neg_int_negates(tc: TestCase) {
         let v = tc.draw(gs::integers::<i64>());
         assert_eq!(
             apply_unary(UnOp::Neg, Value::Int(v)).unwrap(),
@@ -596,7 +596,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn apply_unary_neg_float_negates(tc: TestCase) {
+    fn pbt_apply_unary_neg_float_negates(tc: TestCase) {
         let v = tc.draw(gs::floats::<f64>().filter(|f| f.is_finite()));
         assert_eq!(
             apply_unary(UnOp::Neg, Value::Float(v)).unwrap(),
@@ -605,7 +605,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn apply_unary_not_inverts_bool(tc: TestCase) {
+    fn pbt_apply_unary_not_inverts_bool(tc: TestCase) {
         let b = tc.draw(gs::booleans());
         assert_eq!(
             apply_unary(UnOp::Not, Value::Bool(b)).unwrap(),
@@ -614,19 +614,19 @@ mod tests {
     }
 
     #[hegel::test]
-    fn apply_unary_neg_bool_errors(tc: TestCase) {
+    fn pbt_apply_unary_neg_bool_errors(tc: TestCase) {
         let b = tc.draw(gs::booleans());
         assert!(apply_unary(UnOp::Neg, Value::Bool(b)).is_err());
     }
 
     #[hegel::test]
-    fn apply_unary_not_non_bool_errors(tc: TestCase) {
+    fn pbt_apply_unary_not_non_bool_errors(tc: TestCase) {
         let v = tc.draw(gs::integers::<i64>());
         assert!(apply_unary(UnOp::Not, Value::Int(v)).is_err());
     }
 
     #[hegel::test]
-    fn apply_binary_int_add_is_wrapping(tc: TestCase) {
+    fn pbt_apply_binary_int_add_is_wrapping(tc: TestCase) {
         let x = tc.draw(gs::integers::<i64>());
         let y = tc.draw(gs::integers::<i64>());
         let r = apply_binary(BinOp::Add, Value::Int(x), Value::Int(y)).unwrap();
@@ -634,7 +634,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn apply_binary_int_sub_is_wrapping(tc: TestCase) {
+    fn pbt_apply_binary_int_sub_is_wrapping(tc: TestCase) {
         let x = tc.draw(gs::integers::<i64>());
         let y = tc.draw(gs::integers::<i64>());
         let r = apply_binary(BinOp::Sub, Value::Int(x), Value::Int(y)).unwrap();
@@ -642,7 +642,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn apply_binary_int_mul_is_wrapping(tc: TestCase) {
+    fn pbt_apply_binary_int_mul_is_wrapping(tc: TestCase) {
         let x = tc.draw(gs::integers::<i64>().min_value(-1000).max_value(1000));
         let y = tc.draw(gs::integers::<i64>().min_value(-1000).max_value(1000));
         let r = apply_binary(BinOp::Mul, Value::Int(x), Value::Int(y)).unwrap();
@@ -660,7 +660,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn apply_binary_int_cmp_lt(tc: TestCase) {
+    fn pbt_apply_binary_int_cmp_lt(tc: TestCase) {
         let x = tc.draw(gs::integers::<i64>().min_value(-1000).max_value(1000));
         let y = tc.draw(gs::integers::<i64>().min_value(-1000).max_value(1000));
         let r = apply_binary(BinOp::Lt, Value::Int(x), Value::Int(y)).unwrap();
@@ -668,7 +668,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn apply_binary_bool_and(tc: TestCase) {
+    fn pbt_apply_binary_bool_and(tc: TestCase) {
         let a = tc.draw(gs::booleans());
         let b = tc.draw(gs::booleans());
         let r = apply_binary(BinOp::And, Value::Bool(a), Value::Bool(b)).unwrap();
@@ -676,7 +676,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn apply_binary_bool_or(tc: TestCase) {
+    fn pbt_apply_binary_bool_or(tc: TestCase) {
         let a = tc.draw(gs::booleans());
         let b = tc.draw(gs::booleans());
         let r = apply_binary(BinOp::Or, Value::Bool(a), Value::Bool(b)).unwrap();
@@ -684,20 +684,20 @@ mod tests {
     }
 
     #[hegel::test]
-    fn apply_binary_and_non_bool_errors(tc: TestCase) {
+    fn pbt_apply_binary_and_non_bool_errors(tc: TestCase) {
         let v = tc.draw(gs::integers::<i64>());
         assert!(apply_binary(BinOp::And, Value::Int(v), Value::Bool(true)).is_err());
     }
 
     #[hegel::test]
-    fn apply_binary_eq_int_int(tc: TestCase) {
+    fn pbt_apply_binary_eq_int_int(tc: TestCase) {
         let x = tc.draw(gs::integers::<i64>().min_value(-100).max_value(100));
         let r = apply_binary(BinOp::Eq, Value::Int(x), Value::Int(x)).unwrap();
         assert_eq!(r, Value::Bool(true));
     }
 
     #[hegel::test]
-    fn apply_binary_not_eq_distinct_ints(tc: TestCase) {
+    fn pbt_apply_binary_not_eq_distinct_ints(tc: TestCase) {
         let x = tc.draw(gs::integers::<i64>().min_value(-100).max_value(100));
         let y = tc.draw(
             gs::integers::<i64>()
@@ -715,14 +715,14 @@ mod tests {
     }
 
     #[hegel::test]
-    fn values_equal_null_anything_is_false(tc: TestCase) {
+    fn pbt_values_equal_null_anything_is_false(tc: TestCase) {
         let v = tc.draw(gs::integers::<i64>());
         assert_eq!(values_equal(&Value::Null, &Value::Int(v)).unwrap(), false);
         assert_eq!(values_equal(&Value::Int(v), &Value::Null).unwrap(), false);
     }
 
     #[hegel::test]
-    fn values_equal_int_float_promotion(tc: TestCase) {
+    fn pbt_values_equal_int_float_promotion(tc: TestCase) {
         let i = tc.draw(gs::integers::<i64>().min_value(-1000).max_value(1000));
         assert_eq!(
             values_equal(&Value::Int(i), &Value::Float(i as f64)).unwrap(),
@@ -731,7 +731,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn values_equal_str_str(tc: TestCase) {
+    fn pbt_values_equal_str_str(tc: TestCase) {
         let s = tc.draw(gs::text().max_size(32));
         let arc: Arc<str> = Arc::from(s.as_str());
         assert_eq!(
@@ -741,7 +741,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn values_equal_bool_bool(tc: TestCase) {
+    fn pbt_values_equal_bool_bool(tc: TestCase) {
         let b = tc.draw(gs::booleans());
         assert_eq!(
             values_equal(&Value::Bool(b), &Value::Bool(b)).unwrap(),
@@ -759,7 +759,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn as_f64_converts_int_and_float(tc: TestCase) {
+    fn pbt_as_f64_converts_int_and_float(tc: TestCase) {
         let i = tc.draw(
             gs::integers::<i64>()
                 .min_value(-1_000_000)
@@ -772,7 +772,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn agg_sum_ints_matches_wrapping_sum(tc: TestCase) {
+    fn pbt_agg_sum_ints_matches_wrapping_sum(tc: TestCase) {
         let vals =
             tc.draw(gs::vecs(gs::integers::<i64>().min_value(-1000).max_value(1000)).max_size(20));
         let segs: Vec<(i64, Value)> = vals.iter().map(|&v| (1i64, Value::Int(v))).collect();
@@ -791,7 +791,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn agg_avg_equal_durations_is_arithmetic_mean(tc: TestCase) {
+    fn pbt_agg_avg_equal_durations_is_arithmetic_mean(tc: TestCase) {
         let vals = tc.draw(
             gs::vecs(gs::integers::<i64>().min_value(-100).max_value(100))
                 .min_size(2)
@@ -813,7 +813,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn numeric_min_max_ints(tc: TestCase) {
+    fn pbt_numeric_min_max_ints(tc: TestCase) {
         let x = tc.draw(gs::integers::<i64>().min_value(-1000).max_value(1000));
         let y = tc.draw(gs::integers::<i64>().min_value(-1000).max_value(1000));
         assert_eq!(
@@ -885,7 +885,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn eval_lens_in_range_vs_out_of_range(tc: TestCase) {
+    fn pbt_eval_lens_in_range_vs_out_of_range(tc: TestCase) {
         let t_in = tc.draw(gs::integers::<i64>().min_value(0).max_value(99));
         let t_out = tc.draw(gs::integers::<i64>().min_value(100).max_value(1_000_000));
         let state = make_int_state("x", &[(0, 100, 7)]);
@@ -966,7 +966,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn at_layers_newest_wins(tc: TestCase) {
+    fn pbt_at_layers_newest_wins(tc: TestCase) {
         let t = tc.draw(gs::integers::<i64>().min_value(0).max_value(9));
         let v1 = tc.draw(gs::integers::<i64>());
         let v2 = tc.draw(gs::integers::<i64>());
@@ -978,7 +978,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn at_layers_returns_none_outside_all_layers(tc: TestCase) {
+    fn pbt_at_layers_returns_none_outside_all_layers(tc: TestCase) {
         let t = tc.draw(gs::integers::<i64>().min_value(100).max_value(1_000_000));
         let layers = vec![Layer::new(1, vec![Tau::new(0, 10, Value::Int(1))])];
         assert_eq!(at_layers(&layers, t), None);

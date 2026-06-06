@@ -268,7 +268,7 @@ mod tests {
     }
 
     #[hegel::test(test_cases = 1000)]
-    fn property_toml_round_trip(tc: TestCase) {
+    fn pbt_property_toml_round_trip(tc: TestCase) {
         let original_config = tc.draw(config_generator());
         let toml_string = toml::to_string(&original_config)
             .expect("Valid structural Config setups must serialize smoothly");

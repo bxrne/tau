@@ -60,7 +60,7 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     #[hegel::test]
-    fn encrypt_decrypt_roundtrips(tc: TestCase) {
+    fn pbt_encrypt_decrypt_roundtrips(tc: TestCase) {
         let key_bytes = tc.draw(gs::vecs(gs::integers::<u8>()).min_size(32).max_size(32));
         let plaintext = tc.draw(gs::vecs(gs::integers::<u8>()).max_size(2048));
         let mut key = [0u8; 32];
@@ -71,7 +71,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn decrypt_rejects_too_short_blobs(tc: TestCase) {
+    fn pbt_decrypt_rejects_too_short_blobs(tc: TestCase) {
         let blob = tc.draw(gs::vecs(gs::integers::<u8>()).max_size(11));
         let key_bytes = tc.draw(gs::vecs(gs::integers::<u8>()).min_size(32).max_size(32));
         let key: [u8; 32] = key_bytes.try_into().expect("exactly 32 bytes");
@@ -79,7 +79,7 @@ mod tests {
     }
 
     #[hegel::test]
-    fn decrypt_rejects_wrong_key(tc: TestCase) {
+    fn pbt_decrypt_rejects_wrong_key(tc: TestCase) {
         let plaintext = tc.draw(gs::vecs(gs::integers::<u8>()).min_size(1).max_size(512));
         let key_bytes = tc.draw(gs::vecs(gs::integers::<u8>()).min_size(32).max_size(32));
         let key_a: [u8; 32] = key_bytes.try_into().expect("exactly 32 bytes");
