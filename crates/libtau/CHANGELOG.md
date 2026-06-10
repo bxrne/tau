@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.3](https://github.com/bxrne/tau/compare/libtau-v0.3.2...libtau-v0.3.3) (2026-06-10)
+
+
+### Bug Fixes
+
+* **libtau, tau:** bound wire line length, WAL serial append and ckpt for safe rotation w.r.t layers and added multi-stmt protocol tests ([a10d8a0](https://github.com/bxrne/tau/commit/a10d8a0f3d9465456a1078e23edb34d31fa3ca74))
+
 ## [0.3.2](https://github.com/bxrne/tau/compare/libtau-v0.3.1...libtau-v0.3.2) (2026-06-10)
 
 
