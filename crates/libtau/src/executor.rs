@@ -55,7 +55,6 @@ pub struct LayerInfo {
     /// Monotonic layer identifier assigned at write time.
     pub id: LayerId,
     /// Wall-clock write time (milliseconds since Unix epoch).
-    /// `0` for layers replayed from WAL files that predate the timestamp field.
     pub written_at: i64,
     /// Earliest tau start in this layer.
     pub min_start: Timestamp,
@@ -1138,7 +1137,7 @@ impl Executor {
             .layers(name)
             .map(|arc| {
                 arc.iter()
-                    .filter(|l| l.written_at == 0 || l.written_at <= as_of)
+                    .filter(|l| l.written_at <= as_of)
                     .cloned()
                     .collect()
             })

@@ -46,8 +46,7 @@ pub struct Layer<V> {
     pub max_end: Timestamp,
     pub taus: Arc<[Tau<V>]>,
     /// Wall-clock time (milliseconds since Unix epoch) when this layer was
-    /// first written.  Set to 0 for layers replayed from WAL files that
-    /// predate the timestamp field (backward-compatible replay).
+    /// first written.  Restored verbatim on WAL/disk replay.
     pub written_at: i64,
 }
 

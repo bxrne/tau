@@ -288,8 +288,6 @@ AT LENS temperature 1800 AS OF 1717000000000
 → VAL f17.2
 ```
 
-Layers written before the `written_at` field was introduced (i.e. replayed from older WAL files) have `written_at = 0` and are always included regardless of the `AS OF` argument.
-
 Only works on base lenses; derived lenses return an error.
 
 Requires `R` permission.
@@ -376,7 +374,7 @@ HISTORY LENS cpu 3600 7200
 Response format: `LAYERS <n>; <id>:<written_at>:<min_start>:<max_end>; …`
 
 - `id` — monotonic layer identifier assigned at write time
-- `written_at` — wall-clock milliseconds since Unix epoch (`0` for legacy WAL entries)
+- `written_at` — wall-clock milliseconds since Unix epoch, restored verbatim across restarts
 - `min_start` — earliest tau start in the layer
 - `max_end` — latest tau end in the layer
 

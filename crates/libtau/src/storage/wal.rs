@@ -97,17 +97,10 @@ fn write_data_line<V: Codec>(
 }
 
 /// One serialised append record.
-///
-/// The wire format encodes `written_at` between `layer_id` and `lens` so that
-/// the field can be detected by probing whether the second payload token is
-/// all-digit (timestamp) or alpha/underscore-prefixed (lens name from an older
-/// WAL file).  Backward-compatible: old entries deserialise with `written_at`
-/// set to `0`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WalEntry<V> {
     pub layer_id: LayerId,
     /// Wall-clock milliseconds since Unix epoch when this layer was written.
-    /// `0` indicates an entry from a WAL file that predates this field.
     pub written_at: i64,
     pub lens: String,
     pub taus: Vec<(Timestamp, Timestamp, V)>,
@@ -152,12 +145,7 @@ impl<V: Codec> WalEntry<V> {
     }
 
     /// Deserialise from one line of the log file, verifying checksum.
-    ///
-    /// Handles both the current format (`layer_id written_at lens [taus]`) and
-    /// the legacy format (`layer_id lens [taus]`).  Legacy entries get
-    /// `written_at = 0`.  The two formats are distinguished by checking whether
-    /// the second payload token starts with an ASCII digit: timestamps always
-    /// do, while lens names always start with a letter or `_`.
+    /// Format: `<crc32> <layer_id> <written_at_ms> <lens_name> [<taus>]`.
     pub fn deserialise(line: &str) -> Option<Self> {
         let line = line.trim();
         if line.is_empty() {
@@ -177,25 +165,11 @@ impl<V: Codec> WalEntry<V> {
             return None;
         }
 
-        // Peel off layer_id, then probe the next token to detect format version.
         let mut tokens = payload.splitn(4, ' ');
         let layer_id: LayerId = tokens.next()?.parse().ok()?;
-        let second = tokens.next()?;
-
-        // If second token is all-ASCII-digits it's the new written_at field;
-        // otherwise it's the lens name from the legacy format.
-        let (written_at, lens, rest_str) =
-            if second.chars().next().is_some_and(|c| c.is_ascii_digit()) {
-                let written_at: i64 = second.parse().ok()?;
-                let lens = tokens.next()?.to_string();
-                let rest = tokens.next().unwrap_or("");
-                (written_at, lens, rest)
-            } else {
-                // Legacy format: second token is lens name.
-                let lens = second.to_string();
-                let rest = tokens.next().unwrap_or("");
-                (0i64, lens, rest)
-            };
+        let written_at: i64 = tokens.next()?.parse().ok()?;
+        let lens = tokens.next()?.to_string();
+        let rest_str = tokens.next().unwrap_or("");
 
         let taus = if rest_str.is_empty() {
             vec![]

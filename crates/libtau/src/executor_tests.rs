@@ -1193,7 +1193,7 @@ fn at_as_of_with_max_timestamp_includes_all_data() {
     let mut e = setup();
     run(&mut e, "CREATE LENS x int").unwrap();
     run(&mut e, "APPEND LENS x 0 10 42").unwrap();
-    // written_at=0 for in-memory appends, so any as_of value includes them.
+    // as_of far in the future includes every layer written so far.
     let (_, stmt) = parse("AT LENS x 5 AS OF 9999999999999").unwrap();
     assert_eq!(
         e.exec_read(&stmt).unwrap(),
@@ -1663,8 +1663,8 @@ fn disk_backend_persists_written_at_for_as_of_across_restart() {
     let mut e = Executor::with_disk_backend(dir.path(), threshold, 3, None).unwrap();
     run(&mut e, "CREATE DATABASE main").unwrap();
 
-    // Recover the persisted write timestamp via HISTORY; it must be a real
-    // wall-clock value, not the legacy 0 sentinel (which AT AS OF always shows).
+    // Recover the persisted write timestamp via HISTORY; it must be the real
+    // wall-clock value, not a reopen-time restamp.
     let Output::LayerHistory(layers) = run(&mut e, "HISTORY LENS temp").unwrap() else {
         panic!("expected layer history");
     };
