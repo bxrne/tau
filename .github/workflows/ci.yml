@@ -46,7 +46,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-fuzz
-      - run: cargo +nightly fuzz check --fuzz-dir crates/fuzztau
+      - run: cargo +nightly fuzz check --fuzz-dir crates/fuzztau --target x86_64-unknown-linux-gnu
 
   dst:
     name: DST (all libtau profiles + concurrent)
