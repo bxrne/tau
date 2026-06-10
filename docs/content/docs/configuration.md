@@ -14,14 +14,14 @@ with defaults.
 ## Quick start
 
 ```bash
-# Copy the sample and edit
-cp config.toml my-tau.toml
+# Copy the sample (used by the Docker stack) and edit
+curl -fsSLO https://raw.githubusercontent.com/bxrne/tau/master/container/tau-config.toml
 
 # Start with the default config.toml in the current directory
 tau
 
 # Or point at a specific path
-tau --config /etc/tau/config.toml
+tau --config /etc/tau/tau-config.toml
 ```
 
 ---
@@ -42,7 +42,6 @@ compression_level = 3      # zstd level 1–22; higher = better ratio, slower wr
 enabled = true
 path = "/var/lib/tau/tau.wal"
 no_fsync_each = false       # true: 50 ms group-commit; risk: up to one interval of data loss
-no_auto_checkpoint = false
 max_size_mb = 512           # rotate WAL when it reaches 512 MiB; omit to disable
 
 [tls]
@@ -61,7 +60,7 @@ port = 9100                 # serves GET /metrics and GET /healthz
 
 [limits]
 max_connections = 1024
-idle_timeout_secs = 300     # 0 disables
+idle_timeout_secs = 300     # omit to disable (default: no timeout)
 ```
 
 ---
@@ -101,14 +100,13 @@ change, so an acknowledged write is durable before the response returns; the
 | `enabled` | `false` | Enable write-ahead logging for durability across restarts |
 | `path` | (none) | Path for the WAL file — required when `enabled = true` |
 | `no_fsync_each` | `false` | Skip per-record WAL flush+sync; a background thread flushes every 50 ms |
-| `no_auto_checkpoint` | `false` | Skip WAL checkpoint rotate after compaction |
 | `max_size_mb` | (none) | Soft size cap in MiB. Once the WAL file reaches this size, the next write triggers a checkpoint rewrite to keep the file bounded. Omit to disable the cap. |
 
 When `enabled = true`, every write is fsynced to the WAL before being applied
 to the in-memory store. On startup, the WAL is replayed to reconstruct state.
 Without the WAL, data is in-memory only and lost on process exit.
 
-The `no_*` fields trade durability for throughput. Use only on trusted
+`no_fsync_each` trades durability for throughput. Use only on trusted
 workloads or when an external durability boundary (replication, backup) exists.
 
 ---
@@ -167,7 +165,7 @@ GET http://0.0.0.0:<port>/healthz    Liveness probe
 | field | default | description |
 |-------|---------|-------------|
 | `max_connections` | `1024` | Maximum concurrent client connections; new connections beyond the cap receive `ERR server at connection limit` |
-| `idle_timeout_secs` | `300` | Per-connection idle timeout in seconds; `0` disables |
+| `idle_timeout_secs` | (none) | Per-connection idle timeout in seconds; omit to disable |
 
 ---
 
@@ -179,7 +177,7 @@ GET http://0.0.0.0:<port>/healthz    Liveness probe
 
 ```bash
 export TAU_ENCRYPTION_KEY=$(openssl rand -hex 32)
-tau --config /etc/tau/config.toml
+tau --config /etc/tau/tau-config.toml
 ```
 
 ---

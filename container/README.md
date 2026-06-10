@@ -26,7 +26,7 @@ open http://localhost:3000   # login: GRAFANA_USER / GRAFANA_PASSWORD from .env
 
 ## Configuration
 
-All server settings live in **`tau-config.toml`** (mounted as `/data/config.toml`
+All server settings live in **`tau-config.toml`** (mounted as `/data/tau-config.toml`
 inside the container). Edit it before starting the stack:
 
 ```toml

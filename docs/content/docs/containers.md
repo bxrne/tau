@@ -21,13 +21,13 @@ docker run --rm -p 7070:7070 ghcr.io/bxrne/tau:latest
 docker run -d --name tau \
   -p 7070:7070 -p 9100:9100 \
   -v tau_data:/data \
-  -v "$PWD/config.toml:/data/config.toml:ro" \
+  -v "$PWD/tau-config.toml:/data/tau-config.toml:ro" \
   -e TAU_ENCRYPTION_KEY="$(openssl rand -hex 32)" \
-  ghcr.io/bxrne/tau:latest --config /data/config.toml
+  ghcr.io/bxrne/tau:latest --config /data/tau-config.toml
 ```
 
 The image is a `scratch` base with a single static musl binary; its entrypoint is
-`/tau` and it defaults to `--config /data/config.toml`. The `/data` directory is a
+`/tau` and it defaults to `--config /data/tau-config.toml`. The `/data` directory is a
 declared volume — mount a named volume or host path there to persist the WAL and
 the users database across restarts.
 
@@ -88,7 +88,7 @@ Host-visible ports default to `127.0.0.1` so nothing is exposed beyond loopback 
 ## Configuration
 
 The Docker stack mounts `container/tau-config.toml` into the container as
-`/data/config.toml` and passes `--config /data/config.toml` to the server.
+`/data/tau-config.toml` and passes `--config /data/tau-config.toml` to the server.
 Edit `tau-config.toml` directly for all server settings:
 
 ```toml
@@ -265,7 +265,7 @@ helm install tau container/helm/tau \
 The chart creates:
 - A **StatefulSet** with one replica and a stable pod name (`tau-0`)
 - A **PersistentVolumeClaim** for `/data` (WAL + users database)
-- A **ConfigMap** rendered from `values.yaml` and mounted as `/etc/tau/config.toml`
+- A **ConfigMap** rendered from `values.yaml` and mounted as `/etc/tau/tau-config.toml`
 - A **Service** exposing ports 7070 (protocol) and 9100 (metrics)
 
 ### Values reference
@@ -335,6 +335,6 @@ docker build \
   -t tau:local .
 
 docker run --rm -p 7070:7070 \
-  -v $PWD/config.toml:/data/config.toml:ro \
-  tau:local --config /data/config.toml
+  -v $PWD/container/tau-config.toml:/data/tau-config.toml:ro \
+  tau:local --config /data/tau-config.toml
 ```

@@ -5,7 +5,7 @@ metadata:
   labels:
     {{- include "tau.labels" . | nindent 4 }}
 data:
-  config.toml: |
+  tau-config.toml: |
     bind = "0.0.0.0:{{ .Values.service.port }}"
     log_level = {{ .Values.config.logLevel | quote }}
     compact_threshold = {{ .Values.config.compactThreshold }}

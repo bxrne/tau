@@ -62,4 +62,4 @@ EXPOSE 9100
 VOLUME ["/data"]
 
 ENTRYPOINT ["/tau"]
-CMD ["--config", "/data/config.toml"]
+CMD ["--config", "/data/tau-config.toml"]

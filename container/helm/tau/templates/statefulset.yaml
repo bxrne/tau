@@ -25,7 +25,7 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
             - "--config"
-            - "/etc/tau/config.toml"
+            - "/etc/tau/tau-config.toml"
           ports:
             - name: tau
               containerPort: {{ .Values.service.port }}
