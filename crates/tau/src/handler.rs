@@ -65,6 +65,76 @@ fn is_quit_cmd(s: &str) -> bool {
     s.eq_ignore_ascii_case("QUIT") || s.eq_ignore_ascii_case("EXIT")
 }
 
+/// Maximum size, in bytes, of a single client request line (including the
+/// trailing `\n`). TauQL is line-oriented, so this bounds the largest single
+/// statement (e.g. a `BATCH APPEND`) the server will accept. Chosen generous
+/// enough that no realistic statement hits it, while preventing a client from
+/// driving unbounded heap growth by streaming a line with no `\n`.
+const MAX_LINE_BYTES: usize = 1024 * 1024;
+
+/// Outcome of [`read_line_bounded`].
+#[derive(Debug)]
+enum LineRead {
+    /// Connection closed with no more data.
+    Eof,
+    /// A complete line (including the trailing `\n`, if present), decoded
+    /// lossily as UTF-8.
+    Line(String),
+    /// The line exceeded `max_len` bytes before a `\n` was found (or before
+    /// EOF). Any remaining bytes up to and including the next `\n` (or EOF)
+    /// have been consumed and discarded, so the stream remains framed on line
+    /// boundaries for the caller's next read.
+    TooLong,
+}
+
+/// Read one line from `reader`, bounding total allocation to `max_len` bytes.
+///
+/// Unlike `BufRead::read_line`, this never grows its internal buffer past
+/// `max_len`: once that many bytes have been seen without a `\n`, the rest of
+/// the oversized line is drained and discarded (up to and including its
+/// terminating `\n`, or EOF) and `LineRead::TooLong` is returned.
+fn read_line_bounded<R: BufRead>(reader: &mut R, max_len: usize) -> io::Result<LineRead> {
+    let mut buf: Vec<u8> = Vec::new();
+    let mut overflow = false;
+
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            return Ok(if overflow {
+                LineRead::TooLong
+            } else if buf.is_empty() {
+                LineRead::Eof
+            } else {
+                LineRead::Line(String::from_utf8_lossy(&buf).into_owned())
+            });
+        }
+
+        if let Some(pos) = available.iter().position(|&b| b == b'\n') {
+            let take = pos + 1;
+            let was_overflow = overflow || buf.len() + take > max_len;
+            if !was_overflow {
+                buf.extend_from_slice(&available[..take]);
+            }
+            reader.consume(take);
+            return Ok(if was_overflow {
+                LineRead::TooLong
+            } else {
+                LineRead::Line(String::from_utf8_lossy(&buf).into_owned())
+            });
+        }
+
+        let len = available.len();
+        if !overflow {
+            if buf.len() + len > max_len {
+                overflow = true;
+            } else {
+                buf.extend_from_slice(available);
+            }
+        }
+        reader.consume(len);
+    }
+}
+
 /// Drive a single client connection over any `Read + Write` stream.
 ///
 /// Enforces authentication (when `auth_enabled`) as the very first exchange,
@@ -78,14 +148,18 @@ pub fn run_query_loop<S: Read + Write>(
 ) -> io::Result<()> {
     let metrics = exec.read().expect("executor lock poisoned").metrics();
     let mut authenticated_user: Option<String> = None;
-    let mut line_buf = String::new();
 
     loop {
-        line_buf.clear();
-        let n = reader.read_line(&mut line_buf)?;
-        if n == 0 {
-            break;
-        }
+        let line_buf = match read_line_bounded(reader, MAX_LINE_BYTES)? {
+            LineRead::Eof => break,
+            LineRead::TooLong => {
+                warn!(%peer, "client sent oversized line ({MAX_LINE_BYTES} byte limit), closing connection");
+                reader.get_mut().write_all(b"ERR line too long\n")?;
+                reader.get_mut().flush()?;
+                break;
+            }
+            LineRead::Line(line) => line,
+        };
         let trimmed = line_buf.trim();
         if trimmed.is_empty() {
             continue;
@@ -367,12 +441,94 @@ mod tests {
         assert!(!is_quit_cmd("CREATE DATABASE x"));
     }
 
+    #[test]
+    fn read_line_bounded_returns_eof_on_empty_input() {
+        let mut cursor = io::Cursor::new(&b""[..]);
+        assert!(matches!(
+            read_line_bounded(&mut cursor, 16).unwrap(),
+            LineRead::Eof
+        ));
+    }
+
+    #[test]
+    fn read_line_bounded_returns_line_within_limit() {
+        let mut cursor = io::Cursor::new(&b"AT LENS x 0\n"[..]);
+        match read_line_bounded(&mut cursor, 64).unwrap() {
+            LineRead::Line(s) => assert_eq!(s, "AT LENS x 0\n"),
+            other => panic!("expected Line, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_line_bounded_handles_line_without_trailing_newline_at_eof() {
+        let mut cursor = io::Cursor::new(&b"QUIT"[..]);
+        match read_line_bounded(&mut cursor, 64).unwrap() {
+            LineRead::Line(s) => assert_eq!(s, "QUIT"),
+            _ => panic!("expected Line"),
+        }
+    }
+
+    #[test]
+    fn read_line_bounded_flags_oversized_line_without_newline() {
+        // 20 'a' bytes, no newline, limit of 8: must report TooLong.
+        let mut cursor = io::Cursor::new(&b"aaaaaaaaaaaaaaaaaaaa"[..]);
+        assert!(matches!(
+            read_line_bounded(&mut cursor, 8).unwrap(),
+            LineRead::TooLong
+        ));
+    }
+
+    #[test]
+    fn read_line_bounded_resyncs_on_next_call_after_oversized_line() {
+        // First line is oversized (no newline within limit), second line is fine.
+        let mut cursor = io::Cursor::new(&b"aaaaaaaaaaaaaaaaaaaa\nOK\n"[..]);
+        assert!(matches!(
+            read_line_bounded(&mut cursor, 8).unwrap(),
+            LineRead::TooLong
+        ));
+        match read_line_bounded(&mut cursor, 8).unwrap() {
+            LineRead::Line(s) => assert_eq!(s, "OK\n"),
+            _ => panic!("expected Line for the second call"),
+        }
+    }
+
+    #[test]
+    fn read_line_bounded_flags_line_exactly_over_limit_with_newline() {
+        // "aaaaaaaaa\n" is 10 bytes; limit 8 must reject it as TooLong.
+        let mut cursor = io::Cursor::new(&b"aaaaaaaaa\nOK\n"[..]);
+        assert!(matches!(
+            read_line_bounded(&mut cursor, 8).unwrap(),
+            LineRead::TooLong
+        ));
+        match read_line_bounded(&mut cursor, 8).unwrap() {
+            LineRead::Line(s) => assert_eq!(s, "OK\n"),
+            _ => panic!("expected Line for the second call"),
+        }
+    }
+
     fn connected_pair() -> (TcpStream, TcpStream, SocketAddr) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("test bind on localhost:0");
         let addr = listener.local_addr().expect("test listener has local addr");
         let client = TcpStream::connect(addr).expect("test connect to ephemeral listener");
         let (server, peer) = listener.accept().expect("test accept");
         (client, server, peer)
+    }
+
+    /// Send each of `lines` (without trailing `\n`) to the server, flushing
+    /// after each, then read and return one response line per input line
+    /// (trimmed, without the trailing `\n`).
+    fn send_and_collect(client: &mut TcpStream, lines: &[&str]) -> Vec<String> {
+        let mut writer = client.try_clone().expect("test clone stream for writer");
+        let mut reader = BufReader::new(client.try_clone().expect("test clone stream for reader"));
+        let mut out = Vec::with_capacity(lines.len());
+        for line in lines {
+            writeln!(writer, "{line}").expect("test write line");
+            writer.flush().expect("test flush");
+            let mut resp = String::new();
+            reader.read_line(&mut resp).expect("test read response");
+            out.push(resp.trim().to_string());
+        }
+        out
     }
 
     #[test]
@@ -389,6 +545,34 @@ mod tests {
         let mut resp = String::new();
         br.read_line(&mut resp).expect("test read response");
         assert_eq!(resp.trim(), "OK BYE");
+    }
+
+    #[test]
+    fn run_query_loop_closes_connection_on_oversized_line() {
+        let (mut client, server, peer) = connected_pair();
+        let e = exec();
+        let handle = thread::spawn(move || {
+            let mut reader = BufReader::new(server);
+            run_query_loop(&mut reader, peer, &e, false)
+        });
+
+        // One byte over the limit, with a trailing newline.
+        let mut oversized = vec![b'a'; MAX_LINE_BYTES + 1];
+        oversized.push(b'\n');
+        client
+            .write_all(&oversized)
+            .expect("test write oversized line");
+
+        let mut br = BufReader::new(&mut client);
+        let mut resp = String::new();
+        br.read_line(&mut resp).expect("test read response");
+        assert_eq!(resp.trim(), "ERR line too long");
+
+        // Server should close its side; the join should complete promptly.
+        handle
+            .join()
+            .expect("server thread panicked")
+            .expect("run_query_loop result");
     }
 
     #[test]
@@ -413,5 +597,239 @@ mod tests {
         let mut resp = String::new();
         br.read_line(&mut resp).expect("test read");
         assert!(resp.contains("ERR authentication required"), "got: {resp}");
+    }
+
+    #[test]
+    fn run_query_loop_handles_authenticated_multi_statement_session() {
+        let (mut client, server, peer) = connected_pair();
+        let e = exec();
+        {
+            let mut g = e.write().expect("test executor lock");
+            let mut grants = HashMap::new();
+            grants.insert("*".to_string(), Perm::ALL);
+            g.users_mut()
+                .add(User::new("admin", "pw", grants))
+                .expect("add test admin user");
+        }
+        let handle = thread::spawn(move || {
+            let mut reader = BufReader::new(server);
+            run_query_loop(&mut reader, peer, &e, true)
+        });
+
+        let responses = send_and_collect(
+            &mut client,
+            &[
+                "AUTH admin pw",
+                "CREATE DATABASE main",
+                "CREATE LENS x int",
+                "APPEND LENS x 0 100 42",
+                "AT LENS x 50",
+                "AT LENS x 500",
+                "QUIT",
+            ],
+        );
+
+        assert_eq!(
+            responses,
+            vec!["OK", "OK", "OK", "OK", "VAL i42", "VAL NIL", "OK BYE",]
+        );
+        handle
+            .join()
+            .expect("server thread panicked")
+            .expect("run_query_loop result");
+    }
+
+    #[test]
+    fn run_query_loop_transaction_commit_applies_buffered_writes() {
+        let (mut client, server, peer) = connected_pair();
+        let e = exec();
+        {
+            let mut g = e.write().expect("test executor lock");
+            let mut grants = HashMap::new();
+            grants.insert("*".to_string(), Perm::ALL);
+            g.users_mut()
+                .add(User::new("admin", "pw", grants))
+                .expect("add test admin user");
+        }
+        let handle = thread::spawn(move || {
+            let mut reader = BufReader::new(server);
+            run_query_loop(&mut reader, peer, &e, true)
+        });
+
+        let responses = send_and_collect(
+            &mut client,
+            &[
+                "AUTH admin pw",
+                "CREATE DATABASE main",
+                "CREATE LENS x int",
+                "START TRANSACTION",
+                "APPEND LENS x 0 100 7",
+                "AT LENS x 50",
+                "COMMIT",
+                "AT LENS x 50",
+                "QUIT",
+            ],
+        );
+
+        assert_eq!(responses[0], "OK");
+        assert_eq!(responses[1], "OK");
+        assert_eq!(responses[2], "OK");
+        assert_eq!(responses[3], "OK");
+        assert_eq!(responses[4], "OK");
+        assert_eq!(responses[5], "VAL NIL");
+        assert_eq!(responses[6], "OK");
+        assert_eq!(responses[7], "VAL i7");
+        assert_eq!(responses[8], "OK BYE");
+
+        handle
+            .join()
+            .expect("server thread panicked")
+            .expect("run_query_loop result");
+    }
+
+    #[test]
+    fn run_query_loop_transaction_rollback_discards_buffered_writes() {
+        let (mut client, server, peer) = connected_pair();
+        let e = exec();
+        {
+            let mut g = e.write().expect("test executor lock");
+            let mut grants = HashMap::new();
+            grants.insert("*".to_string(), Perm::ALL);
+            g.users_mut()
+                .add(User::new("admin", "pw", grants))
+                .expect("add test admin user");
+        }
+        let handle = thread::spawn(move || {
+            let mut reader = BufReader::new(server);
+            run_query_loop(&mut reader, peer, &e, true)
+        });
+
+        let responses = send_and_collect(
+            &mut client,
+            &[
+                "AUTH admin pw",
+                "CREATE DATABASE main",
+                "CREATE LENS x int",
+                "START TRANSACTION",
+                "APPEND LENS x 0 100 7",
+                "ROLLBACK",
+                "AT LENS x 50",
+                "QUIT",
+            ],
+        );
+
+        assert_eq!(responses[0], "OK");
+        assert_eq!(responses[1], "OK");
+        assert_eq!(responses[2], "OK");
+        assert_eq!(responses[3], "OK");
+        assert_eq!(responses[4], "OK");
+        assert_eq!(responses[5], "OK");
+        assert_eq!(responses[6], "VAL NIL");
+        assert_eq!(responses[7], "OK BYE");
+
+        handle
+            .join()
+            .expect("server thread panicked")
+            .expect("run_query_loop result");
+    }
+
+    #[test]
+    fn run_query_loop_recovers_from_error_and_keeps_serving() {
+        let (mut client, server, peer) = connected_pair();
+        let e = exec();
+        {
+            let mut g = e.write().expect("test executor lock");
+            let mut grants = HashMap::new();
+            grants.insert("*".to_string(), Perm::ALL);
+            g.users_mut()
+                .add(User::new("admin", "pw", grants))
+                .expect("add test admin user");
+        }
+        let handle = thread::spawn(move || {
+            let mut reader = BufReader::new(server);
+            run_query_loop(&mut reader, peer, &e, true)
+        });
+
+        let responses = send_and_collect(
+            &mut client,
+            &[
+                "AUTH admin pw",
+                "CREATE DATABASE main",
+                "AT LENS does_not_exist 0",
+                "CREATE LENS x int",
+                "AT LENS x 0",
+                "QUIT",
+            ],
+        );
+
+        assert_eq!(responses[0], "OK");
+        assert_eq!(responses[1], "OK");
+        assert!(responses[2].starts_with("ERR"), "got: {}", responses[2]);
+        assert_eq!(responses[3], "OK");
+        assert_eq!(responses[4], "VAL NIL");
+        assert_eq!(responses[5], "OK BYE");
+
+        handle
+            .join()
+            .expect("server thread panicked")
+            .expect("run_query_loop result");
+    }
+
+    #[test]
+    fn run_query_loop_unprivileged_user_gets_permission_denied() {
+        let (mut client, server, peer) = connected_pair();
+        let e = exec();
+        {
+            let mut g = e.write().expect("test executor lock");
+
+            let mut admin_grants = HashMap::new();
+            admin_grants.insert("*".to_string(), Perm::ALL);
+            g.users_mut()
+                .add(User::new("admin", "adminpw", admin_grants))
+                .expect("add test admin user");
+
+            let mut ro_grants = HashMap::new();
+            ro_grants.insert("main".to_string(), Perm::R);
+            g.users_mut()
+                .add(User::new("reader", "readerpw", ro_grants))
+                .expect("add test read-only user");
+        }
+        {
+            assert_eq!(
+                handle_query("CREATE DATABASE main", &e, Some("admin")).to_string(),
+                "OK"
+            );
+            assert_eq!(
+                handle_query("CREATE LENS x int", &e, Some("admin")).to_string(),
+                "OK"
+            );
+        }
+
+        let handle = thread::spawn(move || {
+            let mut reader = BufReader::new(server);
+            run_query_loop(&mut reader, peer, &e, true)
+        });
+
+        let responses = send_and_collect(
+            &mut client,
+            &[
+                "AUTH reader readerpw",
+                "AT LENS x 0",
+                "APPEND LENS x 0 100 1",
+                "AT LENS x 0",
+                "QUIT",
+            ],
+        );
+
+        assert_eq!(responses[0], "OK");
+        assert_eq!(responses[1], "VAL NIL");
+        assert!(responses[2].starts_with("ERR"), "got: {}", responses[2]);
+        assert_eq!(responses[3], "VAL NIL");
+        assert_eq!(responses[4], "OK BYE");
+
+        handle
+            .join()
+            .expect("server thread panicked")
+            .expect("run_query_loop result");
     }
 }

@@ -23,6 +23,16 @@ where
 {
     store: Arc<RwLock<Box<dyn Store<V>>>>,
     wal: Option<Arc<Mutex<Wal>>>,
+    /// Serializes `append`, `append_schema`, and `checkpoint` against each
+    /// other. Without this, a `checkpoint` can snapshot the store *before* a
+    /// concurrent `append`'s store-write lands, then rotate the WAL to a file
+    /// that omits that append's WAL entry — the layer ends up in the
+    /// in-memory store and reported as durably written, but is unrecoverable
+    /// after a crash. Holding this mutex for each operation's full duration
+    /// makes "WAL write + store write" and "snapshot store + rotate WAL"
+    /// mutually exclusive. Query paths (`at_name`, range/reduce reads) do not
+    /// take this lock and remain fully concurrent.
+    write_lock: Arc<Mutex<()>>,
     /// When `true` (default), `append` calls `checkpoint()` immediately after a
     /// store-side compaction so the WAL never holds superseded entries.  Set to
     /// `false` to defer that work to an explicit caller - useful in bulk-load
@@ -42,6 +52,7 @@ where
         Self {
             store: self.store.clone(),
             wal: self.wal.clone(),
+            write_lock: self.write_lock.clone(),
             auto_checkpoint: AtomicBool::new(self.auto_checkpoint.load(Ordering::Relaxed)),
             metrics: self.metrics.clone(),
         }
@@ -58,6 +69,7 @@ where
         Self {
             store: Arc::new(RwLock::new(Box::new(store))),
             wal: None,
+            write_lock: Arc::new(Mutex::new(())),
             auto_checkpoint: AtomicBool::new(true),
             metrics: None,
         }
@@ -74,6 +86,7 @@ where
         Self {
             store: Arc::new(RwLock::new(Box::new(store))),
             wal: Some(Arc::new(Mutex::new(wal))),
+            write_lock: Arc::new(Mutex::new(())),
             auto_checkpoint: AtomicBool::new(true),
             metrics: None,
         }
@@ -164,6 +177,12 @@ where
             tau_count = layer.taus.len(),
             "appending layer"
         );
+
+        let _write_guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| io::Error::other("write lock poisoned"))?;
+
         // WAL first - do not update in-memory state if this fails.
         let wal_needs_rotation = if let Some(wal) = &self.wal {
             let wal_t0 = Instant::now();
@@ -196,11 +215,11 @@ where
                 m.record_compaction();
             }
             if self.auto_checkpoint.load(Ordering::Relaxed) {
-                self.checkpoint()?;
+                self.checkpoint_locked()?;
             }
         } else if wal_needs_rotation && self.auto_checkpoint.load(Ordering::Relaxed) {
             debug!("WAL size cap reached; triggering checkpoint");
-            self.checkpoint()?;
+            self.checkpoint_locked()?;
         }
 
         Ok(())
@@ -220,6 +239,11 @@ where
     /// storage.  Persisted in the WAL when one is attached, otherwise in the
     /// store's own file (the disk backend).  No-op for a pure in-memory store.
     pub fn append_schema(&self, stmt_text: &str) -> io::Result<()> {
+        let _write_guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| io::Error::other("write lock poisoned"))?;
+
         if let Some(wal) = &self.wal {
             wal.lock()
                 .map_err(|_| io::Error::other("WAL mutex poisoned"))?
@@ -269,9 +293,13 @@ where
     /// previously written schema lines, discarding entries superseded by
     /// auto-compaction.
     ///
-    /// Called automatically after compaction.  No-op when no WAL is
-    /// configured.
-    pub fn checkpoint(&self) -> io::Result<()>
+    /// # Locking
+    ///
+    /// Caller must hold `self.write_lock` for the duration of this call.
+    /// This is private precisely so that invariant can be enforced by its
+    /// two callers (`append`'s internal calls, and the public `checkpoint`
+    /// wrapper below).
+    fn checkpoint_locked(&self) -> io::Result<()>
     where
         V: Codec,
     {
@@ -304,6 +332,26 @@ where
         wal_guard.rotate(&schema_lines, &entries)?;
         debug!("WAL checkpoint complete");
         Ok(())
+    }
+
+    /// Rotate the WAL to contain only the current live layers plus any
+    /// previously written schema lines, discarding entries superseded by
+    /// auto-compaction.
+    ///
+    /// Safe to call concurrently with `append`/`append_schema`: this method
+    /// and those serialize on an internal write lock so a checkpoint can
+    /// never rotate the WAL to a file that omits a layer/schema line that a
+    /// concurrent `append`/`append_schema` has already (or is about to)
+    /// write.
+    pub fn checkpoint(&self) -> io::Result<()>
+    where
+        V: Codec,
+    {
+        let _write_guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| io::Error::other("write lock poisoned"))?;
+        self.checkpoint_locked()
     }
 
     /// Point lookup for a base lens at timestamp `t`. Newest layer wins.
@@ -466,5 +514,61 @@ mod tests {
             1,
             "WAL should hold exactly one layer after checkpoint, got {ids:?}"
         );
+    }
+
+    #[test]
+    fn concurrent_append_and_checkpoint_preserve_all_layers() {
+        use std::thread;
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let wal_path = tmp_dir.path().join("test.wal");
+
+        let store = InMemory::<i64>::new();
+        let db = Database::open(store, &wal_path, None).unwrap();
+        db.set_auto_checkpoint(false); // isolate the explicit checkpoint below
+
+        const N: i64 = 50;
+        let db_appender = db.clone();
+        let appender = thread::spawn(move || {
+            for i in 0..N {
+                db_appender
+                    .append("x", layer((i + 1) as u64, &[(i * 10, i * 10 + 10, i)]))
+                    .unwrap();
+            }
+        });
+
+        let db_checkpointer = db.clone();
+        let checkpointer = thread::spawn(move || {
+            for _ in 0..N {
+                db_checkpointer.checkpoint().unwrap();
+            }
+        });
+
+        appender.join().unwrap();
+        checkpointer.join().unwrap();
+        db.checkpoint().unwrap(); // final checkpoint to settle the WAL
+
+        // Every appended layer must be queryable...
+        for i in 0..N {
+            assert_eq!(
+                db.at_name("x", i * 10),
+                Some(i),
+                "layer for t={} missing from in-memory store",
+                i * 10
+            );
+        }
+
+        // ...and recoverable from the WAL after a fresh open (simulated restart).
+        drop(db);
+        let store2 = InMemory::<i64>::new();
+        let db2 = Database::open(store2, &wal_path, None).unwrap();
+        for i in 0..N {
+            assert_eq!(
+                db2.at_name("x", i * 10),
+                Some(i),
+                "layer for t={} not recovered from WAL after restart",
+                i * 10
+            );
+        }
     }
 }

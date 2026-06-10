@@ -158,8 +158,8 @@ impl<V: Codec> WalEntry<V> {
         let expected = crc32(payload);
         if checksum != expected {
             warn!(
-                expected = checksum,
-                actual = expected,
+                expected = expected,
+                actual = checksum,
                 "WAL entry checksum mismatch, discarding"
             );
             return None;
@@ -425,14 +425,17 @@ impl Wal {
                     .map(|(s, e, v)| Tau::new(s, e, v))
                     .collect();
 
-                if let Err(e) = store.append(
-                    &entry.lens,
-                    Layer::new_at(entry.layer_id, taus, entry.written_at),
-                ) {
-                    warn!(error = %e, "WAL replay: store append failed, skipping");
-                    skipped += 1;
-                    continue;
-                }
+                store
+                    .append(
+                        &entry.lens,
+                        Layer::new_at(entry.layer_id, taus, entry.written_at),
+                    )
+                    .map_err(|e| {
+                        io::Error::other(format!(
+                            "WAL replay: failed to apply layer {} for lens {:?}: {e}",
+                            entry.layer_id, entry.lens
+                        ))
+                    })?;
                 count += 1;
             } else {
                 skipped += 1;
@@ -796,6 +799,42 @@ mod tests {
     #[hegel::test]
     fn pbt_wal_unencrypted_replay_matches_inmemory(tc: TestCase) {
         wal_replay_matches_inmemory(tc, None);
+    }
+
+    /// A `Store` whose `append` always fails, used to verify that
+    /// `Wal::replay` propagates store-append errors instead of skipping them.
+    struct FailingStore;
+
+    impl<V: Clone + Send + Sync + 'static> Store<V> for FailingStore {
+        fn append(&mut self, _lens: &str, _layer: Layer<V>) -> io::Result<bool> {
+            Err(io::Error::other("forced failure"))
+        }
+
+        fn layers(&self, _lens: &str) -> Option<&Vec<Layer<V>>> {
+            None
+        }
+    }
+
+    #[test]
+    fn replay_returns_err_when_store_append_fails() {
+        let tmp = NamedTempFile::new().unwrap();
+        {
+            let mut wal = Wal::open(tmp.path(), None).unwrap();
+            let entry = WalEntry::<i64> {
+                layer_id: 7,
+                written_at: 0,
+                lens: "myLens".to_string(),
+                taus: vec![(0, 10, 1)],
+            };
+            wal.append(&entry).unwrap();
+        }
+
+        let wal = Wal::open(tmp.path(), None).unwrap();
+        let mut store = FailingStore;
+        let err = wal.replay::<i64>(&mut store).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains('7'), "error message: {msg}");
+        assert!(msg.contains("myLens"), "error message: {msg}");
     }
 
     #[hegel::test]
