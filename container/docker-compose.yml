@@ -24,7 +24,7 @@ services:
 
     volumes:
       - tau_data:/data
-      - ./tau-config.toml:/data/config.toml:ro
+      - ./tau-config.toml:/data/tau-config.toml:ro
       # Mount real TLS material in production by uncommenting and editing
       # tau-config.toml ([tls] section) and the lines below:
       # - /etc/tau/tls/server.crt:/data/tls/server.crt:ro
@@ -38,7 +38,7 @@ services:
 
     command:
       - "--config"
-      - "/data/config.toml"
+      - "/data/tau-config.toml"
 
     read_only: true
 
