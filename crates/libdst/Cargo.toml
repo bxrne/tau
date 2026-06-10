@@ -1,6 +1,6 @@
 [package]
 name = "libdst"
-version = "0.1.0" # x-release-please-version
+version = "0.1.1" # x-release-please-version
 edition.workspace = true
 license.workspace = true
 description = "Deterministic simulation testing framework for dual-model verification"

@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/bxrne/tau/compare/dst-v0.1.1...dst-v0.1.2) (2026-06-10)
+
+
+### Bug Fixes
+
+* **libtau, libdst, dst:** fixed compr lenses on restart, COPY errors out instead of killing thread, batch append now sorted ([dc54ee0](https://github.com/bxrne/tau/commit/dc54ee0c1d376b16163f04be405087a89c2d0e12))
+
 ## [0.1.1](https://github.com/bxrne/tau/compare/dst-v0.1.0...dst-v0.1.1) (2026-06-06)
 
 

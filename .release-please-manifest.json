@@ -1,7 +1,7 @@
 {
-	"crates/libtau": "0.3.1",
-	"crates/libdst": "0.1.0",
-	"crates/dst": "0.1.1",
+	"crates/libtau": "0.3.2",
+	"crates/libdst": "0.1.1",
+	"crates/dst": "0.1.2",
 	"crates/tau": "0.3.1",
 	"crates/tauctl": "0.1.0"
 }
