@@ -10,3 +10,4 @@ crates/fuzztau/corpus
 
 /target
 /crates/fuzztau/target
+/demo
