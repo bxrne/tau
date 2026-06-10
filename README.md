@@ -45,7 +45,7 @@ VAL f18.5
 VAL f20                                  # newest layer wins; prior value preserved
 ```
 
-See the [TauQL reference](https://tau.bxrne.com/docs/tauql/) for every statement. Storage, configuration, and testing are covered in [how it works](https://tau.bxrne.com/docs/how-it-works/), [configuration](https://tau.bxrne.com/docs/configuration/), and [testing](https://tau.bxrne.com/docs/testing/).
+See the [tutorial](https://tau.bxrne.com/docs/tutorial/) for an end-to-end walkthrough and the [TauQL reference](https://tau.bxrne.com/docs/tauql/) for every statement. Storage, configuration, and testing are covered in [how it works](https://tau.bxrne.com/docs/how-it-works/), [configuration](https://tau.bxrne.com/docs/configuration/), and [testing](https://tau.bxrne.com/docs/testing/).
 
 ## Configuration
 

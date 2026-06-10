@@ -8,6 +8,7 @@ page_template = "page.html"
 
 Complete reference for Tau. The data model, query language, storage internals, the deterministic simulation tester and the operational guide.
 
+- [Tutorial](/docs/tutorial/). End-to-end walkthrough: sensor drift correction, layer audit, derived lenses, compaction.
 - [Overview](/docs/overview/). The bitemporal interval model, layers, lenses, compaction and concurrency.
 - [How it works](/docs/how-it-works/). Storage internals, WAL, compaction algorithm, design decisions.
 - [TauQL Reference](/docs/tauql/). Every statement, operator and response code.
