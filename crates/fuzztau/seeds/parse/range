@@ -1,0 +1,1 @@
+RANGE LENS temperature 0 100 WHERE temperature > 0 LIMIT 10 OFFSET 0

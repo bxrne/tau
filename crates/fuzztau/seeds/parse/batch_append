@@ -1,0 +1,1 @@
+BATCH APPEND LENS temperature { 0 5 1.0; 10 15 2.0; 20 25 3.0 }

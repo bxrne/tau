@@ -1,0 +1,2 @@
+CREATE USER alice PASSWORD "s3cr3t"
+DROP USER bob

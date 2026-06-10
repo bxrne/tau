@@ -1,0 +1,4 @@
+GRANT RU ON main TO alice
+REVOKE D ON * FROM bob
+GRANT * ON sensors TO sensor_writer
+REVOKE * ON sensors FROM sensor_writer

@@ -1,0 +1,3 @@
+DROP LENS temperature
+DROP DATABASE main
+DROP USER alice

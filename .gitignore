@@ -9,3 +9,4 @@ crates/fuzztau/artifacts
 crates/fuzztau/corpus
 
 /target
+/crates/fuzztau/target

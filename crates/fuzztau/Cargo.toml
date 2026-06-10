@@ -1,7 +1,7 @@
 [package]
 name = "fuzztau"
 version = "0.0.0"
-edition = "2024"
+edition = "2021"
 publish = false
 
 [package.metadata]
@@ -16,6 +16,24 @@ doc = false
 [[bin]]
 name = "wire"
 path = "fuzz_targets/wire.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "value_decode"
+path = "fuzz_targets/value_decode.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "perm_parse"
+path = "fuzz_targets/perm_parse.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "parse_literal"
+path = "fuzz_targets/parse_literal.rs"
 test = false
 doc = false
 

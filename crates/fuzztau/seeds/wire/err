@@ -1,0 +1,10 @@
+ERR boom
+ERR unknown database: foo
+ERR unknown lens: bar
+ERR type mismatch on x: expected Int, got Str
+ERR invalid range (start >= end)
+ERR permission denied: need R on main
+ERR transaction already active
+ERR no active transaction
+ERR no active database
+ERR cycle detected in derived lens: loop

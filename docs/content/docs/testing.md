@@ -91,32 +91,40 @@ See [Deterministic Simulation Testing](/docs/dst/) for architecture and operatio
 
 **What they test:** Crash-freedom and panic-freedom under arbitrary byte inputs — the class of bug that neither deterministic unit tests nor property tests reliably find, because the fault depends on specific byte sequences the author never imagined.
 
-Two targets are maintained:
+Fuzz targets exercise the untrusted-input surfaces:
 
 | Target | Entry point | What it finds |
 |--------|------------|---------------|
-| `parse` | `libtau::parse` | Panics, OOMs, or infinite loops in the `nom` parser on arbitrary input |
-| `wire` | `libtau::Response::parse` | Same surface on the wire decoder — a different grammar with different splitting and integer-parsing code |
+| `parse` | `libtau::parse` | Panics / OOMs / loops in the TauQL `nom` parser |
+| `wire` | `libtau::Response::parse` | Wire response decoder (different grammar, splitting, integer parsing) |
+| `value_decode` | `libtau::Value::decode` | Value codec used inside `VAL` / `RANGE` wire segments (escapes, tags) |
+| `perm_parse` | `libtau::Perm::parse` | Permission bitmap parser (`CRUDA`, `*`, `-`) used by wire `GRANTS` and users file |
+| `parse_literal` | `libtau::parse_literal` | Single-literal parser used by bulk/COPY paths |
 
-**Seed corpus:** `crates/fuzztau/seeds/{wire,parse}/` — hand-crafted valid inputs covering every response variant and every TauQL statement type. The fuzzer uses these as starting points to mutate from; seeds are committed to the repo. The generated corpus (gitignored) grows in `crates/fuzztau/corpus/` during a run and can be minimised with `cargo fuzz cmin`.
+**Seed corpus:** `crates/fuzztau/seeds/{parse,wire,value_decode,perm_parse,parse_literal}/` — small committed sets of valid + boundary cases. The working corpus grows in the gitignored `crates/fuzztau/corpus/` and can be minimised with `cargo fuzz cmin`.
 
 **Prerequisites:** a nightly Rust toolchain (`rustup toolchain install nightly`).
 
 **How to run:**
 
 ```bash
-# Run the wire decoder fuzzer (ctrl-c to stop; add -max_total_time=N for a time cap)
-cargo +nightly fuzz run --fuzz-dir crates/fuzztau wire crates/fuzztau/seeds/wire
+# Bootstrap working corpus from committed seeds (recommended for long runs)
+mkdir -p crates/fuzztau/corpus/wire && cp crates/fuzztau/seeds/wire/* crates/fuzztau/corpus/wire/ 2>/dev/null || true
+mkdir -p crates/fuzztau/corpus/parse && cp crates/fuzztau/seeds/parse/* crates/fuzztau/corpus/parse/ 2>/dev/null || true
 
-# Run the parser fuzzer
-cargo +nightly fuzz run --fuzz-dir crates/fuzztau parse crates/fuzztau/seeds/parse
+# Run a target (ctrl-c to stop; add -- -max_total_time=N to bound the session)
+cargo +nightly fuzz run --fuzz-dir crates/fuzztau wire crates/fuzztau/corpus/wire
+cargo +nightly fuzz run --fuzz-dir crates/fuzztau parse crates/fuzztau/corpus/parse
+cargo +nightly fuzz run --fuzz-dir crates/fuzztau value_decode crates/fuzztau/corpus/value_decode
+cargo +nightly fuzz run --fuzz-dir crates/fuzztau perm_parse crates/fuzztau/corpus/perm_parse
+cargo +nightly fuzz run --fuzz-dir crates/fuzztau parse_literal crates/fuzztau/corpus/parse_literal
 
-# Minimise the corpus after a long run (keeps coverage, drops redundant inputs)
+# Minimise a corpus after a long run (keeps high coverage, drops redundant inputs)
 cargo +nightly fuzz cmin --fuzz-dir crates/fuzztau wire  crates/fuzztau/corpus/wire
 cargo +nightly fuzz cmin --fuzz-dir crates/fuzztau parse crates/fuzztau/corpus/parse
 ```
 
-Crash inputs are saved to `crates/fuzztau/artifacts/{wire,parse}/`. If a crash is found, reproduce it with:
+Crash inputs are saved to `crates/fuzztau/artifacts/<target>/`. Reproduce:
 
 ```bash
 cargo +nightly fuzz run --fuzz-dir crates/fuzztau wire crates/fuzztau/artifacts/wire/<filename>
@@ -131,4 +139,4 @@ cargo +nightly fuzz run --fuzz-dir crates/fuzztau wire crates/fuzztau/artifacts/
 | Unit tests | Regressions on known-shape behaviour | Always (CI) |
 | Hegel PBT | Invariant violations across random inputs | Always (inline with unit tests) |
 | libdst / dst | SUT vs reference divergence under emergent workloads | CI (after nextest, before Docker) |
-| cargo-fuzz | Panics and crashes from adversarial byte sequences | On demand / nightly CI |
+| cargo-fuzz | Panics and crashes from adversarial byte sequences on parsers/codecs | On demand / scheduled CI |

@@ -1,0 +1,3 @@
+BACKUP DATABASE main TO "/tmp/tau-backup.wal"
+RESTORE DATABASE restored FROM "/tmp/tau-backup.wal"
+COPY LENS temperature FROM "/tmp/data.csv"

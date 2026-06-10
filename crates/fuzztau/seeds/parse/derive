@@ -1,0 +1,1 @@
+DERIVE LENS avg_temp AS avg(temperature, -3600, 0)

@@ -33,9 +33,24 @@ jobs:
           tool: nextest
       - run: cargo nextest run --release
 
+  fuzz: 
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+          cache-on-failure: "true"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      - run: cargo +nightly fuzz check --fuzz-dir crates/fuzztau
+
   dst:
     name: DST (all libtau profiles + concurrent)
-    needs: test
+    needs: fuzz
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

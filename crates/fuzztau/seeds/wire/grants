@@ -1,0 +1,4 @@
+GRANTS 0; 
+GRANTS 1; alice main:RU sensors:CR
+GRANTS 2; bob main:RU *:- alice sensors:*
+GRANTS 1; root *:CRUDA

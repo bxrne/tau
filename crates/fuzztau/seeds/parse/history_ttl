@@ -1,0 +1,4 @@
+HISTORY LENS temperature
+HISTORY LENS temperature 0 1000
+SET TTL LENS temperature 3600
+UNSET TTL LENS temperature
