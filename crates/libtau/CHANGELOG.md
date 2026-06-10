@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.3.2](https://github.com/bxrne/tau/compare/libtau-v0.3.1...libtau-v0.3.2) (2026-06-10)
+
+
+### Bug Fixes
+
+* **libtau, libdst, dst:** fixed compr lenses on restart, COPY errors out instead of killing thread, batch append now sorted ([dc54ee0](https://github.com/bxrne/tau/commit/dc54ee0c1d376b16163f04be405087a89c2d0e12))
+* **libtau:** drop support for legacy fileformats and updated docs ([7e8f454](https://github.com/bxrne/tau/commit/7e8f4544e25a89a176548e0691d12de332a14213))
+* **libtau:** update tauql docs and remove legacy WAL handling ([e7ccba2](https://github.com/bxrne/tau/commit/e7ccba22dd8933afc6f5ee21face93772d5a6fe4))
+
 ## [0.3.1](https://github.com/bxrne/tau/compare/libtau-v0.3.0...libtau-v0.3.1) (2026-06-06)
 
 
