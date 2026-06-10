@@ -171,7 +171,7 @@ APPEND LENS cpu 0 60 45, 60 120 72, 120 180 68
 → OK
 ```
 
-Interval semantics: `s` (start, inclusive), `e` (end, exclusive), `v` (value). Every interval in a single batch must be non-overlapping.
+Interval semantics: `s` (start, inclusive), `e` (end, exclusive), `v` (value). Intervals in a single batch may arrive in any order — the server sorts them — but they must not overlap and each must satisfy `s < e`; a violation rejects the whole statement with `ERR invalid range (start >= end)` and nothing is written.
 
 Requires `U` permission on the active database.
 

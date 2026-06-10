@@ -92,17 +92,17 @@ Cycle detection runs at `DERIVE` time by walking the dependency graph (`would_cy
 ```
 header
   magic   "TAUZ" (4 bytes)
-  version u8         # 2; version 1 (no schema section) still opens
+  version u8         # 1; the only supported version
   flags   u8         # bit 0 = encrypted body
   crc32   u32 LE     # over magic+version+flags
 body  zstd-compressed payload, AES-256-GCM-encrypted after compression when flagged
   payload
     schema_count u32 LE        # persisted DDL statements
     [ len u32 LE, utf8 bytes ] # CREATE LENS / DERIVE LENS / SET TTL / DROP LENS
-    [ DiskEntry... ]           # layer_id, lens name, taus — until EOF
+    [ DiskEntry... ]           # layer_id, written_at_ms, lens name, taus — until EOF
 ```
 
-On open, the header is integrity-checked, the body decompressed (and decrypted when flagged), the schema section read, then layer entries replayed into the in-memory layer stack. The file is rewritten atomically (`.tmp` + rename) on each flush — a flush fires on every append and every schema change, so an acknowledged write is durable before the call returns. Because schema DDL is part of the file, `CREATE DATABASE <name>` re-opens an existing `<name>.dat` and replays its schema, so lenses and TTL policies survive a restart.
+On open, the header is integrity-checked, the body decompressed (and decrypted when flagged), the schema section read, then layer entries replayed into the in-memory layer stack with their original `written_at` timestamps — so `AT … AS OF` keeps working across a restart. The file is rewritten atomically (`.tmp` + rename) on each flush — a flush fires on every append and every schema change, so an acknowledged write is durable before the call returns. Because schema DDL is part of the file, `CREATE DATABASE <name>` re-opens an existing `<name>.dat` and replays its schema, so lenses and TTL policies survive a restart.
 
 Encryption is AES-256-GCM with a random 12-byte nonce. The key is never stored; it must be supplied via `TAU_ENCRYPTION_KEY` at startup. The `FLAG_ENCRYPTED` bit prevents accidentally opening an encrypted file without a key.
 
@@ -113,9 +113,10 @@ The WAL sits between the caller and the store. Every mutation writes to the WAL 
 WAL entries are line-oriented text:
 
 ```
-<crc32hex> <base64-payload>        # data entry
-S:<checksum> <CREATE LENS ...>     # schema DDL
-SE:<crc32hex> <base64-encrypted>   # encrypted schema DDL
+<crc32> <layer_id> <written_at_ms> <lens> <s:e:v ...>   # data entry
+E:<base64>                                              # encrypted data entry
+S:<crc32> <CREATE LENS ...>                             # schema DDL
+SE:<base64>                                             # encrypted schema DDL
 ```
 
 Schema entries carry the raw TauQL text of the DDL that defines a lens (`CREATE LENS`, `DERIVE LENS`, `SET TTL`, `UNSET TTL`, `DROP LENS`). On replay, these are re-parsed and executed with `in_replay = true`, which suppresses re-appending them to the WAL. The disk backend persists the same DDL set in its own file (see above).

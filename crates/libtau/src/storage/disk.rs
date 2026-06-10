@@ -5,13 +5,13 @@
 //!            CRC32 (4 bytes, covers magic+version+flags)
 //!   Body:    zstd-compressed payload; if FLAGS bit 0 is set, the body is
 //!            AES-256-GCM encrypted before compression (compress-then-encrypt).
-//!   Payload (VERSION >= 2): schema section then entries.
+//!   Payload: schema section then entries.
 //!     Schema:  schema_count (4 bytes, u32) + repeated DDL strings
 //!              Each string: len (4 bytes, u32) + UTF-8 bytes
-//!     Entries: layer_id (8 bytes, u64) + lens_name_len (4 bytes) + lens_name +
+//!     Entries: layer_id (8 bytes, u64) + written_at_ms (8 bytes, i64) +
+//!              lens_name_len (4 bytes) + lens_name +
 //!              tau_count (4 bytes) + repeated taus
 //!              Each tau: start (8 bytes, i64) + end (8 bytes, i64) + value (encoded)
-//!   VERSION 1 files carry no schema section; they still open (schema is empty).
 
 use crate::crypto;
 use crate::model::{Layer, LayerId, Tau};
@@ -25,9 +25,9 @@ use std::path::{Path, PathBuf};
 use crc32fast::Hasher;
 
 const MAGIC: &[u8] = b"TAUZ";
-/// Current on-disk format version. Version 1 had no schema section; version 2
-/// prefixes the entry stream with persisted schema DDL. Both versions open.
-const VERSION: u8 = 2;
+/// On-disk format version. The only supported version; bump on any layout
+/// change once files exist in the wild.
+const VERSION: u8 = 1;
 const FLAG_ENCRYPTED: u8 = 0x01;
 const HEADER_LEN: usize = 4 + 1 + 1 + 4; // magic + version + flags + crc32
 /// Default zstd compression level. Valid range is 1–22; higher = better ratio, slower.
@@ -111,13 +111,22 @@ impl Codec for bool {
 #[derive(Debug)]
 struct DiskEntry<V> {
     layer_id: LayerId,
+    /// Wall-clock write time (ms since Unix epoch).
+    written_at: i64,
     lens: String,
     taus: Vec<Tau<V>>,
+}
+
+fn read_i64(reader: &mut impl Read) -> io::Result<i64> {
+    let mut buf = [0u8; 8];
+    reader.read_exact(&mut buf)?;
+    Ok(i64::from_le_bytes(buf))
 }
 
 impl<V: Codec> DiskEntry<V> {
     fn write<W: Write>(&self, writer: &mut W) -> io::Result<()> {
         writer.write_all(&self.layer_id.to_le_bytes())?;
+        writer.write_all(&self.written_at.to_le_bytes())?;
         write_str(writer, &self.lens)?;
         writer.write_all(&(self.taus.len() as u32).to_le_bytes())?;
         for tau in &self.taus {
@@ -129,10 +138,8 @@ impl<V: Codec> DiskEntry<V> {
     }
 
     fn read(reader: &mut impl Read) -> io::Result<Self> {
-        let mut layer_id_buf = [0u8; 8];
-        reader.read_exact(&mut layer_id_buf)?;
-        let layer_id = u64::from_le_bytes(layer_id_buf);
-
+        let layer_id = read_i64(reader)? as u64;
+        let written_at = read_i64(reader)?;
         let lens = read_str(reader)?;
 
         let mut count_buf = [0u8; 4];
@@ -141,20 +148,15 @@ impl<V: Codec> DiskEntry<V> {
 
         let mut taus = Vec::with_capacity(count);
         for _ in 0..count {
-            let mut start_buf = [0u8; 8];
-            reader.read_exact(&mut start_buf)?;
-            let start = i64::from_le_bytes(start_buf);
-
-            let mut end_buf = [0u8; 8];
-            reader.read_exact(&mut end_buf)?;
-            let end = i64::from_le_bytes(end_buf);
-
+            let start = read_i64(reader)?;
+            let end = read_i64(reader)?;
             let value = V::read_encoded(reader)?;
             taus.push(Tau::new(start, end, value));
         }
 
         Ok(DiskEntry {
             layer_id,
+            written_at,
             lens,
             taus,
         })
@@ -201,10 +203,10 @@ impl<V: Clone + Codec> Disk<V> {
                 ));
             }
             let version = header[4];
-            if version == 0 || version > VERSION {
+            if version != VERSION {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("unsupported version: expected 1..={VERSION}, got {version}"),
+                    format!("unsupported version: expected {VERSION}, got {version}"),
                 ));
             }
             let flags = header[5];
@@ -238,17 +240,14 @@ impl<V: Clone + Codec> Disk<V> {
 
             let payload_bytes = zstd::decode_all(compressed.as_slice())?;
             let mut cursor = Cursor::new(payload_bytes);
-            // Version 2+ prefixes the entry stream with the schema section.
-            if version >= 2 {
-                schema = read_schema(&mut cursor)?;
-            }
+            schema = read_schema(&mut cursor)?;
             loop {
                 match DiskEntry::read(&mut cursor) {
                     Ok(entry) => {
                         lenses
                             .entry(entry.lens.clone())
                             .or_default()
-                            .push(Layer::new(entry.layer_id, entry.taus));
+                            .push(Layer::new_at(entry.layer_id, entry.taus, entry.written_at));
                     }
                     Err(ref e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
                     Err(e) => return Err(e),
@@ -303,6 +302,7 @@ impl<V: Clone + Codec> Disk<V> {
             for layer in layers {
                 let entry = DiskEntry {
                     layer_id: layer.id,
+                    written_at: layer.written_at,
                     lens: lens_name.clone(),
                     taus: layer
                         .taus
@@ -558,6 +558,41 @@ mod tests {
             .find(|t| t.contains(probe))
             .map(|t| t.value);
         assert_eq!(store.at(&lens, probe), expected);
+    }
+
+    #[test]
+    fn written_at_survives_reopen() {
+        let tmp = NamedTempFile::new().unwrap();
+        {
+            let mut store = Disk::<i64>::create(tmp.path(), None).unwrap();
+            store
+                .append(
+                    "x",
+                    Layer::new_at(1, vec![Tau::new(0, 10, 7)], 1_717_000_000_123),
+                )
+                .unwrap();
+        }
+        let store: Disk<i64> = Disk::open(tmp.path(), None).unwrap();
+        assert_eq!(store.layers("x").unwrap()[0].written_at, 1_717_000_000_123);
+    }
+
+    /// Only the current format version opens; any other version byte (with a
+    /// valid header checksum) is rejected up front.
+    #[test]
+    fn unknown_version_is_rejected() {
+        for bad_version in [0u8, VERSION + 1] {
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(MAGIC);
+            bytes.push(bad_version);
+            bytes.push(0u8); // flags: unencrypted
+            let crc = checksum(&bytes);
+            bytes.extend_from_slice(&crc.to_le_bytes());
+
+            let tmp = NamedTempFile::new().unwrap();
+            fs::write(tmp.path(), &bytes).unwrap();
+            let result: io::Result<Disk<i64>> = Disk::open(tmp.path(), None);
+            assert!(result.is_err(), "version {bad_version} must be rejected");
+        }
     }
 
     #[test]

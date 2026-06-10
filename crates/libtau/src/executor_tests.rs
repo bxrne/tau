@@ -1648,6 +1648,44 @@ fn disk_backend_persists_schema_and_data_across_restart() {
     assert_eq!(lenses, vec!["hot".to_string(), "temp".to_string()]);
 }
 
+/// Disk backend: per-layer `written_at` timestamps survive a restart, so
+/// `AT … AS OF` still distinguishes layers written at different times.
+#[test]
+fn disk_backend_persists_written_at_for_as_of_across_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let threshold = crate::storage::COMPACT_THRESHOLD;
+    {
+        let mut e = Executor::with_disk_backend(dir.path(), threshold, 3, None).unwrap();
+        run(&mut e, "CREATE DATABASE main").unwrap();
+        run(&mut e, "CREATE LENS temp int").unwrap();
+        run(&mut e, "APPEND LENS temp 0 1000 42").unwrap();
+    }
+    let mut e = Executor::with_disk_backend(dir.path(), threshold, 3, None).unwrap();
+    run(&mut e, "CREATE DATABASE main").unwrap();
+
+    // Recover the persisted write timestamp via HISTORY; it must be a real
+    // wall-clock value, not the legacy 0 sentinel (which AT AS OF always shows).
+    let Output::LayerHistory(layers) = run(&mut e, "HISTORY LENS temp").unwrap() else {
+        panic!("expected layer history");
+    };
+    let written_at = layers[0].written_at;
+    assert!(written_at > 0, "written_at lost on reopen");
+
+    // As-of just before the write: invisible. As-of the write time: visible.
+    assert_eq!(
+        run(
+            &mut e,
+            &format!("AT LENS temp 500 AS OF {}", written_at - 1)
+        )
+        .unwrap(),
+        Output::Value(None)
+    );
+    assert_eq!(
+        run(&mut e, &format!("AT LENS temp 500 AS OF {written_at}")).unwrap(),
+        Output::Value(Some(Value::Int(42)))
+    );
+}
+
 /// Disk backend: a persisted `SET TTL` policy is replayed on restart, so data
 /// older than the TTL window stays hidden without re-issuing the policy.
 #[test]
