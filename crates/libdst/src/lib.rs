@@ -42,7 +42,7 @@ pub mod sim;
 pub use btree::{Leaf, Tree};
 pub use clock::Clock;
 pub use divergence::Divergence;
-pub use faults::{truncate_file, truncate_wal};
+pub use faults::truncate_file;
 pub use report::{RunResult, SuiteResult};
 pub use runner::{SequentialOpts, run_sequential};
 pub use scheduler::{Scheduler, Task};

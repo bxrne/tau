@@ -82,6 +82,20 @@ fn write_u32(w: &mut impl io::Write, n: u32) -> io::Result<()> {
     w.write_all(buf.format(n).as_bytes())
 }
 
+/// Write one serialised data entry, encrypting (`E:` + base64) when a key is set.
+fn write_data_line<V: Codec>(
+    w: &mut impl Write,
+    key: &Option<[u8; 32]>,
+    entry: &WalEntry<V>,
+) -> io::Result<()> {
+    if let Some(key) = key {
+        let blob = crypto::encrypt(key, entry.serialise().as_bytes());
+        writeln!(w, "E:{}", B64.encode(&blob))
+    } else {
+        writeln!(w, "{}", entry.serialise())
+    }
+}
+
 /// One serialised append record.
 ///
 /// The wire format encodes `written_at` between `layer_id` and `lens` so that
@@ -97,6 +111,22 @@ pub struct WalEntry<V> {
     pub written_at: i64,
     pub lens: String,
     pub taus: Vec<(Timestamp, Timestamp, V)>,
+}
+
+impl<V: Clone> WalEntry<V> {
+    /// Snapshot a layer as a WAL entry (Arc-backed taus make the clone cheap).
+    pub fn from_layer(lens: &str, layer: &Layer<V>) -> Self {
+        Self {
+            layer_id: layer.id,
+            written_at: layer.written_at,
+            lens: lens.to_string(),
+            taus: layer
+                .taus
+                .iter()
+                .map(|t| (t.start, t.end, t.value.clone()))
+                .collect(),
+        }
+    }
 }
 
 impl<V: Codec> WalEntry<V> {
@@ -316,6 +346,10 @@ impl Wal {
         self.writer.get_ref().sync_data()
     }
 
+    fn maybe_sync(&mut self) -> io::Result<()> {
+        if self.fsync_each { self.sync() } else { Ok(()) }
+    }
+
     /// Write one entry to disk, flush before returning.
     ///
     /// If a key is configured, the serialised entry is encrypted with AES-256-GCM
@@ -327,18 +361,8 @@ impl Wal {
             tau_count = entry.taus.len(),
             "writing WAL entry"
         );
-        if let Some(key) = &self.key {
-            let plaintext = entry.serialise();
-            let blob = crypto::encrypt(key, plaintext.as_bytes());
-            writeln!(self.writer, "E:{}", B64.encode(&blob))?;
-        } else {
-            writeln!(self.writer, "{}", entry.serialise())?;
-        }
-        if self.fsync_each {
-            self.writer.flush()?;
-            self.writer.get_ref().sync_data()?;
-        }
-        Ok(())
+        write_data_line(&mut self.writer, &self.key, entry)?;
+        self.maybe_sync()
     }
 
     /// Fast path: serialise a [`Layer`] directly into the WAL without
@@ -355,17 +379,7 @@ impl Wal {
         // Encrypted path keeps the original serialise() route - encryption
         // dominates cost and the buffer allocation noise is negligible.
         if self.key.is_some() {
-            let entry: WalEntry<V> = WalEntry {
-                layer_id: layer.id,
-                written_at: layer.written_at,
-                lens: lens.to_string(),
-                taus: layer
-                    .taus
-                    .iter()
-                    .map(|t| (t.start, t.end, t.value.clone()))
-                    .collect(),
-            };
-            return self.append(&entry);
+            return self.append(&WalEntry::from_layer(lens, layer));
         }
 
         self.scratch.clear();
@@ -385,11 +399,7 @@ impl Wal {
         self.writer.write_all(b" ")?;
         self.writer.write_all(self.scratch.as_bytes())?;
         self.writer.write_all(b"\n")?;
-        if self.fsync_each {
-            self.writer.flush()?;
-            self.writer.get_ref().sync_data()?;
-        }
-        Ok(())
+        self.maybe_sync()
     }
 
     /// Replay every persisted entry into `store` in write order.
@@ -476,11 +486,7 @@ impl Wal {
         } else {
             writeln!(self.writer, "S:{}", inner)?;
         }
-        if self.fsync_each {
-            self.writer.flush()?;
-            self.writer.get_ref().sync_data()?;
-        }
-        Ok(())
+        self.maybe_sync()
     }
 
     /// Return the raw `S:` / `SE:` lines as they appear in the WAL file.
@@ -555,13 +561,7 @@ impl Wal {
                 writeln!(writer, "{}", line)?;
             }
             for entry in entries {
-                if let Some(key) = &self.key {
-                    let plaintext = entry.serialise();
-                    let blob = crypto::encrypt(key, plaintext.as_bytes());
-                    writeln!(writer, "E:{}", B64.encode(&blob))?;
-                } else {
-                    writeln!(writer, "{}", entry.serialise())?;
-                }
+                write_data_line(&mut writer, &self.key, entry)?;
             }
             writer.flush()?;
             writer.get_ref().sync_data()?;

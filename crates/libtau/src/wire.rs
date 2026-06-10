@@ -121,8 +121,8 @@ impl Response {
                 let mut segs = Vec::new();
                 for item in items(rest) {
                     let mut p = item.splitn(3, ':');
-                    let s = parse_int(p.next(), "range start")?;
-                    let e = parse_int(p.next(), "range end")?;
+                    let s = field(p.next(), "range start")?;
+                    let e = field(p.next(), "range end")?;
                     let enc = p.next().ok_or_else(|| {
                         WireError(format!("range segment missing value: {item:?}"))
                     })?;
@@ -157,10 +157,10 @@ impl Response {
                 let mut layers = Vec::new();
                 for item in items(rest) {
                     let mut p = item.split(':');
-                    let id = parse_u64(p.next(), "layer id")?;
-                    let written_at = parse_int(p.next(), "layer written_at")?;
-                    let min_start = parse_int(p.next(), "layer min_start")?;
-                    let max_end = parse_int(p.next(), "layer max_end")?;
+                    let id = field(p.next(), "layer id")?;
+                    let written_at = field(p.next(), "layer written_at")?;
+                    let min_start = field(p.next(), "layer min_start")?;
+                    let max_end = field(p.next(), "layer max_end")?;
                     layers.push(LayerInfo {
                         id,
                         written_at,
@@ -192,13 +192,7 @@ fn items(rest: &str) -> impl Iterator<Item = &str> {
     rest.split("; ").skip(1)
 }
 
-fn parse_int(tok: Option<&str>, what: &str) -> Result<Timestamp, WireError> {
-    tok.ok_or_else(|| WireError(format!("missing {what}")))?
-        .parse()
-        .map_err(|_| WireError(format!("bad {what}")))
-}
-
-fn parse_u64(tok: Option<&str>, what: &str) -> Result<u64, WireError> {
+fn field<T: std::str::FromStr>(tok: Option<&str>, what: &str) -> Result<T, WireError> {
     tok.ok_or_else(|| WireError(format!("missing {what}")))?
         .parse()
         .map_err(|_| WireError(format!("bad {what}")))

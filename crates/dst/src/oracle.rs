@@ -90,10 +90,8 @@ impl OracleDb {
                 None
             }
             LensData::Derived(spec) => {
-                let a = spec.a.clone();
-                let b = spec.b.clone();
-                let va = Self::at_in(&a, t, now_secs, lenses)?;
-                let vb = Self::at_in(&b, t, now_secs, lenses)?;
+                let va = Self::at_in(&spec.a, t, now_secs, lenses)?;
+                let vb = Self::at_in(&spec.b, t, now_secs, lenses)?;
                 match (va, vb) {
                     (Value::Int(x), Value::Int(y)) => Some(Value::Int(x.wrapping_add(y))),
                     _ => None,
@@ -132,21 +130,19 @@ impl OracleDb {
                 }
             }
             Some(LensData::Derived(spec)) => {
-                let a = spec.a.clone();
-                let b = spec.b.clone();
-                Self::collect_boundaries(&a, qs, qe, now_secs, lenses, pts);
-                Self::collect_boundaries(&b, qs, qe, now_secs, lenses, pts);
+                Self::collect_boundaries(&spec.a, qs, qe, now_secs, lenses, pts);
+                Self::collect_boundaries(&spec.b, qs, qe, now_secs, lenses, pts);
             }
             None => {}
         }
     }
 
-    /// Range scan: boundary-decomposition with same-value merging.
-    fn range(&self, name: &str, qs: Ts, qe: Ts, now_secs: Ts) -> Vec<(Ts, Ts, Value)> {
+    /// Sorted boundary points covering `[qs, qe)` after TTL clipping, or
+    /// `None` when the clipped window is empty.
+    fn boundary_points(&self, name: &str, qs: Ts, qe: Ts, now_secs: Ts) -> Option<Vec<Ts>> {
         if qs >= qe {
-            return vec![];
+            return None;
         }
-        // Determine effective start after TTL clip
         let effective_qs = match self.lenses.get(name) {
             Some(LensData::Base { ttl_secs, .. }) => {
                 Self::ttl_cutoff(*ttl_secs, now_secs).map_or(qs, |c| qs.max(c))
@@ -154,15 +150,20 @@ impl OracleDb {
             _ => qs,
         };
         if effective_qs >= qe {
-            return vec![];
+            return None;
         }
-
         let mut pts = BTreeSet::new();
         pts.insert(effective_qs);
         pts.insert(qe);
         Self::collect_boundaries(name, effective_qs, qe, now_secs, &self.lenses, &mut pts);
-        let pts: Vec<Ts> = pts.into_iter().collect();
+        Some(pts.into_iter().collect())
+    }
 
+    /// Range scan: boundary-decomposition with same-value merging.
+    fn range(&self, name: &str, qs: Ts, qe: Ts, now_secs: Ts) -> Vec<(Ts, Ts, Value)> {
+        let Some(pts) = self.boundary_points(name, qs, qe, now_secs) else {
+            return vec![];
+        };
         let mut out: Vec<(Ts, Ts, Value)> = Vec::new();
         for w in pts.windows(2) {
             let (s, e) = (w[0], w[1]);
@@ -180,25 +181,9 @@ impl OracleDb {
     /// Aggregation windows: boundary-decomposition WITHOUT same-value merging.
     /// Returns `(duration, value)` pairs, matching the original oracle's `agg_segments`.
     fn agg_windows(&self, name: &str, qs: Ts, qe: Ts, now_secs: Ts) -> Vec<(Ts, Value)> {
-        if qs >= qe {
+        let Some(pts) = self.boundary_points(name, qs, qe, now_secs) else {
             return vec![];
-        }
-        let effective_qs = match self.lenses.get(name) {
-            Some(LensData::Base { ttl_secs, .. }) => {
-                Self::ttl_cutoff(*ttl_secs, now_secs).map_or(qs, |c| qs.max(c))
-            }
-            _ => qs,
         };
-        if effective_qs >= qe {
-            return vec![];
-        }
-
-        let mut pts = BTreeSet::new();
-        pts.insert(effective_qs);
-        pts.insert(qe);
-        Self::collect_boundaries(name, effective_qs, qe, now_secs, &self.lenses, &mut pts);
-        let pts: Vec<Ts> = pts.into_iter().collect();
-
         let mut out: Vec<(Ts, Value)> = Vec::new();
         for w in pts.windows(2) {
             let (s, e) = (w[0], w[1]);
@@ -229,34 +214,8 @@ impl OracleDb {
                     .fold(0i64, i64::wrapping_add);
                 Value::Int(s)
             }
-            AggFunc::Min => segs
-                .into_iter()
-                .map(|(_, v)| v)
-                .reduce(|a, b| match (&a, &b) {
-                    (Value::Int(x), Value::Int(y)) => {
-                        if x <= y {
-                            a
-                        } else {
-                            b
-                        }
-                    }
-                    _ => a,
-                })
-                .expect("non-empty"),
-            AggFunc::Max => segs
-                .into_iter()
-                .map(|(_, v)| v)
-                .reduce(|a, b| match (&a, &b) {
-                    (Value::Int(x), Value::Int(y)) => {
-                        if x >= y {
-                            a
-                        } else {
-                            b
-                        }
-                    }
-                    _ => a,
-                })
-                .expect("non-empty"),
+            AggFunc::Min => int_extreme(segs, |x, y| x <= y),
+            AggFunc::Max => int_extreme(segs, |x, y| x >= y),
             AggFunc::Avg => {
                 let total: i64 = segs.iter().map(|(d, _)| *d).sum();
                 if total == 0 {
@@ -351,6 +310,17 @@ impl OracleDb {
             }]
         };
     }
+}
+
+/// Keep `a` over `b` when `keep(a, b)` holds (Int-only ordering; non-Int keeps left).
+fn int_extreme(segs: Vec<(Ts, Value)>, keep: impl Fn(i64, i64) -> bool) -> Value {
+    segs.into_iter()
+        .map(|(_, v)| v)
+        .reduce(|a, b| match (&a, &b) {
+            (Value::Int(x), Value::Int(y)) if !keep(*x, *y) => b,
+            _ => a,
+        })
+        .expect("non-empty")
 }
 
 #[derive(Clone)]

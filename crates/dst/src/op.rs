@@ -94,114 +94,97 @@ pub enum Op {
     Rollback,
 }
 
-impl Payload {
-    pub fn len(&self) -> usize {
+impl Op {
+    /// The wire statement that drives this op against the SUT.
+    pub fn to_sql(&self) -> String {
         match self {
-            Payload::Int(v) => v.len(),
-            Payload::Float(v) => v.len(),
-            Payload::Bool(v) => v.len(),
-            Payload::Str(v) => v.len(),
+            Op::Append { lens, data } => data.batch_sql(lens),
+            Op::At { lens, t } => format!("AT LENS {lens} {t}"),
+            Op::Range { lens, start, end } => format!("RANGE LENS {lens} {start} {end}"),
+            Op::Reduce {
+                lens,
+                start,
+                end,
+                func,
+            } => format!("REDUCE LENS {lens} {start} {end} USING {func}"),
+            Op::CreateLens { name, ty } => format!("CREATE LENS {name} {ty}"),
+            Op::DropLens { name } => format!("DROP LENS {name}"),
+            Op::Derive { name, spec } => format!("DERIVE LENS {name} AS {} + {}", spec.a, spec.b),
+            Op::Ttl {
+                lens,
+                secs: Some(s),
+            } => format!("SET TTL LENS {lens} {s}"),
+            Op::Ttl { lens, secs: None } => format!("UNSET TTL LENS {lens}"),
+            Op::UseDb(db) => format!("USE DATABASE {db}"),
+            Op::StartTransaction => "START TRANSACTION".into(),
+            Op::Commit => "COMMIT".into(),
+            Op::Rollback => "ROLLBACK".into(),
         }
     }
+}
 
+impl Payload {
     pub fn to_values(&self) -> Vec<(Ts, Ts, Value)> {
+        fn conv<T: Copy>(rows: &[(Ts, Ts, T)], f: impl Fn(T) -> Value) -> Vec<(Ts, Ts, Value)> {
+            rows.iter().map(|&(s, e, v)| (s, e, f(v))).collect()
+        }
         match self {
-            Payload::Int(rows) => rows
-                .iter()
-                .map(|&(s, e, v)| (s, e, Value::Int(v)))
-                .collect(),
-            Payload::Float(rows) => rows
-                .iter()
-                .map(|&(s, e, v)| (s, e, Value::Float(v)))
-                .collect(),
-            Payload::Bool(rows) => rows
-                .iter()
-                .map(|&(s, e, v)| (s, e, Value::Bool(v)))
-                .collect(),
-            Payload::Str(rows) => rows
-                .iter()
-                .map(|&(s, e, v)| (s, e, Value::Str(Arc::from(v))))
-                .collect(),
+            Payload::Int(rows) => conv(rows, Value::Int),
+            Payload::Float(rows) => conv(rows, Value::Float),
+            Payload::Bool(rows) => conv(rows, Value::Bool),
+            Payload::Str(rows) => conv(rows, |v| Value::Str(Arc::from(v))),
         }
     }
 
     pub fn batch_sql(&self, lens: &str) -> String {
+        fn join<T>(rows: &[(Ts, Ts, T)], f: impl Fn(&T) -> String) -> String {
+            rows.iter()
+                .map(|(s, e, v)| format!("{s} {e} {}", f(v)))
+                .collect::<Vec<_>>()
+                .join(" ; ")
+        }
         let body = match self {
-            Payload::Int(rows) => rows
-                .iter()
-                .map(|(s, e, v)| format!("{s} {e} {v}"))
-                .collect::<Vec<_>>()
-                .join(" ; "),
-            Payload::Float(rows) => rows
-                .iter()
-                .map(|(s, e, v)| format!("{s} {e} {v}"))
-                .collect::<Vec<_>>()
-                .join(" ; "),
-            Payload::Bool(rows) => rows
-                .iter()
-                .map(|(s, e, v)| format!("{s} {e} {}", if *v { "true" } else { "false" }))
-                .collect::<Vec<_>>()
-                .join(" ; "),
-            Payload::Str(rows) => rows
-                .iter()
-                .map(|(s, e, v)| format!("{s} {e} \"{v}\""))
-                .collect::<Vec<_>>()
-                .join(" ; "),
+            Payload::Int(rows) => join(rows, i64::to_string),
+            Payload::Float(rows) => join(rows, f64::to_string),
+            Payload::Bool(rows) => join(rows, bool::to_string),
+            Payload::Str(rows) => join(rows, |v| format!("\"{v}\"")),
         };
         format!("BATCH APPEND LENS {lens} {{ {body} }}")
     }
 }
 
-pub fn gen_int_taus(rng: &mut StdRng, count: usize) -> Vec<(Ts, Ts, i64)> {
+/// Cursor-walked, sorted, non-overlapping taus with values drawn by `value`.
+fn gen_taus<T>(
+    rng: &mut StdRng,
+    count: usize,
+    mut value: impl FnMut(&mut StdRng) -> T,
+) -> Vec<(Ts, Ts, T)> {
     let mut cur: Ts = rng.gen_range(0..2000);
     (0..count)
         .map(|_| {
             let s = cur + rng.gen_range(0..50);
             let e = s + rng.gen_range(1..100);
-            let v = rng.gen_range(-1000i64..=1000);
+            let v = value(rng);
             cur = e;
             (s, e, v)
         })
         .collect()
+}
+
+pub fn gen_int_taus(rng: &mut StdRng, count: usize) -> Vec<(Ts, Ts, i64)> {
+    gen_taus(rng, count, |r| r.gen_range(-1000i64..=1000))
 }
 
 pub fn gen_float_taus(rng: &mut StdRng, count: usize) -> Vec<(Ts, Ts, f64)> {
-    let mut cur: Ts = rng.gen_range(0..2000);
-    (0..count)
-        .map(|_| {
-            let s = cur + rng.gen_range(0..50);
-            let e = s + rng.gen_range(1..100);
-            let v = rng.gen_range(-100.0f64..100.0);
-            cur = e;
-            (s, e, v)
-        })
-        .collect()
+    gen_taus(rng, count, |r| r.gen_range(-100.0f64..100.0))
 }
 
 pub fn gen_bool_taus(rng: &mut StdRng, count: usize) -> Vec<(Ts, Ts, bool)> {
-    let mut cur: Ts = rng.gen_range(0..2000);
-    (0..count)
-        .map(|_| {
-            let s = cur + rng.gen_range(0..50);
-            let e = s + rng.gen_range(1..100);
-            let v = rng.gen_bool(0.5);
-            cur = e;
-            (s, e, v)
-        })
-        .collect()
+    gen_taus(rng, count, |r| r.gen_bool(0.5))
 }
 
 pub fn gen_str_taus(rng: &mut StdRng, count: usize) -> Vec<(Ts, Ts, &'static str)> {
-    let mut cur: Ts = rng.gen_range(0..2000);
-    (0..count)
-        .map(|_| {
-            let s = cur + rng.gen_range(0..50);
-            let e = s + rng.gen_range(1..100);
-            let v = STR_VALUES[rng.gen_range(0..STR_VALUES.len())];
-            cur = e;
-            (s, e, v)
-        })
-        .collect()
+    gen_taus(rng, count, |r| STR_VALUES[r.gen_range(0..STR_VALUES.len())])
 }
 
 pub fn extreme_ts(rng: &mut StdRng) -> Ts {

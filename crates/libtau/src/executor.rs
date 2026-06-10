@@ -123,6 +123,12 @@ pub enum ExecError {
     NoActiveTransaction,
 }
 
+impl From<io::Error> for ExecError {
+    fn from(e: io::Error) -> Self {
+        ExecError::Io(e.to_string())
+    }
+}
+
 /// Per-database executor state.
 /// Where newly-created databases persist their layer data.
 #[derive(Clone)]
@@ -158,14 +164,23 @@ pub(crate) struct DbState {
 }
 
 impl DbState {
-    fn new(compact_threshold: usize) -> Self {
+    /// Wrap an opened database, restoring `next_layer_id` past any replayed
+    /// layers so new layers never collide with persisted ones.
+    fn from_db(db: Database<Value>) -> Self {
+        let next_layer_id = db.max_layer_id() + 1;
         Self {
-            db: Database::new(InMemory::<Value>::with_threshold(compact_threshold)),
+            db,
             base_types: HashMap::default(),
-            next_layer_id: 1,
+            next_layer_id,
             derived: HashMap::default(),
             ttl_secs: HashMap::default(),
         }
+    }
+
+    fn new(compact_threshold: usize) -> Self {
+        Self::from_db(Database::new(InMemory::<Value>::with_threshold(
+            compact_threshold,
+        )))
     }
 
     /// Open (or create) a disk-backed database, returning the fresh state plus
@@ -185,18 +200,8 @@ impl DbState {
         store.set_compact_threshold(compact_threshold);
         store.set_compression_level(compression_level);
         let db = Database::new(store);
-        let next_layer_id = db.max_layer_id() + 1;
-        let schema_stmts = db.schema_stmts().map_err(io::Error::other)?;
-        Ok((
-            Self {
-                db,
-                base_types: HashMap::default(),
-                next_layer_id,
-                derived: HashMap::default(),
-                ttl_secs: HashMap::default(),
-            },
-            schema_stmts,
-        ))
+        let schema_stmts = db.schema_stmts()?;
+        Ok((Self::from_db(db), schema_stmts))
     }
 
     fn with_wal(
@@ -205,21 +210,10 @@ impl DbState {
         key: Option<[u8; 32]>,
     ) -> io::Result<(Self, Vec<String>)> {
         let store = InMemory::<Value>::with_threshold(compact_threshold);
-        let db = Database::open(store, path, key).map_err(io::Error::other)?;
-        // Restore next_layer_id so new layers never collide with replayed ones.
-        let next_layer_id = db.max_layer_id() + 1;
-        // Fetch schema stmts to replay in the executor after construction.
-        let schema_stmts = db.schema_stmts().map_err(io::Error::other)?;
-        Ok((
-            Self {
-                db,
-                base_types: HashMap::default(),
-                next_layer_id,
-                derived: HashMap::default(),
-                ttl_secs: HashMap::default(),
-            },
-            schema_stmts,
-        ))
+        let db = Database::open(store, path, key)?;
+        // Schema stmts are replayed in the executor after construction.
+        let schema_stmts = db.schema_stmts()?;
+        Ok((Self::from_db(db), schema_stmts))
     }
 }
 
@@ -251,10 +245,41 @@ pub struct Executor {
 }
 
 fn apply_offset_limit<T>(v: Vec<T>, offset: Option<usize>, limit: Option<usize>) -> Vec<T> {
-    let iter = v.into_iter().skip(offset.unwrap_or(0));
-    match limit {
-        Some(n) => iter.take(n).collect(),
-        None => iter.collect(),
+    if offset.is_none() && limit.is_none() {
+        return v;
+    }
+    v.into_iter()
+        .skip(offset.unwrap_or(0))
+        .take(limit.unwrap_or(usize::MAX))
+        .collect()
+}
+
+/// Convert parsed literal taus to runtime values (Arc-bump for strings).
+fn literal_taus(
+    taus: &[(i64, i64, crate::ql::ast::Literal)],
+) -> Vec<(Timestamp, Timestamp, Value)> {
+    taus.iter().map(|(s, e, l)| (*s, *e, l.into())).collect()
+}
+
+/// The lens must exist as either a base or a derived lens.
+fn ensure_lens_exists(state: &DbState, name: &str) -> Result<(), ExecError> {
+    if state.base_types.contains_key(name) || state.derived.contains_key(name) {
+        Ok(())
+    } else {
+        Err(ExecError::UnknownLens(name.into()))
+    }
+}
+
+/// The lens must be a base lens; derived lenses get a targeted error.
+fn ensure_base_lens(state: &DbState, name: &str, stmt_kind: &str) -> Result<(), ExecError> {
+    if state.base_types.contains_key(name) {
+        Ok(())
+    } else if state.derived.contains_key(name) {
+        Err(ExecError::InvalidExpr(format!(
+            "{stmt_kind} is only supported for base lenses"
+        )))
+    } else {
+        Err(ExecError::UnknownLens(name.into()))
     }
 }
 
@@ -331,21 +356,13 @@ impl Executor {
     ) -> io::Result<Self> {
         let dir = dir.as_ref().to_path_buf();
         fs::create_dir_all(&dir)?;
-        Ok(Self {
-            databases: HashMap::default(),
-            active: None,
-            compact_threshold,
-            in_replay: false,
-            users: UserStore::new(),
-            metrics: Metrics::arc(),
-            pending: None,
-            backend: StorageBackend::Disk {
-                dir,
-                compression_level,
-                enc_key,
-            },
-            started_at: std::time::Instant::now(),
-        })
+        let mut executor = Self::with_threshold(compact_threshold);
+        executor.backend = StorageBackend::Disk {
+            dir,
+            compression_level,
+            enc_key,
+        };
+        Ok(executor)
     }
 
     /// Open a WAL-backed executor with the default compaction threshold.
@@ -475,11 +492,7 @@ impl Executor {
             Stmt::DropDatabase { name } => self.drop_database(name),
             Stmt::UseDatabase { name } => self.use_database(name),
             Stmt::Create { name, ty } => self.create_lens(name, ty.clone()),
-            Stmt::Append { name, taus } => {
-                let taus: Vec<(Timestamp, Timestamp, Value)> =
-                    taus.iter().map(|(s, e, v)| (*s, *e, v.into())).collect();
-                self.append_lens(name, taus)
-            }
+            Stmt::Append { name, taus } => self.write_layer(name, literal_taus(taus)),
             Stmt::Copy { name, path } => self.copy_lens(name, path),
             Stmt::Derive { name, expr } => self.derive_lens(name, expr.clone()),
             Stmt::At { name, t } => self.at_lens(name, *t),
@@ -501,8 +514,8 @@ impl Executor {
                 end,
                 func,
             } => self.reduce_lens(name, *start, *end, *func),
-            Stmt::SetTtl { name, secs } => self.set_ttl(name, *secs),
-            Stmt::UnsetTtl { name } => self.unset_ttl(name),
+            Stmt::SetTtl { name, secs } => self.update_ttl(name, Some(*secs)),
+            Stmt::UnsetTtl { name } => self.update_ttl(name, None),
             Stmt::CreateUser { name, password } => self.create_user(name, password),
             Stmt::DropUser { name } => self.drop_user(name),
             Stmt::Grant {
@@ -517,7 +530,7 @@ impl Executor {
             } => self.revoke(*perms, database, user),
             Stmt::ShowUsers => self.show_users(),
             Stmt::ShowGrants { user } => self.show_grants(user.as_deref()),
-            Stmt::BatchAppend { name, taus } => self.batch_append_lens(name, taus),
+            Stmt::BatchAppend { name, taus } => self.write_layer(name, literal_taus(taus)),
             Stmt::AtAsOf { name, t, as_of } => self.at_as_of_lens(name, *t, *as_of),
             Stmt::AtLayer { name, t, layer_id } => self.at_layer_lens(name, *t, *layer_id),
             Stmt::HistoryLens { name, range } => self.history_lens(name, *range),
@@ -583,12 +596,9 @@ impl Executor {
         let t0 = Instant::now();
         let result = match stmt {
             Stmt::Create { name, ty } => self.create_lens(name, ty.clone()),
-            Stmt::Append { name, taus } => {
-                let parsed: Vec<(Timestamp, Timestamp, Value)> =
-                    taus.iter().map(|(s, e, l)| (*s, *e, l.into())).collect();
-                self.append_lens(name, parsed)
+            Stmt::Append { name, taus } | Stmt::BatchAppend { name, taus } => {
+                self.write_layer(name, literal_taus(taus))
             }
-            Stmt::BatchAppend { name, taus } => self.batch_append_lens(name, taus),
             Stmt::Copy { name, path } => self.copy_lens(name, path),
             Stmt::Derive { name, expr } => self.derive_lens(name, expr.clone()),
             Stmt::Drop { name } => self.drop_lens(name),
@@ -803,8 +813,7 @@ impl Executor {
                 enc_key,
             } => {
                 let path = dir.join(format!("{name}.dat"));
-                DbState::with_disk(&path, self.compact_threshold, *compression_level, *enc_key)
-                    .map_err(|e| ExecError::Io(e.to_string()))?
+                DbState::with_disk(&path, self.compact_threshold, *compression_level, *enc_key)?
             }
         };
         db_state.db.set_metrics(metrics);
@@ -871,17 +880,18 @@ impl Executor {
         }
         // WAL-first: persist before updating in-memory state.
         if !in_replay {
-            let stmt_text = format!("CREATE LENS {name} {ty}");
             state
                 .db
-                .append_schema(&stmt_text)
-                .map_err(|e| ExecError::Io(e.to_string()))?;
+                .append_schema(&format!("CREATE LENS {name} {ty}"))?;
         }
         state.base_types.insert(name.into(), ty);
         Ok(Output::Empty)
     }
 
-    fn append_lens(
+    /// Shared write path for `APPEND`, `BATCH APPEND`, and `COPY`: type-check
+    /// every tau against the lens's declared type, sort, reject overlaps and
+    /// empty intervals with [`ExecError::InvalidRange`], then append one layer.
+    fn write_layer(
         &self,
         name: &str,
         taus: Vec<(Timestamp, Timestamp, Value)>,
@@ -896,7 +906,8 @@ impl Executor {
             .get(name)
             .cloned()
             .ok_or_else(|| ExecError::UnknownLens(name.into()))?;
-        for (start, end, value) in &taus {
+        let mut tau_vec: Vec<Tau<Value>> = Vec::with_capacity(taus.len());
+        for (start, end, value) in taus {
             if start >= end {
                 return Err(ExecError::InvalidRange);
             }
@@ -909,105 +920,42 @@ impl Executor {
                     got: value.type_name().into(),
                 });
             }
+            tau_vec.push(Tau::new(start, end, value));
+        }
+        tau_vec.sort_by_key(|t| t.start);
+        if tau_vec.windows(2).any(|w| w[0].end > w[1].start) {
+            return Err(ExecError::InvalidRange);
         }
         let id = state.next_layer_id;
         state.next_layer_id += 1;
-        let layer = Layer::new(
-            id,
-            taus.into_iter()
-                .map(|(s, e, v)| Tau::new(s, e, v))
-                .collect(),
-        );
-        state
-            .db
-            .append(name, layer)
-            .map_err(|e| ExecError::Io(e.to_string()))?;
+        let layer = Layer::new_sorted_unchecked(id, tau_vec, crate::model::now_ms());
+        state.db.append(name, layer)?;
         Ok(Output::Empty)
     }
 
     fn copy_lens(&self, name: &str, path: &str) -> Result<Output, ExecError> {
-        use crate::ql::parse_literal;
-        let content = fs::read_to_string(path).map_err(|e| ExecError::Io(e.to_string()))?;
-        // Validate the lens exists and get its type before parsing all rows.
-        {
-            let db_arc = self.active_db_arc()?;
-            let state = db_arc.read().expect("db lock poisoned");
-            if !state.base_types.contains_key(name) {
-                return Err(ExecError::UnknownLens(name.into()));
-            }
-        }
+        let content = fs::read_to_string(path)?;
         let mut taus: Vec<(Timestamp, Timestamp, Value)> = Vec::new();
         for (lineno, line) in content.lines().enumerate() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
-            let mut parts = line.splitn(3, ',');
-            let start_str = parts
-                .next()
-                .ok_or_else(|| ExecError::Io(format!("line {}: missing start", lineno + 1)))?
-                .trim();
-            let end_str = parts
-                .next()
-                .ok_or_else(|| ExecError::Io(format!("line {}: missing end", lineno + 1)))?
-                .trim();
-            let val_str = parts
-                .next()
-                .ok_or_else(|| ExecError::Io(format!("line {}: missing value", lineno + 1)))?
-                .trim();
-            let start: Timestamp = start_str.parse().map_err(|_| {
-                ExecError::Io(format!(
-                    "line {}: invalid start {:?}",
-                    lineno + 1,
-                    start_str
-                ))
-            })?;
-            let end: Timestamp = end_str.parse().map_err(|_| {
-                ExecError::Io(format!("line {}: invalid end {:?}", lineno + 1, end_str))
-            })?;
-            let value: Value = parse_literal(val_str)
+            let bad = |what: &str| ExecError::Io(format!("line {}: {what}", lineno + 1));
+            let mut parts = line.splitn(3, ',').map(str::trim);
+            let (Some(s), Some(e), Some(v)) = (parts.next(), parts.next(), parts.next()) else {
+                return Err(bad("expected start,end,value"));
+            };
+            let start: Timestamp = s
+                .parse()
+                .map_err(|_| bad(&format!("invalid start {s:?}")))?;
+            let end: Timestamp = e.parse().map_err(|_| bad(&format!("invalid end {e:?}")))?;
+            let value = crate::ql::parse_literal(v)
                 .map(|lit| Value::from(&lit))
-                .ok_or_else(|| {
-                    ExecError::Io(format!(
-                        "line {}: cannot parse value {:?}",
-                        lineno + 1,
-                        val_str
-                    ))
-                })?;
+                .ok_or_else(|| bad(&format!("cannot parse value {v:?}")))?;
             taus.push((start, end, value));
         }
-        if taus.is_empty() {
-            return Ok(Output::Empty);
-        }
-        let db_arc = self.active_db_arc()?;
-        let mut state = db_arc.write().expect("db lock poisoned");
-        let ty = state
-            .base_types
-            .get(name)
-            .cloned()
-            .ok_or_else(|| ExecError::UnknownLens(name.into()))?;
-        let mut tau_vec: Vec<crate::model::Tau<Value>> = Vec::with_capacity(taus.len());
-        for (start, end, value) in taus {
-            if let Some(got) = value.ty()
-                && got != ty
-            {
-                return Err(ExecError::TypeMismatch {
-                    lens: name.into(),
-                    expected: ty.clone(),
-                    got: value.type_name().into(),
-                });
-            }
-            tau_vec.push(crate::model::Tau::new(start, end, value));
-        }
-        let id = state.next_layer_id;
-        state.next_layer_id += 1;
-        let now = crate::model::now_ms();
-        let layer = Layer::new_sorted_unchecked(id, tau_vec, now);
-        state
-            .db
-            .append(name, layer)
-            .map_err(|e| ExecError::Io(e.to_string()))?;
-        Ok(Output::Empty)
+        self.write_layer(name, taus)
     }
 
     fn derive_lens(&self, name: &str, expr: Expr) -> Result<Output, ExecError> {
@@ -1023,11 +971,9 @@ impl Executor {
             return Err(ExecError::CycleDetected(name.into()));
         }
         if !in_replay {
-            let stmt_text = format!("DERIVE LENS {name} AS {expr}");
             state
                 .db
-                .append_schema(&stmt_text)
-                .map_err(|e| ExecError::Io(e.to_string()))?;
+                .append_schema(&format!("DERIVE LENS {name} AS {expr}"))?;
         }
         state.derived.insert(name.into(), expr);
         Ok(Output::Empty)
@@ -1056,9 +1002,7 @@ impl Executor {
         }
         let db_arc = self.active_db_arc()?;
         let state = db_arc.read().expect("db lock poisoned");
-        if !state.base_types.contains_key(name) && !state.derived.contains_key(name) {
-            return Err(ExecError::UnknownLens(name.into()));
-        }
+        ensure_lens_exists(&state, name)?;
         let effective_start = ttl_cutoff(&state, name).map_or(start, |c| start.max(c));
         if effective_start >= end {
             return Ok(Output::Range(vec![]));
@@ -1101,9 +1045,7 @@ impl Executor {
         }
         let db_arc = self.active_db_arc()?;
         let state = db_arc.read().expect("db lock poisoned");
-        if !state.base_types.contains_key(name) && !state.derived.contains_key(name) {
-            return Err(ExecError::UnknownLens(name.into()));
-        }
+        ensure_lens_exists(&state, name)?;
         let effective_start = ttl_cutoff(&state, name).map_or(start, |c| start.max(c));
         if effective_start >= end {
             return Ok(Output::Value(None));
@@ -1111,34 +1053,24 @@ impl Executor {
         eval_agg(&state, name, func, effective_start, end).map(Output::Value)
     }
 
-    fn set_ttl(&mut self, name: &str, secs: i64) -> Result<Output, ExecError> {
+    /// `SET TTL` (`Some(secs)`) / `UNSET TTL` (`None`), persisted to the
+    /// schema log unless replaying.
+    fn update_ttl(&self, name: &str, secs: Option<i64>) -> Result<Output, ExecError> {
         let db_arc = self.active_db_arc()?;
         let mut state = db_arc.write().expect("db lock poisoned");
-        if !state.base_types.contains_key(name) && !state.derived.contains_key(name) {
-            return Err(ExecError::UnknownLens(name.into()));
-        }
-        state.ttl_secs.insert(name.into(), secs);
+        ensure_lens_exists(&state, name)?;
+        let stmt_text = match secs {
+            Some(s) => {
+                state.ttl_secs.insert(name.into(), s);
+                format!("SET TTL LENS {name} {s}")
+            }
+            None => {
+                state.ttl_secs.remove(name);
+                format!("UNSET TTL LENS {name}")
+            }
+        };
         if !self.in_replay {
-            state
-                .db
-                .append_schema(&format!("SET TTL LENS {name} {secs}"))
-                .map_err(|e| ExecError::Io(e.to_string()))?;
-        }
-        Ok(Output::Empty)
-    }
-
-    fn unset_ttl(&mut self, name: &str) -> Result<Output, ExecError> {
-        let db_arc = self.active_db_arc()?;
-        let mut state = db_arc.write().expect("db lock poisoned");
-        if !state.base_types.contains_key(name) && !state.derived.contains_key(name) {
-            return Err(ExecError::UnknownLens(name.into()));
-        }
-        state.ttl_secs.remove(name);
-        if !self.in_replay {
-            state
-                .db
-                .append_schema(&format!("UNSET TTL LENS {name}"))
-                .map_err(|e| ExecError::Io(e.to_string()))?;
+            state.db.append_schema(&stmt_text)?;
         }
         Ok(Output::Empty)
     }
@@ -1189,10 +1121,7 @@ impl Executor {
         if in_types || in_derived {
             state.db.drop_lens(name);
             if !in_replay {
-                state
-                    .db
-                    .append_schema(&format!("DROP LENS {name}"))
-                    .map_err(|e| ExecError::Io(e.to_string()))?;
+                state.db.append_schema(&format!("DROP LENS {name}"))?;
             }
             Ok(Output::Empty)
         } else {
@@ -1200,89 +1129,27 @@ impl Executor {
         }
     }
 
-    fn batch_append_lens(
-        &self,
-        name: &str,
-        taus: &[(i64, i64, crate::ql::ast::Literal)],
-    ) -> Result<Output, ExecError> {
-        if taus.is_empty() {
-            return Ok(Output::Empty);
-        }
-        let db_arc = self.active_db_arc()?;
-        let mut state = db_arc.write().expect("db lock poisoned");
-        let ty = state
-            .base_types
-            .get(name)
-            .cloned()
-            .ok_or_else(|| ExecError::UnknownLens(name.into()))?;
-        let mut tau_vec: Vec<crate::model::Tau<Value>> = Vec::with_capacity(taus.len());
-        for (start, end, lit) in taus {
-            if start >= end {
-                return Err(ExecError::InvalidRange);
-            }
-            let value: Value = lit.into();
-            if let Some(got) = value.ty()
-                && got != ty
-            {
-                return Err(ExecError::TypeMismatch {
-                    lens: name.into(),
-                    expected: ty.clone(),
-                    got: value.type_name().into(),
-                });
-            }
-            tau_vec.push(crate::model::Tau::new(*start, *end, value));
-        }
-        let id = state.next_layer_id;
-        state.next_layer_id += 1;
-        let now = crate::model::now_ms();
-        let layer = Layer::new_sorted_unchecked(id, tau_vec, now);
-        state
-            .db
-            .append(name, layer)
-            .map_err(|e| ExecError::Io(e.to_string()))?;
-        Ok(Output::Empty)
-    }
-
     fn at_as_of_lens(&self, name: &str, t: Timestamp, as_of: i64) -> Result<Output, ExecError> {
         let db_arc = self.active_db_arc()?;
         let state = db_arc.read().expect("db lock poisoned");
-        if state.base_types.contains_key(name) {
-            let filtered: Vec<Layer<Value>> = state
-                .db
-                .layers(name)
-                .map(|arc| {
-                    arc.iter()
-                        .filter(|l| l.written_at == 0 || l.written_at <= as_of)
-                        .cloned()
-                        .collect()
-                })
-                .unwrap_or_default();
-            Ok(Output::Value(if filtered.is_empty() {
-                None
-            } else {
-                at_layers(&filtered, t)
-            }))
-        } else if state.derived.contains_key(name) {
-            Err(ExecError::InvalidExpr(
-                "AT AS OF is only supported for base lenses".into(),
-            ))
-        } else {
-            Err(ExecError::UnknownLens(name.into()))
-        }
+        ensure_base_lens(&state, name, "AT AS OF")?;
+        let filtered: Vec<Layer<Value>> = state
+            .db
+            .layers(name)
+            .map(|arc| {
+                arc.iter()
+                    .filter(|l| l.written_at == 0 || l.written_at <= as_of)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(Output::Value(at_layers(&filtered, t)))
     }
 
     fn at_layer_lens(&self, name: &str, t: Timestamp, layer_id: u64) -> Result<Output, ExecError> {
         let db_arc = self.active_db_arc()?;
         let state = db_arc.read().expect("db lock poisoned");
-        if !state.base_types.contains_key(name) {
-            return if state.derived.contains_key(name) {
-                Err(ExecError::InvalidExpr(
-                    "AT LAYER is only supported for base lenses".into(),
-                ))
-            } else {
-                Err(ExecError::UnknownLens(name.into()))
-            };
-        }
+        ensure_base_lens(&state, name, "AT LAYER")?;
         let result = state
             .db
             .layers(name)
@@ -1296,9 +1163,7 @@ impl Executor {
     fn history_lens(&self, name: &str, range: Option<(i64, i64)>) -> Result<Output, ExecError> {
         let db_arc = self.active_db_arc()?;
         let state = db_arc.read().expect("db lock poisoned");
-        if !state.base_types.contains_key(name) && !state.derived.contains_key(name) {
-            return Err(ExecError::UnknownLens(name.into()));
-        }
+        ensure_lens_exists(&state, name)?;
         let layers = state.db.layers(name).unwrap_or_default();
         let infos = layers
             .iter()
@@ -1337,32 +1202,19 @@ impl Executor {
 
         let bk_path = Path::new(path);
         if bk_path.exists() {
-            fs::remove_file(bk_path).map_err(|e| ExecError::Io(e.to_string()))?;
+            fs::remove_file(bk_path)?;
         }
 
-        let mut wal = Wal::open(path, None).map_err(|e| ExecError::Io(e.to_string()))?;
+        let mut wal = Wal::open(path, None)?;
         for stmt in &schema_stmts {
-            wal.append_schema(stmt)
-                .map_err(|e| ExecError::Io(e.to_string()))?;
+            wal.append_schema(stmt)?;
         }
-        let all_layers = state.db.export_layers();
-        for (lens_name, layers) in &all_layers {
+        for (lens_name, layers) in &state.db.export_layers() {
             for layer in layers {
-                let entry = WalEntry {
-                    layer_id: layer.id,
-                    written_at: layer.written_at,
-                    lens: lens_name.clone(),
-                    taus: layer
-                        .taus
-                        .iter()
-                        .map(|t| (t.start, t.end, t.value.clone()))
-                        .collect(),
-                };
-                wal.append(&entry)
-                    .map_err(|e| ExecError::Io(e.to_string()))?;
+                wal.append(&WalEntry::from_layer(lens_name, layer))?;
             }
         }
-        wal.sync().map_err(|e| ExecError::Io(e.to_string()))?;
+        wal.sync()?;
         Ok(Output::Empty)
     }
 
@@ -1374,25 +1226,14 @@ impl Executor {
             return Err(ExecError::Io(format!("backup file not found: {path}")));
         }
 
-        let wal = Wal::open(path, None).map_err(|e| ExecError::Io(e.to_string()))?;
+        let wal = Wal::open(path, None)?;
         let mut store = InMemory::<Value>::with_threshold(self.compact_threshold);
-        wal.replay(&mut store)
-            .map_err(|e| ExecError::Io(e.to_string()))?;
-        let schema_stmts = wal
-            .replay_schemas()
-            .map_err(|e| ExecError::Io(e.to_string()))?;
+        wal.replay(&mut store)?;
+        let schema_stmts = wal.replay_schemas()?;
 
-        let db = Database::new(store);
-        let next_layer_id = db.max_layer_id() + 1;
         self.databases.insert(
             name.into(),
-            Arc::new(RwLock::new(DbState {
-                db,
-                base_types: HashMap::default(),
-                next_layer_id,
-                derived: HashMap::default(),
-                ttl_secs: HashMap::default(),
-            })),
+            Arc::new(RwLock::new(DbState::from_db(Database::new(store)))),
         );
 
         self.replay_schema_stmts(name, &schema_stmts);

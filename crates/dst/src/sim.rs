@@ -1,7 +1,7 @@
 //! Tau [`libdst::DualSimulation`] over direct executor or wire target + isolated oracle.
 
 use libdst::divergence::Divergence;
-use libdst::faults::truncate_wal;
+use libdst::faults::truncate_file;
 use libdst::report::RunResult;
 use libdst::sim::{CheckpointAction, DualSimulation};
 use libdst::{SequentialOpts, run_sequential};
@@ -102,34 +102,10 @@ impl TauSimulation {
         }
     }
 
+    /// Wipe `.dat` files and dual-replay the log (disk-backed profiles).
     fn replay_dual_log(&self, log: &[Op]) -> CheckpointAction {
         self.wipe_disk_dir();
-        let mut model = self.rebuild_model();
-        let mut divergences: Vec<Divergence> = Vec::new();
-        if self.profile.is_wire() {
-            let target = self.rebuild_wire_target();
-            self.set_target(target);
-            let mut target = self.target.borrow_mut();
-            if let RunTarget::Wire { client, .. } = &mut *target {
-                replay_log_wire(client, &mut model, log, &mut divergences);
-            }
-        } else {
-            let mut direct = self.rebuild_direct_target();
-            for (i, op) in log.iter().enumerate() {
-                divergences.extend(apply_dual_executor(i, op, &mut direct, &mut model));
-            }
-            self.set_target(RunTarget::Direct(direct));
-        }
-        *self.model.borrow_mut() = model;
-        self.finish_replay_state(&mut self.target.borrow_mut());
-        if !divergences.is_empty() {
-            error!(
-                n = divergences.len(),
-                profile = %self.profile.name(),
-                "disk replay mismatch"
-            );
-        }
-        CheckpointAction::Continue { divergences }
+        self.dual_replay(log, "disk")
     }
 
     /// Delete WAL and dual-replay the log (keeps target and oracle aligned).
@@ -158,7 +134,7 @@ impl TauSimulation {
 
     fn wal_truncation_fault(&self, rng: &mut StdRng) {
         let wal_path = self.workspace.paths.wal_path.as_ref().expect("wal path");
-        let removed = truncate_wal(wal_path, rng);
+        let removed = truncate_file(wal_path, rng);
         warn!(?removed, profile = %self.profile.name(), "WAL truncated");
         let _ = self.rebuild_direct_target();
         let _ = fs::remove_file(wal_path);
@@ -166,6 +142,12 @@ impl TauSimulation {
     }
 
     fn memory_replay(&self, log: &[Op]) -> CheckpointAction {
+        self.dual_replay(log, "memory")
+    }
+
+    /// Rebuild target and model from scratch, replay `log` against both in
+    /// lock-step, and install the rebuilt pair.
+    fn dual_replay(&self, log: &[Op], label: &str) -> CheckpointAction {
         let mut model = self.rebuild_model();
         let mut divergences: Vec<Divergence> = Vec::new();
         if self.profile.is_wire() {
@@ -187,7 +169,7 @@ impl TauSimulation {
             error!(
                 n = divergences.len(),
                 profile = %self.profile.name(),
-                "memory replay mismatch"
+                "{label} replay mismatch"
             );
         }
         CheckpointAction::Continue { divergences }

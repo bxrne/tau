@@ -84,6 +84,18 @@ fn buckets() -> impl Iterator<Item = f64> {
     LATENCY_BUCKETS_US.iter().copied()
 }
 
+fn counter(registry: &mut Registry, name: &str, help: &str) -> Counter<u64> {
+    let c: Counter<u64> = Counter::default();
+    registry.register(name, help, c.clone());
+    c
+}
+
+fn gauge(registry: &mut Registry, name: &str, help: &str) -> Gauge {
+    let g: Gauge = Gauge::default();
+    registry.register(name, help, g.clone());
+    g
+}
+
 /// Per-op recording handles (cloned from the families registered in the registry).
 pub struct OpStats {
     pub count: Counter<u64>,
@@ -169,60 +181,11 @@ impl Metrics {
             }
         });
 
-        let compactions: Counter<u64> = Counter::default();
-        registry.register(
-            "tau_compactions",
-            "Times the sweep-line compactor merged a lens layer stack",
-            compactions.clone(),
-        );
-
         let wal_write_latency = Histogram::new(buckets());
         registry.register(
             "tau_wal_write_duration_microseconds",
             "Time spent writing one entry to the WAL file (includes fsync when enabled)",
             wal_write_latency.clone(),
-        );
-
-        let connections: Counter<u64> = Counter::default();
-        registry.register(
-            "tau_connections",
-            "Total TCP connections accepted by the server",
-            connections.clone(),
-        );
-
-        let connections_active: Gauge = Gauge::default();
-        registry.register(
-            "tau_connections_active",
-            "Currently open TCP connections",
-            connections_active.clone(),
-        );
-
-        let rejected_connections: Counter<u64> = Counter::default();
-        registry.register(
-            "tau_rejected_connections",
-            "Connections refused at the accept boundary (server at capacity)",
-            rejected_connections.clone(),
-        );
-
-        let auth_attempts: Counter<u64> = Counter::default();
-        registry.register(
-            "tau_auth_attempts",
-            "Total AUTH messages received",
-            auth_attempts.clone(),
-        );
-
-        let auth_failures: Counter<u64> = Counter::default();
-        registry.register(
-            "tau_auth_failures",
-            "AUTH attempts rejected (wrong credentials or missing AUTH)",
-            auth_failures.clone(),
-        );
-
-        let errors: Counter<u64> = Counter::default();
-        registry.register(
-            "tau_errors",
-            "Total ERR responses sent to clients",
-            errors.clone(),
         );
 
         let per_db: Family<DbOpLabel, Counter<u64>> = Family::default();
@@ -232,54 +195,64 @@ impl Metrics {
             per_db.clone(),
         );
 
-        let process_rss: Gauge = Gauge::default();
-        registry.register(
-            "tau_process_resident_bytes",
-            "Resident set size of the tau process in bytes (0 if unsupported)",
-            process_rss.clone(),
-        );
-        let process_vsz: Gauge = Gauge::default();
-        registry.register(
-            "tau_process_virtual_bytes",
-            "Virtual memory size of the tau process in bytes (0 if unsupported)",
-            process_vsz.clone(),
-        );
-        let process_fds: Gauge = Gauge::default();
-        registry.register(
-            "tau_process_open_fds",
-            "Open file descriptors held by the tau process (0 if unsupported)",
-            process_fds.clone(),
-        );
-        let process_threads: Gauge = Gauge::default();
-        registry.register(
-            "tau_process_threads",
-            "OS threads in the tau process (0 if unsupported)",
-            process_threads.clone(),
-        );
-        let process_uptime: Gauge = Gauge::default();
-        registry.register(
-            "tau_process_uptime_seconds",
-            "Wall-clock seconds since the metrics module was initialised",
-            process_uptime.clone(),
-        );
-
+        let r = &mut registry;
         Self {
-            registry,
             ops,
-            compactions,
             wal_write_latency,
-            connections,
-            connections_active,
-            rejected_connections,
-            auth_attempts,
-            auth_failures,
-            errors,
             per_db,
-            proc_rss: process_rss,
-            proc_vsz: process_vsz,
-            proc_fds: process_fds,
-            proc_threads: process_threads,
-            proc_uptime: process_uptime,
+            compactions: counter(
+                r,
+                "tau_compactions",
+                "Times the sweep-line compactor merged a lens layer stack",
+            ),
+            connections: counter(
+                r,
+                "tau_connections",
+                "Total TCP connections accepted by the server",
+            ),
+            connections_active: gauge(
+                r,
+                "tau_connections_active",
+                "Currently open TCP connections",
+            ),
+            rejected_connections: counter(
+                r,
+                "tau_rejected_connections",
+                "Connections refused at the accept boundary (server at capacity)",
+            ),
+            auth_attempts: counter(r, "tau_auth_attempts", "Total AUTH messages received"),
+            auth_failures: counter(
+                r,
+                "tau_auth_failures",
+                "AUTH attempts rejected (wrong credentials or missing AUTH)",
+            ),
+            errors: counter(r, "tau_errors", "Total ERR responses sent to clients"),
+            proc_rss: gauge(
+                r,
+                "tau_process_resident_bytes",
+                "Resident set size of the tau process in bytes (0 if unsupported)",
+            ),
+            proc_vsz: gauge(
+                r,
+                "tau_process_virtual_bytes",
+                "Virtual memory size of the tau process in bytes (0 if unsupported)",
+            ),
+            proc_fds: gauge(
+                r,
+                "tau_process_open_fds",
+                "Open file descriptors held by the tau process (0 if unsupported)",
+            ),
+            proc_threads: gauge(
+                r,
+                "tau_process_threads",
+                "OS threads in the tau process (0 if unsupported)",
+            ),
+            proc_uptime: gauge(
+                r,
+                "tau_process_uptime_seconds",
+                "Wall-clock seconds since the metrics module was initialised",
+            ),
+            registry,
         }
     }
 

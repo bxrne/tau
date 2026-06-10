@@ -509,25 +509,19 @@ pub(crate) fn eval_agg(
     }
     Ok(Some(match func {
         AggFunc::Count => Value::Int(segments.len() as i64),
-        AggFunc::Min => segments
-            .into_iter()
-            .map(|(_, v)| v)
-            .try_fold(None::<Value>, |acc, v| match acc {
-                None => Ok(Some(v)),
-                Some(a) => numeric_min_max(a, v, false).map(Some),
-            })?
-            .expect("non-empty segments guaranteed by early return above"),
-        AggFunc::Max => segments
-            .into_iter()
-            .map(|(_, v)| v)
-            .try_fold(None::<Value>, |acc, v| match acc {
-                None => Ok(Some(v)),
-                Some(a) => numeric_min_max(a, v, true).map(Some),
-            })?
-            .expect("non-empty segments guaranteed by early return above"),
+        AggFunc::Min => fold_min_max(segments, false)?,
+        AggFunc::Max => fold_min_max(segments, true)?,
         AggFunc::Sum => agg_sum(&segments)?,
         AggFunc::Avg => return agg_avg(&segments),
     }))
+}
+
+fn fold_min_max(segments: Vec<(i64, Value)>, want_max: bool) -> Result<Value, ExecError> {
+    let mut values = segments.into_iter().map(|(_, v)| v);
+    let first = values
+        .next()
+        .expect("non-empty segments guaranteed by caller");
+    values.try_fold(first, |acc, v| numeric_min_max(acc, v, want_max))
 }
 
 pub(crate) fn numeric_min_max(a: Value, b: Value, want_max: bool) -> Result<Value, ExecError> {

@@ -289,18 +289,9 @@ where
                 .lens_names()
                 .into_iter()
                 .filter_map(|name| {
-                    store.layers(&name).map(|layers| {
-                        layers.iter().map(move |layer| WalEntry {
-                            layer_id: layer.id,
-                            written_at: layer.written_at,
-                            lens: name.clone(),
-                            taus: layer
-                                .taus
-                                .iter()
-                                .map(|t| (t.start, t.end, t.value.clone()))
-                                .collect(),
-                        })
-                    })
+                    store
+                        .layers(&name)
+                        .map(|layers| layers.iter().map(move |l| WalEntry::from_layer(&name, l)))
                 })
                 .flatten()
                 .collect()

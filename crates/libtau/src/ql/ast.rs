@@ -348,6 +348,8 @@ impl std::fmt::Display for Literal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Literal::Int(v) => write!(f, "{}", v),
+            // Keep a decimal point so the text re-parses as a float, not an int.
+            Literal::Float(v) if v.fract() == 0.0 && v.is_finite() => write!(f, "{v:.1}"),
             Literal::Float(v) => write!(f, "{}", v),
             Literal::Str(s) => write!(f, "\"{}\"", s),
             Literal::Bool(b) => write!(f, "{}", b),
@@ -382,8 +384,9 @@ impl std::fmt::Display for BinOp {
             BinOp::LtEq => "<=",
             BinOp::Gt => ">",
             BinOp::GtEq => ">=",
-            BinOp::And => "and",
-            BinOp::Or => "or",
+            // Must match the parser's tokens so persisted DERIVE exprs replay.
+            BinOp::And => "&&",
+            BinOp::Or => "||",
         };
         write!(f, "{s}")
     }
@@ -393,7 +396,7 @@ impl std::fmt::Display for UnOp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             UnOp::Neg => write!(f, "-"),
-            UnOp::Not => write!(f, "not "),
+            UnOp::Not => write!(f, "!"),
         }
     }
 }
@@ -495,6 +498,44 @@ mod tests {
         let (rest, parsed) = parse(&line).expect("Display output must re-parse");
         assert!(rest.trim().is_empty(), "trailing input: {rest:?}");
         assert_eq!(parsed, stmt);
+    }
+
+    /// Regression: And/Or/Not and whole floats used to Display as `and`/`or`/
+    /// `not `/`1`, which the parser rejects — derived lenses using them were
+    /// silently dropped during schema-WAL replay.
+    #[test]
+    fn logical_and_float_exprs_display_roundtrip() {
+        let exprs = [
+            Expr::Binary {
+                op: BinOp::And,
+                lhs: Box::new(Expr::Ident("a".into())),
+                rhs: Box::new(Expr::Ident("b".into())),
+            },
+            Expr::Binary {
+                op: BinOp::Or,
+                lhs: Box::new(Expr::Ident("a".into())),
+                rhs: Box::new(Expr::Ident("b".into())),
+            },
+            Expr::Unary {
+                op: UnOp::Not,
+                expr: Box::new(Expr::Ident("a".into())),
+            },
+            Expr::Binary {
+                op: BinOp::Add,
+                lhs: Box::new(Expr::Ident("a".into())),
+                rhs: Box::new(Expr::Lit(Literal::Float(1.0))),
+            },
+        ];
+        for expr in exprs {
+            let stmt = Stmt::Derive {
+                name: "d".into(),
+                expr,
+            };
+            let line = stmt.to_string();
+            let (rest, parsed) = parse(&line).expect("Display output must re-parse");
+            assert!(rest.trim().is_empty(), "trailing input: {rest:?}");
+            assert_eq!(parsed, stmt, "round-trip failed for {line:?}");
+        }
     }
 
     #[test]

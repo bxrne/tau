@@ -74,22 +74,18 @@ impl std::fmt::Display for Perm {
         if self.is_empty() {
             return f.write_str("-");
         }
-        let mut s = String::with_capacity(5);
-        if self.contains(Self::C) {
-            s.push('C');
-        }
-        if self.contains(Self::R) {
-            s.push('R');
-        }
-        if self.contains(Self::U) {
-            s.push('U');
-        }
-        if self.contains(Self::D) {
-            s.push('D');
-        }
-        if self.contains(Self::A) {
-            s.push('A');
-        }
+        let bits = [
+            (Self::C, 'C'),
+            (Self::R, 'R'),
+            (Self::U, 'U'),
+            (Self::D, 'D'),
+            (Self::A, 'A'),
+        ];
+        let s: String = bits
+            .iter()
+            .filter(|(bit, _)| self.contains(*bit))
+            .map(|(_, c)| c)
+            .collect();
         f.write_str(&s)
     }
 }
@@ -106,6 +102,14 @@ fn argon2() -> Argon2<'static> {
     }
 }
 
+fn hash_password(password: &str) -> String {
+    let salt = SaltString::generate(&mut OsRng);
+    argon2()
+        .hash_password(password.as_bytes(), &salt)
+        .expect("argon2 hashing failed")
+        .to_string()
+}
+
 /// A single authenticated principal.
 #[derive(Debug, Clone)]
 pub struct User {
@@ -120,14 +124,9 @@ impl User {
     /// Create a fresh user with the given password (hashed with argon2id) and
     /// initial grants.
     pub fn new(name: &str, password: &str, grants: HashMap<String, Perm>) -> Self {
-        let salt = SaltString::generate(&mut OsRng);
-        let phc_hash = argon2()
-            .hash_password(password.as_bytes(), &salt)
-            .expect("argon2 hashing failed")
-            .to_string();
         Self {
             name: name.to_string(),
-            phc_hash,
+            phc_hash: hash_password(password),
             grants,
         }
     }
@@ -161,11 +160,7 @@ impl User {
 
     /// Replace the user's password with a freshly hashed one.
     pub fn set_password(&mut self, password: &str) {
-        let salt = SaltString::generate(&mut OsRng);
-        self.phc_hash = argon2()
-            .hash_password(password.as_bytes(), &salt)
-            .expect("argon2 hashing failed")
-            .to_string();
+        self.phc_hash = hash_password(password);
     }
 
     fn to_line(&self) -> String {

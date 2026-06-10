@@ -49,11 +49,6 @@ pub fn truncate_file(path: &Path, rng: &mut StdRng) -> Option<u64> {
     Some(len - keep)
 }
 
-/// Truncate a WAL file at a uniformly random byte offset in `[0, len)`.
-pub fn truncate_wal(path: &Path, rng: &mut StdRng) -> Option<u64> {
-    truncate_file(path, rng)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

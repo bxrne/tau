@@ -8,7 +8,7 @@ use crate::op::Op;
 use crate::oracle::{Oracle, Ts};
 use crate::target::{DirectExecutor, Target};
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn apply_oracle_only(op: &Op, model: &mut Oracle) {
     model.apply_op(op);
 }
@@ -50,15 +50,8 @@ pub fn apply_dual(
     sync_transactions(target, model);
 
     match op {
-        Op::Append { lens, data } => {
-            if exec_ok(target, &data.batch_sql(lens), step, &mut divs) {
-                apply_model_after_target(op, model);
-                debug!(step, lens, n = data.len(), "APPEND");
-            }
-        }
         Op::At { lens, t } => {
-            let Some(got) = exec_output(target, &format!("AT LENS {lens} {t}"), step, &mut divs)
-            else {
+            let Some(got) = exec_output(target, &op.to_sql(), step, &mut divs) else {
                 return divs;
             };
             let expected = model.at(lens, *t);
@@ -68,12 +61,7 @@ pub fn apply_dual(
             if start >= end {
                 return divs;
             }
-            let Some(got) = exec_output(
-                target,
-                &format!("RANGE LENS {lens} {start} {end}"),
-                step,
-                &mut divs,
-            ) else {
+            let Some(got) = exec_output(target, &op.to_sql(), step, &mut divs) else {
                 return divs;
             };
             let expected = model.range(lens, *start, *end);
@@ -91,12 +79,7 @@ pub fn apply_dual(
             end,
             func,
         } => {
-            let Some(got) = exec_output(
-                target,
-                &format!("REDUCE LENS {lens} {start} {end} USING {func}"),
-                step,
-                &mut divs,
-            ) else {
+            let Some(got) = exec_output(target, &op.to_sql(), step, &mut divs) else {
                 return divs;
             };
             let expected = model.reduce(lens, *start, *end, *func);
@@ -108,71 +91,20 @@ pub fn apply_dual(
                 &mut divs,
             );
         }
-        Op::CreateLens { name, ty } => {
-            if exec_ok(target, &format!("CREATE LENS {name} {ty}"), step, &mut divs) {
-                apply_model_after_target(op, model);
-                debug!(step, name, ty, "CREATE LENS");
-            }
-        }
-        Op::DropLens { name } => {
-            if exec_ok(target, &format!("DROP LENS {name}"), step, &mut divs) {
-                apply_model_after_target(op, model);
-                debug!(step, name, "DROP LENS");
-            }
-        }
-        Op::Derive { name, spec } => {
-            if exec_ok(
-                target,
-                &format!("DERIVE LENS {name} AS {} + {}", spec.a, spec.b),
-                step,
-                &mut divs,
-            ) {
-                apply_model_after_target(op, model);
-                debug!(step, name, a = spec.a, b = spec.b, "DERIVE");
-            }
-        }
-        Op::Ttl { lens, secs } => match secs {
-            Some(s) => {
-                if exec_ok(target, &format!("SET TTL LENS {lens} {s}"), step, &mut divs) {
-                    apply_model_after_target(op, model);
-                    debug!(step, lens, secs = s, "SET TTL");
-                }
-            }
-            None => {
-                if exec_ok(target, &format!("UNSET TTL LENS {lens}"), step, &mut divs) {
-                    apply_model_after_target(op, model);
-                    debug!(step, lens, "UNSET TTL");
-                }
-            }
-        },
-        Op::UseDb(db) => {
-            if exec_ok(target, &format!("USE DATABASE {db}"), step, &mut divs) {
-                apply_model_after_target(op, model);
-                debug!(step, db, "USE DATABASE");
-            }
-        }
-        Op::StartTransaction | Op::Commit | Op::Rollback => {
+        // Mutations: apply to the target first, then mirror into the model
+        // only on success so the two never drift on rejected statements.
+        _ => {
             if matches!(op, Op::StartTransaction) && target.is_in_transaction() {
                 target.rollback_open_transaction();
             }
-            if exec_ok(target, op.sql_line(), step, &mut divs) {
+            let sql = op.to_sql();
+            if exec_ok(target, &sql, step, &mut divs) {
                 apply_model_after_target(op, model);
-                debug!(step, sql = op.sql_line(), "TX");
+                debug!(step, sql, "OP");
             }
         }
     }
     divs
-}
-
-impl Op {
-    pub fn sql_line(&self) -> &'static str {
-        match self {
-            Op::StartTransaction => "START TRANSACTION",
-            Op::Commit => "COMMIT",
-            Op::Rollback => "ROLLBACK",
-            _ => panic!("not a bare SQL op"),
-        }
-    }
 }
 
 pub fn apply_dual_executor(

@@ -132,15 +132,18 @@ fn stmt_append(i: &str) -> IResult<&str, Stmt> {
     Ok((i, Stmt::Append { name, taus }))
 }
 
+/// `<word> "<path>"` suffix shared by COPY FROM / BACKUP TO / RESTORE FROM.
+fn path_suffix<'a>(i: &'a str, word: &'static str) -> IResult<&'a str, String> {
+    let (i, _) = (multispace1, tag_no_case(word), multispace1).parse(i)?;
+    string_lit(i)
+}
+
 /// `COPY LENS <name> FROM "<path>"` - bulk-ingest from a CSV file.
 fn stmt_copy(i: &str) -> IResult<&str, Stmt> {
     let (i, _) = kw("COPY").parse(i)?;
     let (i, _) = kw("LENS").parse(i)?;
     let (i, name) = ident(i)?;
-    let (i, _) = multispace1(i)?;
-    let (i, _) = tag_no_case("FROM")(i)?;
-    let (i, _) = multispace1(i)?;
-    let (i, path) = string_lit(i)?;
+    let (i, path) = path_suffix(i, "FROM")?;
     Ok((i, Stmt::Copy { name, path }))
 }
 
@@ -284,18 +287,20 @@ fn stmt_drop_user(i: &str) -> IResult<&str, Stmt> {
     Ok((i, Stmt::DropUser { name }))
 }
 
+/// Shared body of GRANT/REVOKE: `<perms> ON <db|*> <prep> <user>`.
+fn perm_clause<'a>(i: &'a str, prep: &'static str) -> IResult<&'a str, (Perm, String, String)> {
+    let (i, perms) = perm_letters(i)?;
+    let (i, _) = (multispace1, tag_no_case("ON"), multispace1).parse(i)?;
+    let (i, database) = db_target(i)?;
+    let (i, _) = (multispace1, tag_no_case(prep), multispace1).parse(i)?;
+    let (i, user) = ident(i)?;
+    Ok((i, (perms, database, user)))
+}
+
 /// `GRANT <perms> ON <db|*> TO <user>`.
 fn stmt_grant(i: &str) -> IResult<&str, Stmt> {
     let (i, _) = kw("GRANT").parse(i)?;
-    let (i, perms) = perm_letters(i)?;
-    let (i, _) = multispace1(i)?;
-    let (i, _) = tag_no_case("ON")(i)?;
-    let (i, _) = multispace1(i)?;
-    let (i, database) = db_target(i)?;
-    let (i, _) = multispace1(i)?;
-    let (i, _) = tag_no_case("TO")(i)?;
-    let (i, _) = multispace1(i)?;
-    let (i, user) = ident(i)?;
+    let (i, (perms, database, user)) = perm_clause(i, "TO")?;
     Ok((
         i,
         Stmt::Grant {
@@ -309,15 +314,7 @@ fn stmt_grant(i: &str) -> IResult<&str, Stmt> {
 /// `REVOKE <perms> ON <db|*> FROM <user>`.
 fn stmt_revoke(i: &str) -> IResult<&str, Stmt> {
     let (i, _) = kw("REVOKE").parse(i)?;
-    let (i, perms) = perm_letters(i)?;
-    let (i, _) = multispace1(i)?;
-    let (i, _) = tag_no_case("ON")(i)?;
-    let (i, _) = multispace1(i)?;
-    let (i, database) = db_target(i)?;
-    let (i, _) = multispace1(i)?;
-    let (i, _) = tag_no_case("FROM")(i)?;
-    let (i, _) = multispace1(i)?;
-    let (i, user) = ident(i)?;
+    let (i, (perms, database, user)) = perm_clause(i, "FROM")?;
     Ok((
         i,
         Stmt::Revoke {
@@ -723,10 +720,7 @@ fn stmt_backup(i: &str) -> IResult<&str, Stmt> {
     let (i, _) = kw("BACKUP").parse(i)?;
     let (i, _) = kw("DATABASE").parse(i)?;
     let (i, name) = ident(i)?;
-    let (i, _) = multispace1(i)?;
-    let (i, _) = tag_no_case("TO")(i)?;
-    let (i, _) = multispace1(i)?;
-    let (i, path) = string_lit(i)?;
+    let (i, path) = path_suffix(i, "TO")?;
     Ok((i, Stmt::BackupDatabase { name, path }))
 }
 
@@ -735,10 +729,7 @@ fn stmt_restore(i: &str) -> IResult<&str, Stmt> {
     let (i, _) = kw("RESTORE").parse(i)?;
     let (i, _) = kw("DATABASE").parse(i)?;
     let (i, name) = ident(i)?;
-    let (i, _) = multispace1(i)?;
-    let (i, _) = tag_no_case("FROM")(i)?;
-    let (i, _) = multispace1(i)?;
-    let (i, path) = string_lit(i)?;
+    let (i, path) = path_suffix(i, "FROM")?;
     Ok((i, Stmt::RestoreDatabase { name, path }))
 }
 
