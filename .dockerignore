@@ -1,0 +1,8 @@
+target/
+.git/
+.github/
+docs/
+demo/
+container/
+*.md
+.claude/
