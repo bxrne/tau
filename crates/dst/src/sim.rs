@@ -89,20 +89,28 @@ impl TauSimulation {
         *self.target.borrow_mut() = target;
     }
 
+    /// Remove every `.dat` and `.wal` file (plus WAL rotation archives) from
+    /// the disk directory. Each disk-backed database now persists across a
+    /// `.dat` + `.wal` pair, so both must be wiped together — leaving a stale
+    /// `.wal` behind would replay onto a freshly-created `.dat` and diverge
+    /// from the freshly-rebuilt oracle.
     fn wipe_disk_dir(&self) {
         if let Some(dir) = self.workspace.paths.disk_dir.as_deref()
             && let Ok(entries) = fs::read_dir(dir)
         {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().is_some_and(|e| e == "dat") {
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                let is_dat = path.extension().is_some_and(|e| e == "dat");
+                let is_wal_or_archive = name.contains(".wal");
+                if is_dat || is_wal_or_archive {
                     let _ = fs::remove_file(path);
                 }
             }
         }
     }
 
-    /// Wipe `.dat` files and dual-replay the log (disk-backed profiles).
+    /// Wipe `.dat`/`.wal` files and dual-replay the log (disk-backed profiles).
     fn replay_dual_log(&self, log: &[Op]) -> CheckpointAction {
         self.wipe_disk_dir();
         self.dual_replay(log, "disk")
@@ -432,9 +440,10 @@ mod profile_tests {
     }
 
     /// Faithful disk restart (no wipe, no op-log replay to target): after writes
-    /// that each flushed (per-append durability), re-opening the executor over the
-    /// existing .dat files must see the same data and schema that the oracle has.
-    /// This exercises the disk backend's append_schema + append paths + executor's
+    /// that each went through the per-database WAL (fsynced by default),
+    /// re-opening the executor over the existing .dat + .wal files must see the
+    /// same data and schema that the oracle has. This exercises the disk
+    /// backend's append_schema + append + WAL-replay paths + executor's
     /// CREATE DATABASE schema replay for a real process restart.
     #[test]
     fn pbt_disk_persists_data_and_schema_across_reopen() {

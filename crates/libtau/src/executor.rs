@@ -43,7 +43,7 @@ use crate::query::{
     would_cycle,
 };
 use crate::storage::{
-    Disk, InMemory, sweep_range,
+    Disk, InMemory, Store, sweep_range,
     wal::{Wal, WalEntry},
 };
 use crate::users::{Perm, User, UserStore};
@@ -143,6 +143,9 @@ pub enum StorageBackend {
         dir: std::path::PathBuf,
         compression_level: i32,
         enc_key: Option<[u8; 32]>,
+        /// Applied to each database's per-file WAL (`<dir>/<name>.wal`).
+        wal_fsync_each: bool,
+        wal_max_bytes: Option<u64>,
     },
 }
 
@@ -182,13 +185,22 @@ impl DbState {
         )))
     }
 
-    /// Open (or create) a disk-backed database, returning the fresh state plus
-    /// any schema DDL persisted in the file so the executor can replay it.
+    /// Open (or create) a disk-backed database paired with a per-database WAL,
+    /// returning the fresh state plus any schema DDL persisted so the executor
+    /// can replay it.
+    ///
+    /// The WAL (`<dir>/<name>.wal`, alongside the `.dat` file) is the
+    /// durability mechanism for every `append`: writes hit the WAL first and
+    /// the disk file's full compress+rewrite only happens on
+    /// compaction/checkpoint. On restart, any WAL entries written since the
+    /// last checkpoint are replayed on top of the loaded disk file.
     fn with_disk(
         path: impl AsRef<Path>,
         compact_threshold: usize,
         compression_level: i32,
         enc_key: Option<[u8; 32]>,
+        wal_fsync_each: bool,
+        wal_max_bytes: Option<u64>,
     ) -> io::Result<(Self, Vec<String>)> {
         let path = path.as_ref();
         let mut store = if path.exists() {
@@ -198,7 +210,25 @@ impl DbState {
         };
         store.set_compact_threshold(compact_threshold);
         store.set_compression_level(compression_level);
-        let db = Database::new(store);
+
+        let wal_path = path.with_extension("wal");
+        let mut wal = Wal::open(&wal_path, enc_key)?;
+        wal.replay(&mut store)?;
+
+        // Migrate schema DDL embedded in older disk files (pre-WAL format)
+        // into the WAL, which is now the source of truth for schema.
+        if wal.replay_schemas()?.is_empty() {
+            for stmt in store.schema_stmts() {
+                wal.append_schema(&stmt)?;
+            }
+        }
+
+        wal.set_fsync_each(wal_fsync_each);
+        if let Some(bytes) = wal_max_bytes {
+            wal.set_max_bytes(bytes);
+        }
+
+        let db = Database::with_wal(store, wal);
         let schema_stmts = db.schema_stmts()?;
         Ok((Self::from_db(db), schema_stmts))
     }
@@ -345,13 +375,17 @@ impl Executor {
     }
 
     /// Create a disk-backed executor. Each `CREATE DATABASE` allocates a
-    /// `<dir>/<name>.dat` compressed disk file. WAL config is ignored when
-    /// this backend is active.
+    /// `<dir>/<name>.dat` compressed disk file paired with a `<dir>/<name>.wal`
+    /// write-ahead log, which is the durability mechanism for every append.
+    /// `wal_fsync_each` and `wal_max_bytes` (from `[wal]` config) are applied
+    /// to each database's WAL.
     pub fn with_disk_backend(
         dir: impl AsRef<Path>,
         compact_threshold: usize,
         compression_level: i32,
         enc_key: Option<[u8; 32]>,
+        wal_fsync_each: bool,
+        wal_max_bytes: Option<u64>,
     ) -> io::Result<Self> {
         let dir = dir.as_ref().to_path_buf();
         fs::create_dir_all(&dir)?;
@@ -360,6 +394,8 @@ impl Executor {
             dir,
             compression_level,
             enc_key,
+            wal_fsync_each,
+            wal_max_bytes,
         };
         Ok(executor)
     }
@@ -810,9 +846,18 @@ impl Executor {
                 dir,
                 compression_level,
                 enc_key,
+                wal_fsync_each,
+                wal_max_bytes,
             } => {
                 let path = dir.join(format!("{name}.dat"));
-                DbState::with_disk(&path, self.compact_threshold, *compression_level, *enc_key)?
+                DbState::with_disk(
+                    &path,
+                    self.compact_threshold,
+                    *compression_level,
+                    *enc_key,
+                    *wal_fsync_each,
+                    *wal_max_bytes,
+                )?
             }
         };
         db_state.db.set_metrics(metrics);

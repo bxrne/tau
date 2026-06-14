@@ -60,4 +60,13 @@ where
     fn schema_stmts(&self) -> Vec<String> {
         Vec::new()
     }
+
+    /// Persist the full current state to the backend's own durable file, if
+    /// it has one.  Returns `Ok(true)` when a full rewrite happened, meaning
+    /// any WAL entries written before this call are now redundant and can be
+    /// dropped on checkpoint.  Backends with no separate file (in-memory,
+    /// WAL-only) return `Ok(false)` and leave the WAL as the source of truth.
+    fn checkpoint_flush(&self) -> io::Result<bool> {
+        Ok(false)
+    }
 }

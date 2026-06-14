@@ -83,13 +83,18 @@ idle_timeout_secs = 300     # omit to disable (default: no timeout)
 | `path` | (none) | Directory for the per-database `.dat` files — required when `backend = "disk"`. |
 | `compression_level` | `3` | zstd compression level applied when the disk store flushes. Range 1–22: 1 is fastest with least compression, 22 is best ratio but slowest. |
 
-With `backend = "disk"`, each `.dat` file persists both layer data and the
-schema DDL (`CREATE LENS`, `DERIVE LENS`, `SET TTL`, `DROP LENS`). Issuing
-`CREATE DATABASE <name>` re-opens an existing `<name>.dat` and replays its
-schema, so lenses and policies survive a restart without re-issuing DDL. The
-disk store rewrites its file atomically on every append and every schema
-change, so an acknowledged write is durable before the response returns; the
-`[wal]` settings are ignored when this backend is active.
+With `backend = "disk"`, each database gets a `<name>.dat` file plus a
+`<name>.wal` file in `[disk].path`. `APPEND` writes go to the WAL first
+(fsynced by default) and update the in-memory layer stack; the `.dat` file —
+which holds both layer data and schema DDL (`CREATE LENS`, `DERIVE LENS`,
+`SET TTL`, `DROP LENS`) — is rewritten atomically only on a checkpoint
+(compaction or `[wal].max_size_mb`). Issuing `CREATE DATABASE <name>` re-opens
+an existing `<name>.dat`, replays `<name>.wal` on top of it, and replays the
+schema, so lenses, policies, and any appends since the last checkpoint survive
+a restart without re-issuing DDL. `[wal].no_fsync_each` and
+`[wal].max_size_mb` apply to these per-database WAL files; `[wal].enabled` and
+`[wal].path` are not used by the disk backend — a WAL is always attached per
+database, colocated with its `.dat` file.
 
 ---
 
@@ -97,14 +102,18 @@ change, so an acknowledged write is durable before the response returns; the
 
 | field | default | description |
 |-------|---------|-------------|
-| `enabled` | `false` | Enable write-ahead logging for durability across restarts |
-| `path` | (none) | Path for the WAL file — required when `enabled = true` |
-| `no_fsync_each` | `false` | Skip per-record WAL flush+sync; a background thread flushes every 50 ms |
-| `max_size_mb` | (none) | Soft size cap in MiB. Once the WAL file reaches this size, the next write triggers a checkpoint rewrite to keep the file bounded. Omit to disable the cap. |
+| `enabled` | `false` | Enable write-ahead logging for durability across restarts. Only applies to the `memory` backend — `disk` always has a per-database WAL. |
+| `path` | (none) | Path for the WAL file — required when `enabled = true`. Only applies to the `memory` backend. |
+| `no_fsync_each` | `false` | Skip per-record WAL flush+sync; a background thread flushes every 50 ms. Applies to both backends. |
+| `max_size_mb` | (none) | Soft size cap in MiB. Once the WAL file reaches this size, the next write triggers a checkpoint rewrite to keep the file bounded. Omit to disable the cap. Applies to both backends. |
 
-When `enabled = true`, every write is fsynced to the WAL before being applied
-to the in-memory store. On startup, the WAL is replayed to reconstruct state.
-Without the WAL, data is in-memory only and lost on process exit.
+With the `memory` backend and `enabled = true`, every write is fsynced to the
+WAL before being applied to the in-memory store. On startup, the WAL is
+replayed to reconstruct state. Without the WAL, data is in-memory only and
+lost on process exit.
+
+With the `disk` backend, the WAL is always enabled per database regardless of
+`enabled`; `no_fsync_each` and `max_size_mb` still configure it.
 
 `no_fsync_each` trades durability for throughput. Use only on trusted
 workloads or when an external durability boundary (replication, backup) exists.

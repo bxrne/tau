@@ -102,7 +102,7 @@ body  zstd-compressed payload, AES-256-GCM-encrypted after compression when flag
     [ DiskEntry... ]           # layer_id, written_at_ms, lens name, taus — until EOF
 ```
 
-On open, the header is integrity-checked, the body decompressed (and decrypted when flagged), the schema section read, then layer entries replayed into the in-memory layer stack with their original `written_at` timestamps — so `AT … AS OF` keeps working across a restart. The file is rewritten atomically (`.tmp` + rename) on each flush — a flush fires on every append and every schema change, so an acknowledged write is durable before the call returns. Because schema DDL is part of the file, `CREATE DATABASE <name>` re-opens an existing `<name>.dat` and replays its schema, so lenses and TTL policies survive a restart.
+On open, the header is integrity-checked, the body decompressed (and decrypted when flagged), the schema section read, then layer entries replayed into the in-memory layer stack with their original `written_at` timestamps — so `AT … AS OF` keeps working across a restart. The file is rewritten atomically (`.tmp` + rename) only on a checkpoint (compaction, or `[wal] max_size_mb` rotation) — not on every append. Durability for individual appends comes from the per-database WAL described below.
 
 Encryption is AES-256-GCM with a random 12-byte nonce. The key is never stored; it must be supplied via `TAU_ENCRYPTION_KEY` at startup. The `FLAG_ENCRYPTED` bit prevents accidentally opening an encrypted file without a key.
 
@@ -119,9 +119,13 @@ S:<crc32> <CREATE LENS ...>                             # schema DDL
 SE:<base64>                                             # encrypted schema DDL
 ```
 
-Schema entries carry the raw TauQL text of the DDL that defines a lens (`CREATE LENS`, `DERIVE LENS`, `SET TTL`, `UNSET TTL`, `DROP LENS`). On replay, these are re-parsed and executed with `in_replay = true`, which suppresses re-appending them to the WAL. The disk backend persists the same DDL set in its own file (see above).
+Schema entries carry the raw TauQL text of the DDL that defines a lens (`CREATE LENS`, `DERIVE LENS`, `SET TTL`, `UNSET TTL`, `DROP LENS`). On replay, these are re-parsed and executed with `in_replay = true`, which suppresses re-appending them to the WAL.
 
-The WAL is checkpointed after compaction: a fresh snapshot of in-memory state is written to a new file and swapped in, bounding disk usage.
+The WAL is checkpointed after compaction (or when `[wal] max_size_mb` is reached): for the in-memory backend, a fresh snapshot of in-memory state is written to a new WAL file and swapped in, bounding disk usage. For the disk backend, the checkpoint instead rewrites the `.dat` file with the current live layers and truncates the WAL to just its schema lines — the `.dat` file and WAL together always hold exactly the live state, with the WAL covering everything appended since the last `.dat` rewrite.
+
+### Disk backend + WAL
+
+The `disk` backend pairs every `<name>.dat` file with a `<name>.wal` file in the same directory. `APPEND` writes go to the WAL first (fsynced by default) and only update the in-memory layer stack; the `.dat` file is rewritten in full only on checkpoint, as above. On startup, `<name>.dat` is loaded and then `<name>.wal` is replayed on top, recovering any appends made since the last checkpoint. Schema DDL persisted in an older `<name>.dat` (pre-WAL format) is migrated into `<name>.wal` the first time the database is opened under this scheme. The `[wal]` config's `no_fsync_each` and `max_size_mb` settings apply to these per-database WAL files.
 
 ### Compaction
 

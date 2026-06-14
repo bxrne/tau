@@ -1616,21 +1616,24 @@ fn show_status_wire_roundtrip() {
 
 /// Disk backend: schema DDL (CREATE/DERIVE) and layer data survive a restart.
 /// The "restart" drops the executor and opens a fresh one over the same dir.
-/// A single append (no compaction) must persist — the backend flushes on every
-/// write — so one tau is queryable afterwards with no re-issued DDL.
+/// A single append (no compaction, so the `.dat` file is never rewritten) must
+/// still persist — durability comes from the per-database WAL, which is
+/// replayed on top of `.dat` when reopened — so one tau is queryable
+/// afterwards with no re-issued DDL.
 #[test]
 fn disk_backend_persists_schema_and_data_across_restart() {
     let dir = tempfile::tempdir().unwrap();
     let threshold = crate::storage::COMPACT_THRESHOLD;
     {
-        let mut e = Executor::with_disk_backend(dir.path(), threshold, 3, None).unwrap();
+        let mut e =
+            Executor::with_disk_backend(dir.path(), threshold, 3, None, true, None).unwrap();
         run(&mut e, "CREATE DATABASE main").unwrap();
         run(&mut e, "CREATE LENS temp int").unwrap();
         run(&mut e, "DERIVE LENS hot AS temp > 20").unwrap();
         run(&mut e, "APPEND LENS temp 0 1000 42").unwrap();
     }
     // Fresh executor over the same directory; re-opening replays the schema.
-    let mut e = Executor::with_disk_backend(dir.path(), threshold, 3, None).unwrap();
+    let mut e = Executor::with_disk_backend(dir.path(), threshold, 3, None, true, None).unwrap();
     run(&mut e, "CREATE DATABASE main").unwrap();
 
     // Base + derived lenses are queryable with no re-issued DDL.
@@ -1655,12 +1658,13 @@ fn disk_backend_persists_written_at_for_as_of_across_restart() {
     let dir = tempfile::tempdir().unwrap();
     let threshold = crate::storage::COMPACT_THRESHOLD;
     {
-        let mut e = Executor::with_disk_backend(dir.path(), threshold, 3, None).unwrap();
+        let mut e =
+            Executor::with_disk_backend(dir.path(), threshold, 3, None, true, None).unwrap();
         run(&mut e, "CREATE DATABASE main").unwrap();
         run(&mut e, "CREATE LENS temp int").unwrap();
         run(&mut e, "APPEND LENS temp 0 1000 42").unwrap();
     }
-    let mut e = Executor::with_disk_backend(dir.path(), threshold, 3, None).unwrap();
+    let mut e = Executor::with_disk_backend(dir.path(), threshold, 3, None, true, None).unwrap();
     run(&mut e, "CREATE DATABASE main").unwrap();
 
     // Recover the persisted write timestamp via HISTORY; it must be the real
@@ -1693,14 +1697,15 @@ fn disk_backend_persists_ttl_across_restart() {
     let dir = tempfile::tempdir().unwrap();
     let threshold = crate::storage::COMPACT_THRESHOLD;
     {
-        let mut e = Executor::with_disk_backend(dir.path(), threshold, 3, None).unwrap();
+        let mut e =
+            Executor::with_disk_backend(dir.path(), threshold, 3, None, true, None).unwrap();
         run(&mut e, "CREATE DATABASE main").unwrap();
         run(&mut e, "CREATE LENS old int").unwrap();
         run(&mut e, "SET TTL LENS old 10").unwrap();
         // Data far in the past relative to the wall clock; persisted immediately.
         run(&mut e, "APPEND LENS old 0 1000 7").unwrap();
     }
-    let mut e = Executor::with_disk_backend(dir.path(), threshold, 3, None).unwrap();
+    let mut e = Executor::with_disk_backend(dir.path(), threshold, 3, None, true, None).unwrap();
     run(&mut e, "CREATE DATABASE main").unwrap();
     // With the TTL replayed, the ancient datum is hidden (would be Some(7) otherwise).
     assert_eq!(run(&mut e, "AT LENS old 500").unwrap(), Output::Value(None));
@@ -1712,12 +1717,13 @@ fn disk_backend_drop_lens_survives_restart() {
     let dir = tempfile::tempdir().unwrap();
     let threshold = crate::storage::COMPACT_THRESHOLD;
     {
-        let mut e = Executor::with_disk_backend(dir.path(), threshold, 3, None).unwrap();
+        let mut e =
+            Executor::with_disk_backend(dir.path(), threshold, 3, None, true, None).unwrap();
         run(&mut e, "CREATE DATABASE main").unwrap();
         run(&mut e, "CREATE LENS gone int").unwrap();
         run(&mut e, "DROP LENS gone").unwrap();
     }
-    let mut e = Executor::with_disk_backend(dir.path(), threshold, 3, None).unwrap();
+    let mut e = Executor::with_disk_backend(dir.path(), threshold, 3, None, true, None).unwrap();
     run(&mut e, "CREATE DATABASE main").unwrap();
     assert!(matches!(
         run(&mut e, "AT LENS gone 0"),

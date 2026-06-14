@@ -308,12 +308,12 @@ where
             None => return Ok(()),
         };
 
-        let entries: Vec<WalEntry<V>> = {
+        let (entries, flushed): (Vec<WalEntry<V>>, bool) = {
             let store = self
                 .store
                 .read()
                 .map_err(|_| io::Error::other("store lock poisoned"))?;
-            store
+            let entries = store
                 .lens_names()
                 .into_iter()
                 .filter_map(|name| {
@@ -322,14 +322,22 @@ where
                         .map(|layers| layers.iter().map(move |l| WalEntry::from_layer(&name, l)))
                 })
                 .flatten()
-                .collect()
+                .collect();
+            let flushed = store.checkpoint_flush()?;
+            (entries, flushed)
         }; // store read-lock released
 
         let mut wal_guard = wal
             .lock()
             .map_err(|_| io::Error::other("WAL mutex poisoned"))?;
         let schema_lines = wal_guard.raw_schema_lines()?;
-        wal_guard.rotate(&schema_lines, &entries)?;
+        if flushed {
+            // The store's own file now holds the full live state, so the WAL
+            // only needs to retain the schema lines going forward.
+            wal_guard.rotate::<V>(&schema_lines, &[])?;
+        } else {
+            wal_guard.rotate(&schema_lines, &entries)?;
+        }
         debug!("WAL checkpoint complete");
         Ok(())
     }

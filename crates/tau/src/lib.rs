@@ -43,20 +43,25 @@ pub fn build_executor(
                     "[disk] backend = \"disk\" requires a path (add path = \"...\" under [disk])",
                 )
             })?;
-            if config.wal.enabled {
-                warn!("disk backend is active; [wal] configuration is ignored");
+            if config.wal.enabled && config.wal.path.is_some() {
+                warn!(
+                    "disk backend is active; [wal].path is ignored - each database gets its own \
+                     <dir>/<name>.wal alongside its .dat file"
+                );
             }
             info!(
                 dir = %dir.display(),
                 compression_level = config.disk.compression_level,
                 compact_threshold = config.compact_threshold,
-                "starting with disk backend"
+                "starting with disk backend (each database durably WAL-backed)"
             );
             Executor::with_disk_backend(
                 dir,
                 config.compact_threshold,
                 config.disk.compression_level,
                 enc_key,
+                !config.wal.no_fsync_each,
+                config.wal.max_size_mb.map(|mb| mb * 1024 * 1024),
             )?
         }
         BackendChoice::Memory => {

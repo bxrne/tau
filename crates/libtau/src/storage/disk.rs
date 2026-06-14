@@ -357,10 +357,9 @@ impl<V: Clone + PartialEq + Codec + Send + Sync + 'static> Store<V> for Disk<V> 
             compact_layers(layers);
             did_compact = layers.len() < before + 1;
         }
-        // Persist on every append: the disk backend is the only durability
-        // mechanism when no WAL is attached, so an acknowledged write must hit
-        // disk before we return. (`flush` rewrites the whole file atomically.)
-        self.flush()?;
+        // Durability for the new layer comes from the WAL that `Database`
+        // pairs with every disk-backed store; the full-file rewrite here is
+        // reserved for `checkpoint_flush`, called on compaction/checkpoint.
         Ok(did_compact)
     }
 
@@ -384,6 +383,11 @@ impl<V: Clone + PartialEq + Codec + Send + Sync + 'static> Store<V> for Disk<V> 
 
     fn schema_stmts(&self) -> Vec<String> {
         self.schema.clone()
+    }
+
+    fn checkpoint_flush(&self) -> io::Result<bool> {
+        self.flush()?;
+        Ok(true)
     }
 }
 
@@ -571,6 +575,7 @@ mod tests {
                     Layer::new_at(1, vec![Tau::new(0, 10, 7)], 1_717_000_000_123),
                 )
                 .unwrap();
+            store.flush().unwrap();
         }
         let store: Disk<i64> = Disk::open(tmp.path(), None).unwrap();
         assert_eq!(store.layers("x").unwrap()[0].written_at, 1_717_000_000_123);

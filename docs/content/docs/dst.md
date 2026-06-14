@@ -86,14 +86,14 @@ Each profile in a run is driven with the same `--seed` (re-seeded per profile fo
 | Memory | Rebuild target + oracle, dual-replay op log |
 | WAL (odd) | Delete WAL + oracle replay; dual-replay op log |
 | WAL (even) | Truncate WAL at random offset; fresh target; reset op log |
-| Disk | Wipe target `.dat` files, dual-replay op log (tests replay equivalence). A separate `pbt_disk_persists_*_across_reopen` test exercises faithful restart over the real persisted files (no wipe) after per-append flushes. |
+| Disk | Wipe target `.dat`/`.wal` files, dual-replay op log (tests replay equivalence). A separate `pbt_disk_persists_*_across_reopen` test exercises faithful restart over the real persisted `.dat` + `.wal` files (no wipe) after WAL-backed appends. |
 | Wire | Memory-style replay (no WAL/disk files) |
 
 **Transactions** are enabled for memory/disk/wire profiles. WAL profiles use `WAL_EXCLUDED` tags in the behavior tree to skip transaction and multi-DB ops until single-DB WAL replay semantics are fully validated.
 
 For TTL, DST pins the wall clock via [`wall_clock::set_fixed_now_secs`](https://github.com/bxrne/tau/tree/master/crates/libtau/src/wall_clock.rs) (`1_700_000_000`).
 
-The `disk` backend (when selected) now flushes its `<db>.dat` atomically on *every* append and every schema DDL (`CREATE`/`DERIVE`/`SET TTL`/`DROP`). This makes acknowledged DML and lens definitions durable across clean restarts without a WAL; `CREATE DATABASE <name>` on a disk executor re-opens the `.dat` and replays its embedded schema section to restore base/derived lenses and TTL policies. The new `pbt_disk_persists_data_and_schema_across_reopen` test in `sim.rs` covers this path under the DST harness.
+The `disk` backend (when selected) pairs each `<db>.dat` with a `<db>.wal`: appends and schema DDL (`CREATE`/`DERIVE`/`SET TTL`/`DROP`) go to the WAL first (fsynced by default), and `<db>.dat` is rewritten atomically only on checkpoint (compaction or `[wal].max_size_mb`). This makes acknowledged DML and lens definitions durable across clean restarts; `CREATE DATABASE <name>` on a disk executor re-opens `<db>.dat`, replays `<db>.wal` on top, and replays the schema section to restore base/derived lenses and TTL policies. The `pbt_disk_persists_data_and_schema_across_reopen` test in `sim.rs` covers this path under the DST harness.
 
 ## Concurrent phase
 

@@ -158,9 +158,15 @@ fn bootstrap_wal(wal_path: &Path, threshold: usize, enc_key: Option<[u8; 32]>) -
 }
 
 fn bootstrap_disk(dir: &Path, threshold: usize, enc_key: Option<[u8; 32]>) -> Executor {
-    let mut ex =
-        Executor::with_disk_backend(dir, threshold, libtau::storage::DEFAULT_ZSTD_LEVEL, enc_key)
-            .expect("disk backend open");
+    let mut ex = Executor::with_disk_backend(
+        dir,
+        threshold,
+        libtau::storage::DEFAULT_ZSTD_LEVEL,
+        enc_key,
+        true,
+        None,
+    )
+    .expect("disk backend open");
     exec(&mut ex, "CREATE DATABASE default");
     for lens in INT {
         exec(&mut ex, &format!("CREATE LENS {lens} int"));
@@ -181,9 +187,15 @@ fn bootstrap_disk(dir: &Path, threshold: usize, enc_key: Option<[u8; 32]>) -> Ex
 /// disk-persistence DST coverage).
 #[cfg(test)]
 pub fn reopen_disk(dir: &Path, threshold: usize, enc_key: Option<[u8; 32]>) -> Executor {
-    let mut ex =
-        Executor::with_disk_backend(dir, threshold, libtau::storage::DEFAULT_ZSTD_LEVEL, enc_key)
-            .expect("disk backend reopen");
+    let mut ex = Executor::with_disk_backend(
+        dir,
+        threshold,
+        libtau::storage::DEFAULT_ZSTD_LEVEL,
+        enc_key,
+        true,
+        None,
+    )
+    .expect("disk backend reopen");
     exec(&mut ex, "CREATE DATABASE default");
     exec(&mut ex, "CREATE DATABASE aux");
     exec(&mut ex, "USE DATABASE default");
