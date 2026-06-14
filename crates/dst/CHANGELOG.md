@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.3](https://github.com/bxrne/tau/compare/dst-v0.1.2...dst-v0.1.3) (2026-06-14)
+
+
+### Bug Fixes
+
+* **libtau, dst, tau:** flush on compact, wal added to disk properly, fixed dst/pbt test, and docs ([ccdbb8b](https://github.com/bxrne/tau/commit/ccdbb8bd1d7fc95a92963c241362945ca9d9fe61))
+
 ## [0.1.2](https://github.com/bxrne/tau/compare/dst-v0.1.1...dst-v0.1.2) (2026-06-10)
 
 
