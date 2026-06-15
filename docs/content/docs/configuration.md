@@ -83,16 +83,17 @@ idle_timeout_secs = 300     # omit to disable (default: no timeout)
 | `path` | (none) | Directory for the per-database `.dat` files — required when `backend = "disk"`. |
 | `compression_level` | `3` | zstd compression level applied when the disk store flushes. Range 1–22: 1 is fastest with least compression, 22 is best ratio but slowest. |
 
-For the throughput impact of `compression_level` and `compact_threshold` (every append on the
-disk backend flushes and recompresses the file), see the storage grid results in
+For the throughput impact of `compression_level` and `compact_threshold` (a checkpoint on the
+disk backend flushes and recompresses the file; checkpoints fire at most every 8 compactions,
+or sooner if `[wal].max_size_mb` is reached), see the storage grid results in
 [Benchmarks](/docs/benchmarks/).
 
 With `backend = "disk"`, each database gets a `<name>.dat` file plus a
 `<name>.wal` file in `[disk].path`. `APPEND` writes go to the WAL first
 (fsynced by default) and update the in-memory layer stack; the `.dat` file —
 which holds both layer data and schema DDL (`CREATE LENS`, `DERIVE LENS`,
-`SET TTL`, `DROP LENS`) — is rewritten atomically only on a checkpoint
-(compaction or `[wal].max_size_mb`). Issuing `CREATE DATABASE <name>` re-opens
+`SET TTL`, `DROP LENS`) — is rewritten atomically only on a checkpoint (every
+8 compactions, or `[wal].max_size_mb`, whichever comes first). Issuing `CREATE DATABASE <name>` re-opens
 an existing `<name>.dat`, replays `<name>.wal` on top of it, and replays the
 schema, so lenses, policies, and any appends since the last checkpoint survive
 a restart without re-issuing DDL. `[wal].no_fsync_each` and

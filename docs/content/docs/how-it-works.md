@@ -102,7 +102,7 @@ body  zstd-compressed payload, AES-256-GCM-encrypted after compression when flag
     [ DiskEntry... ]           # layer_id, written_at_ms, lens name, taus — until EOF
 ```
 
-On open, the header is integrity-checked, the body decompressed (and decrypted when flagged), the schema section read, then layer entries replayed into the in-memory layer stack with their original `written_at` timestamps — so `AT … AS OF` keeps working across a restart. The file is rewritten atomically (`.tmp` + rename) only on a checkpoint (compaction, or `[wal] max_size_mb` rotation) — not on every append. Durability for individual appends comes from the per-database WAL described below.
+On open, the header is integrity-checked, the body decompressed (and decrypted when flagged), the schema section read, then layer entries replayed into the in-memory layer stack with their original `written_at` timestamps — so `AT … AS OF` keeps working across a restart. The file is rewritten atomically (`.tmp` + rename) only on a checkpoint — not on every append, and not on every compaction either: a checkpoint fires when `[wal] max_size_mb` is reached, or every `CHECKPOINT_COMPACTION_INTERVAL` (8) compactions, whichever comes first. Durability for individual appends comes from the per-database WAL described below.
 
 Encryption is AES-256-GCM with a random 12-byte nonce. The key is never stored; it must be supplied via `TAU_ENCRYPTION_KEY` at startup. The `FLAG_ENCRYPTED` bit prevents accidentally opening an encrypted file without a key.
 
@@ -121,7 +121,7 @@ SE:<base64>                                             # encrypted schema DDL
 
 Schema entries carry the raw TauQL text of the DDL that defines a lens (`CREATE LENS`, `DERIVE LENS`, `SET TTL`, `UNSET TTL`, `DROP LENS`). On replay, these are re-parsed and executed with `in_replay = true`, which suppresses re-appending them to the WAL.
 
-The WAL is checkpointed after compaction (or when `[wal] max_size_mb` is reached): for the in-memory backend, a fresh snapshot of in-memory state is written to a new WAL file and swapped in, bounding disk usage. For the disk backend, the checkpoint instead rewrites the `.dat` file with the current live layers and truncates the WAL to just its schema lines — the `.dat` file and WAL together always hold exactly the live state, with the WAL covering everything appended since the last `.dat` rewrite.
+The WAL is checkpointed when `[wal] max_size_mb` is reached, or every `CHECKPOINT_COMPACTION_INTERVAL` (8) compactions, whichever comes first: for the in-memory backend, a fresh snapshot of in-memory state is written to a new WAL file and swapped in, bounding disk usage. For the disk backend, the checkpoint instead rewrites the `.dat` file with the current live layers and truncates the WAL to just its schema lines — the `.dat` file and WAL together always hold exactly the live state, with the WAL covering everything appended since the last `.dat` rewrite. Compactions between checkpoints still shrink each lens to one layer in memory and in the WAL's logical replay (replaying an already-compacted layer plus its predecessors reproduces the same compacted result); they just don't each force a full `.dat` rewrite.
 
 ### Disk backend + WAL
 
@@ -140,7 +140,7 @@ Auto-compaction fires when a lens exceeds a threshold (default: 8 layers, config
 
 This is O(E log E) where E is the total number of taus. After compaction, the lens has exactly one layer.
 
-`Store::append` returns a `bool` indicating whether compaction fired. The `Database` layer uses this to decide whether to WAL-checkpoint.
+`Store::append` returns a `bool` indicating whether compaction fired. The `Database` layer counts these and triggers a WAL-checkpoint every `CHECKPOINT_COMPACTION_INTERVAL` (8) compactions (or sooner, if `[wal] max_size_mb` is reached first) rather than on every single one — see [Benchmarks](/docs/benchmarks/) for the throughput impact on the disk backend.
 
 ---
 

@@ -55,52 +55,58 @@ exact cell definitions.
 
 ## Methodology
 
-All numbers below:
+All numbers below come from the resource-capped Docker stack, not a bare `cargo run`, so
+they are comparable across machines:
 
-- commit `c437d88`
+- source: [`tau-v0.4.0`](https://github.com/bxrne/tau/tree/tau-v0.4.0) plus the
+  checkpoint-throttling fix to `Database::append` (`CHECKPOINT_COMPACTION_INTERVAL`),
+  landed after that tag
 - `--seed 42 --scale 2000`
 - engine layer (in-process `Executor`, no network)
-- single host, single run (not averaged across repeats)
+- Docker stack caps: `1.0` CPU, `512M` memory (the stack defaults - see
+  [Containers](/docs/containers/))
+- build host: 16-core `Intel(R) Core(TM) i9-9980HK @ 2.40GHz`, 32 GiB RAM (irrelevant to the
+  numbers themselves beyond "had enough headroom to not throttle the 1-CPU/512M container")
+- single run (not averaged across repeats)
 - produced with:
 
 ```bash
-cargo run --release -p bench --bin benchtau -- --preset security --scale 2000 --format json
-cargo run --release -p bench --bin benchtau -- --preset storage --scale 2000 --format json
+TAU_BENCH_PRESET=security TAU_BENCH_SCALE=2000 TAU_BENCH_SEED=42 \
+  docker compose -f container/docker-compose.bench.yml up --build --abort-on-container-exit
+TAU_BENCH_PRESET=storage TAU_BENCH_SCALE=2000 TAU_BENCH_SEED=42 \
+  docker compose -f container/docker-compose.bench.yml up --abort-on-container-exit
 ```
 
-These are limited-scale, single-host numbers meant to compare configurations and catch
-regressions over time. They are **not** competitive benchmarks against other databases, and
-they will vary across machines. Always quote the seed, scale, cell, and commit alongside any
-number you cite.
+Each run writes `/data/results.json` inside the `tau-bench` container (the `bench_results`
+volume); copy it out with `docker cp tau-bench:/data/results.json .`.
 
-For a reproducible, resource-capped run (fixed CPU/memory caps so numbers are comparable
-across machines), use the Docker stack:
-
-```bash
-docker compose -f container/docker-compose.bench.yml up
-```
-
-See [Containers](/docs/containers/) for the caps and environment variables.
+These are limited-scale numbers meant to compare configurations and catch regressions over
+time. They are **not** competitive benchmarks against other databases, and absolute
+throughput will still vary with the host's available CPU even under the cap. Always quote
+the seed, scale, cell, and source tag/commit alongside any number you cite.
 
 ## Results: security grid (engine layer)
 
 `append-heavy` and `point-query`, across the `security` preset cells. Full results for all
-seven workloads and all cells are in the JSON output above.
+seven workloads and all cells are in `results.json`.
 
 | Cell | append-heavy ops/s | append-heavy p99 (us) | point-query ops/s | point-query p99 (us) |
 |------|--------------------:|----------------------:|--------------------:|-----------------------:|
-| plain | 82,974 | 173.6 | 2,017,583 | 0.52 |
-| tls | 83,493 | 172.2 | 2,069,200 | 0.52 |
-| auth | 93,947 | 145.7 | 2,117,063 | 0.54 |
-| tls+auth | 99,489 | 147.2 | 2,150,276 | 0.53 |
-| wal+encryption | 97,669 | 148.1 | 2,190,238 | 0.49 |
-| disk+encryption | 31,093 | 393.9 | 2,116,543 | 0.52 |
-| disk+tls+auth+encryption | 30,768 | 403.7 | 1,978,735 | 0.57 |
+| plain | 35,964 | 369.85 | 1,452,668 | 0.734 |
+| tls | 37,703 | 377.19 | 1,442,957 | 0.754 |
+| auth | 38,161 | 371.15 | 1,434,110 | 0.759 |
+| tls+auth | 35,749 | 398.73 | 1,313,380 | 0.949 |
+| wal+encryption | 38,364 | 396.87 | 1,324,244 | 0.835 |
+| disk+encryption | 25,441 | 732.81 | 1,375,618 | 0.821 |
+| disk+tls+auth+encryption | 24,961 | 700.42 | 1,335,417 | 0.826 |
 
 Point queries are effectively free of TLS/auth/encryption overhead at the engine layer (all
-cells land around 2M ops/s, since TLS and auth apply to the wire layer, not the engine). The
-disk backend's cost is dominated by `Disk::flush()` running on every append (compress, encrypt
-if enabled, atomic rename) - encryption itself adds little on top of that.
+cells land around 1.3-1.5M ops/s, since TLS and auth apply to the wire layer, not the
+engine). The disk cells run at roughly 0.65-0.70x of the plain/memory cells for append-heavy.
+`Database::append` checkpoints (and therefore runs `Disk::flush`: compress + optionally
+encrypt + atomic rename of the whole file) at most every `CHECKPOINT_COMPACTION_INTERVAL`
+compactions, which bounds how often that cost is paid. Encryption itself adds little on top
+of the disk backend's remaining cost.
 
 ## Results: storage grid (engine layer)
 
@@ -108,22 +114,28 @@ if enabled, atomic rename) - encryption itself adds little on top of that.
 
 | Cell | append-heavy ops/s | compaction-stress ops/s |
 |------|--------------------:|--------------------------:|
-| memory | 85,613 | 1,144,923 |
-| memory, wal fsync-each | 88,524 | 1,149,992 |
-| memory, wal grouped | 93,276 | 1,113,569 |
-| disk, zstd level 1 | 34,259 | 159,799 |
-| disk, zstd level 19 | 268 | 321 |
-| compaction threshold 4 | 48,967 | 924,074 |
-| compaction threshold 64 | 499,578 | 1,252,950 |
+| memory | 36,781 | 647,331 |
+| memory, wal fsync-each | 40,629 | 739,414 |
+| memory, wal grouped | 40,175 | 781,521 |
+| disk, zstd level 1 | 30,489 | 247,403 |
+| disk, zstd level 19 | 4,381 | 9,802 |
+| compaction threshold 4 | 20,900 | 582,596 |
+| compaction threshold 64 | 257,382 | 707,397 |
 
 Two things stand out:
 
-- **zstd level 19 on the disk backend is roughly 130x slower than level 1** for
-  append-heavy and compaction-stress, because every append calls `Disk::flush()`, which
-  recompresses the entire file at the configured level. Level 19 is not a realistic default
-  for write-heavy workloads; `DEFAULT_ZSTD_LEVEL` (3) is much closer to level 1's numbers than
-  level 19's.
-- **A higher compaction threshold (64) gives roughly 10x the append throughput of a low one
+- **The disk backend at zstd level 1 is close to memory** (30,489 vs 36,781 ops/s
+  append-heavy, 247,403 vs 647,331 ops/s compaction-stress). `Disk::flush()` (which
+  recompresses the whole file) runs at most every `CHECKPOINT_COMPACTION_INTERVAL`
+  compactions, so its cost is amortised across many appends.
+- **zstd level 1 and level 19 are the two ends of the compression range the storage grid
+  exercises** - level 1 is the fastest setting, level 19 is close to zstd's maximum, and the
+  real default (`DEFAULT_ZSTD_LEVEL`, 3) sits much closer to level 1 in practice. zstd level
+  19 is roughly 7-25x slower than level 1 for append-heavy and compaction-stress, because each
+  `Disk::flush()` that fires recompresses the entire file at that level. Level 19 is not a
+  sane default for write-heavy workloads; it is included to show the cost of choosing a
+  high compression level, not as a recommendation.
+- **A higher compaction threshold (64) gives roughly 12x the append throughput of a low one
   (4)** on the memory backend, since compaction runs less often. The trade-off is more layers
   to scan per query between compactions.
 
@@ -135,7 +147,8 @@ Any number quoted in tau's docs, README, demo slides, or blog posts must state:
 2. the config cell,
 3. whether it is the engine or wire layer,
 4. resource caps, if run via the capped Docker stack, and
-5. the commit.
+5. a tag (e.g. [`tau-v0.4.0`](https://github.com/bxrne/tau/tree/tau-v0.4.0)), linked, plus any
+   changes on top of it.
 
 If you cannot reproduce a number from its stated parameters, treat it as stale and re-run
 `benchtau`.

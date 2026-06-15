@@ -3,10 +3,22 @@ use crate::model::{Layer, LayerId, Timestamp};
 use crate::storage::{Store, Wal, WalEntry, wal::Codec};
 use std::io;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 use tracing::{debug, info, instrument, warn};
+
+/// Number of in-memory compactions to absorb between checkpoints.
+///
+/// Compaction collapses a lens's layers down to one, so for a steady stream
+/// of appends it fires roughly every `compact_threshold` appends - far more
+/// often than the WAL actually needs rotating. Checkpointing on every
+/// compaction means `Store::checkpoint_flush` (a full compress + optionally
+/// encrypt + atomic rename for `Disk`) runs at that same high frequency,
+/// which dominates write cost for the disk backend. Only checkpointing every
+/// `CHECKPOINT_COMPACTION_INTERVAL`th compaction amortises that cost while
+/// still bounding WAL growth.
+const CHECKPOINT_COMPACTION_INTERVAL: usize = 8;
 
 /// Registry + orchestration layer.
 ///
@@ -39,6 +51,10 @@ where
     /// paths where many compactions fire and a single trailing checkpoint
     /// suffices.
     auto_checkpoint: AtomicBool,
+    /// Compactions since the last checkpoint. Reset to 0 whenever a
+    /// checkpoint runs; once it reaches [`CHECKPOINT_COMPACTION_INTERVAL`]
+    /// a compaction-triggered checkpoint fires.
+    compactions_since_checkpoint: AtomicUsize,
     /// Optional shared metrics sink.  Populated when the database is created
     /// through an executor that has metrics enabled (always true for the server).
     pub(crate) metrics: Option<Arc<Metrics>>,
@@ -54,6 +70,9 @@ where
             wal: self.wal.clone(),
             write_lock: self.write_lock.clone(),
             auto_checkpoint: AtomicBool::new(self.auto_checkpoint.load(Ordering::Relaxed)),
+            compactions_since_checkpoint: AtomicUsize::new(
+                self.compactions_since_checkpoint.load(Ordering::Relaxed),
+            ),
             metrics: self.metrics.clone(),
         }
     }
@@ -71,6 +90,7 @@ where
             wal: None,
             write_lock: Arc::new(Mutex::new(())),
             auto_checkpoint: AtomicBool::new(true),
+            compactions_since_checkpoint: AtomicUsize::new(0),
             metrics: None,
         }
     }
@@ -88,6 +108,7 @@ where
             wal: Some(Arc::new(Mutex::new(wal))),
             write_lock: Arc::new(Mutex::new(())),
             auto_checkpoint: AtomicBool::new(true),
+            compactions_since_checkpoint: AtomicUsize::new(0),
             metrics: None,
         }
     }
@@ -164,9 +185,12 @@ where
     /// before the in-memory store is updated.  Returns an error if the WAL
     /// write fails; the in-memory store is **not** updated in that case.
     ///
-    /// After the store update, if auto-compaction reduced the layer count, a
-    /// WAL checkpoint is triggered that rewrites the WAL to contain only the
-    /// live (post-compaction) layers, bounding WAL growth.
+    /// After the store update, a WAL checkpoint (rewriting the WAL to contain
+    /// only the live layers, and flushing `Disk`-backed stores) is triggered
+    /// when the WAL size cap is reached, or every
+    /// [`CHECKPOINT_COMPACTION_INTERVAL`] compactions - whichever comes
+    /// first. This bounds WAL growth without paying the full `Disk::flush`
+    /// cost on every compaction.
     pub fn append(&self, name: &str, layer: Layer<V>) -> io::Result<()>
     where
         V: Codec,
@@ -210,15 +234,20 @@ where
             store.append(name, layer)?
         }; // store write-lock released here
 
+        let mut checkpoint_due = wal_needs_rotation;
         if did_compact {
             if let Some(m) = &self.metrics {
                 m.record_compaction();
             }
-            if self.auto_checkpoint.load(Ordering::Relaxed) {
-                self.checkpoint_locked()?;
+            let prev = self
+                .compactions_since_checkpoint
+                .fetch_add(1, Ordering::Relaxed);
+            if prev + 1 >= CHECKPOINT_COMPACTION_INTERVAL {
+                checkpoint_due = true;
             }
-        } else if wal_needs_rotation && self.auto_checkpoint.load(Ordering::Relaxed) {
-            debug!("WAL size cap reached; triggering checkpoint");
+        }
+        if checkpoint_due && self.auto_checkpoint.load(Ordering::Relaxed) {
+            debug!("checkpoint due; rewriting WAL");
             self.checkpoint_locked()?;
         }
 
@@ -303,6 +332,9 @@ where
     where
         V: Codec,
     {
+        self.compactions_since_checkpoint
+            .store(0, Ordering::Relaxed);
+
         let wal = match &self.wal {
             Some(w) => w,
             None => return Ok(()),
@@ -510,7 +542,15 @@ mod tests {
         let store = InMemory::<i64>::new();
         let db = Database::open(store, &wal_path, None).unwrap();
 
-        for i in 0..=(COMPACT_THRESHOLD as i64) {
+        // The first compaction fires on the `(COMPACT_THRESHOLD + 1)`th
+        // append, and each subsequent one `COMPACT_THRESHOLD` appends later.
+        // A checkpoint only fires on the `CHECKPOINT_COMPACTION_INTERVAL`th
+        // compaction, so this is the exact append count where the last
+        // append both triggers a compaction and crosses that interval -
+        // leaving nothing appended after the checkpoint rotates the WAL.
+        let total_appends = COMPACT_THRESHOLD * CHECKPOINT_COMPACTION_INTERVAL + 1;
+        for i in 0..total_appends {
+            let i = i as i64;
             db.append("x", layer((i + 1) as u64, &[(i * 10, i * 10 + 10, i)]))
                 .unwrap();
         }
