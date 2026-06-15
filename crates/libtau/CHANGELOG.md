@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/bxrne/tau/compare/libtau-v0.4.0...libtau-v0.4.1) (2026-06-15)
+
+
+### Performance Improvements
+
+* **bench, libtau:** added compaction on cap and fixed flush invocation ([70746bf](https://github.com/bxrne/tau/commit/70746bf464cbcce3e5ae1a345751cf03884f904c))
+
 ## [0.4.0](https://github.com/bxrne/tau/compare/libtau-v0.3.4...libtau-v0.4.0) (2026-06-15)
 
 
