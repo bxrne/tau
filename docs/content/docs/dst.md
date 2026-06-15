@@ -120,3 +120,10 @@ cargo nextest run --release -p dst      # driver: oracle, apply, btree, sim prof
 All `#[hegel::test]` property-based tests across crates are named with a `pbt_` prefix (e.g. `pbt_...`) so they are easy to filter in logs and CI output.
 
 See [Testing](/docs/testing/) for the full strategy.
+
+## Relationship to `bench`
+
+The `bench` crate's config grid (`crates/bench/src/grid.rs`, see
+[Benchmarks](/docs/benchmarks/)) enumerates a similar storage x WAL x TLS x auth x encryption
+space to the profile matrix above, independently. A shared `ConfigMatrix` that both crates
+build their cells/profiles from has been discussed but is not yet implemented.

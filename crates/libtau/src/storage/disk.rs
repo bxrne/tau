@@ -123,20 +123,28 @@ fn read_i64(reader: &mut impl Read) -> io::Result<i64> {
     Ok(i64::from_le_bytes(buf))
 }
 
-impl<V: Codec> DiskEntry<V> {
-    fn write<W: Write>(&self, writer: &mut W) -> io::Result<()> {
-        writer.write_all(&self.layer_id.to_le_bytes())?;
-        writer.write_all(&self.written_at.to_le_bytes())?;
-        write_str(writer, &self.lens)?;
-        writer.write_all(&(self.taus.len() as u32).to_le_bytes())?;
-        for tau in &self.taus {
-            writer.write_all(&tau.start.to_le_bytes())?;
-            writer.write_all(&tau.end.to_le_bytes())?;
-            tau.value.write_encoded(writer)?;
-        }
-        Ok(())
+/// Write a layer entry without cloning its taus (used by [`Disk::flush`], which
+/// otherwise has nothing to do with an owned [`DiskEntry`]).
+fn write_entry<V: Codec, W: Write>(
+    writer: &mut W,
+    layer_id: LayerId,
+    written_at: i64,
+    lens: &str,
+    taus: &[Tau<V>],
+) -> io::Result<()> {
+    writer.write_all(&layer_id.to_le_bytes())?;
+    writer.write_all(&written_at.to_le_bytes())?;
+    write_str(writer, lens)?;
+    writer.write_all(&(taus.len() as u32).to_le_bytes())?;
+    for tau in taus {
+        writer.write_all(&tau.start.to_le_bytes())?;
+        writer.write_all(&tau.end.to_le_bytes())?;
+        tau.value.write_encoded(writer)?;
     }
+    Ok(())
+}
 
+impl<V: Codec> DiskEntry<V> {
     fn read(reader: &mut impl Read) -> io::Result<Self> {
         let layer_id = read_i64(reader)? as u64;
         let written_at = read_i64(reader)?;
@@ -300,17 +308,13 @@ impl<V: Clone + Codec> Disk<V> {
         write_schema(&mut entries, &self.schema)?;
         for (lens_name, layers) in &self.lenses {
             for layer in layers {
-                let entry = DiskEntry {
-                    layer_id: layer.id,
-                    written_at: layer.written_at,
-                    lens: lens_name.clone(),
-                    taus: layer
-                        .taus
-                        .iter()
-                        .map(|t| Tau::new(t.start, t.end, t.value.clone()))
-                        .collect(),
-                };
-                entry.write(&mut entries)?;
+                write_entry(
+                    &mut entries,
+                    layer.id,
+                    layer.written_at,
+                    lens_name,
+                    &layer.taus,
+                )?;
             }
         }
 

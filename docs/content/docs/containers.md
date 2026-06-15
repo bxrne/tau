@@ -229,6 +229,19 @@ docker run --rm \
 
 ---
 
+## Benchmarks
+
+`container/docker-compose.bench.yml` runs the `bench` crate's `benchtau` binary in a
+resource-capped, read-only container and writes JSON results to a volume. It needs no
+separate `tau` service - it spawns its own ephemeral server in-process for the wire layer.
+
+```bash
+docker compose -f container/docker-compose.bench.yml up
+```
+
+See [Benchmarks](/docs/benchmarks/) for the workloads, config grid, and reproducibility
+contract, and `container/README.md` for the caps and environment variables.
+
 ## Production hardening checklist
 
 - [ ] Set strong `[auth] password` in `tau-config.toml` and `GRAFANA_PASSWORD` in `.env`

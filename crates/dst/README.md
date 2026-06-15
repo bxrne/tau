@@ -77,4 +77,12 @@ After sequential profiles, `--concurrency N` spawns N reader threads checking RA
 cargo nextest run --release -p dst
 ```
 
+## Relationship to `bench`
+
+The `bench` crate's `ConfigCell`/grid (`crates/bench/src/grid.rs`) covers similar ground to the
+profile matrix in `src/profile/spec.rs`: both enumerate storage × WAL × TLS × auth ×
+encryption combinations, independently. A shared `ConfigMatrix` type that both crates build
+their cells/profiles from has been discussed but is **not yet implemented** — this section is a
+forward pointer for whoever picks that refactor up, not a description of current behavior.
+
 Tests in `src/sim.rs` run every profile variant across multiple seeds. Tests in `src/apply.rs`, `src/btree.rs`, and `src/oracle.rs` include `#[hegel::test]` property-based invariants.

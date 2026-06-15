@@ -83,6 +83,10 @@ idle_timeout_secs = 300     # omit to disable (default: no timeout)
 | `path` | (none) | Directory for the per-database `.dat` files — required when `backend = "disk"`. |
 | `compression_level` | `3` | zstd compression level applied when the disk store flushes. Range 1–22: 1 is fastest with least compression, 22 is best ratio but slowest. |
 
+For the throughput impact of `compression_level` and `compact_threshold` (every append on the
+disk backend flushes and recompresses the file), see the storage grid results in
+[Benchmarks](/docs/benchmarks/).
+
 With `backend = "disk"`, each database gets a `<name>.dat` file plus a
 `<name>.wal` file in `[disk].path`. `APPEND` writes go to the WAL first
 (fsynced by default) and update the in-memory layer stack; the `.dat` file —

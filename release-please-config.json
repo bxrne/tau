@@ -25,6 +25,11 @@
       "release-type": "rust",
       "package-name": "tauctl",
       "changelog-path": "CHANGELOG.md"
+    },
+    "crates/bench": {
+      "release-type": "rust",
+      "package-name": "bench",
+      "changelog-path": "CHANGELOG.md"
     }
   }
 }

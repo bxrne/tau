@@ -96,6 +96,22 @@ cargo nextest run --release
 cargo run --release --bin dst -- --seed 42
 ```
 
+## Benchmarks
+
+The `bench` crate runs deterministic workloads against `libtau::Executor` directly (engine
+layer) and against a live `tau` server over the wire (wire layer), across a grid of storage,
+WAL, TLS, auth, and encryption configurations.
+
+```bash
+cargo bench -p bench                                          # Divan microbenchmarks
+cargo run --release -p bench --bin benchtau -- --preset quick # table of throughput/latency
+docker compose -f container/docker-compose.bench.yml up       # resource-capped run -> JSON
+```
+
+Numbers are limited-scale, single-host, and always quoted alongside their seed, scale, cell,
+and caps. They are not competitive benchmarks. See the [benchmarks
+docs](https://tau.bxrne.com/docs/benchmarks/) for methodology and results.
+
 ## License
 
 [Apache License 2.0](LICENSE)

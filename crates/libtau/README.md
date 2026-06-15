@@ -56,6 +56,12 @@ let result = exec.exec_read(&stmt).unwrap();
 - Append order: **WAL first, then store**. A WAL fsync failure leaves in-memory state unchanged.
 - `Database::layers()` returns `Option<Arc<Vec<Layer<V>>>>` — query phases share one snapshot without re-locking.
 
+## Benchmarking
+
+The `bench` crate drives `Executor` directly (no wire overhead) for its engine-layer
+workloads, using the same `Database`/`Store` constructors as the server. See
+`crates/bench/README.md`.
+
 ## Performance levers
 
 | Flag / setter | Effect |

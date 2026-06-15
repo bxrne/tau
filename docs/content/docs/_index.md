@@ -16,5 +16,6 @@ Complete reference for Tau. The data model, query language, storage internals, t
 - [Permissions](/docs/permissions/). The CRUDA bitmap, per-statement requirements, grants and wildcards.
 - [Configuration](/docs/configuration/). All server flags and environment variables.
 - [Containers](/docs/containers/). The Docker stack with Prometheus and Grafana, and the Helm chart for Kubernetes.
+- [Benchmarks](/docs/benchmarks/). Workloads, the config grid, and reproducible limited-scale results.
 
 **Long form.** Start with [Overview](/docs/overview/) for the data model, then [How it works](/docs/how-it-works/) for storage and concurrency internals.
