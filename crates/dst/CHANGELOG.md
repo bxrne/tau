@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/bxrne/tau/compare/dst-v0.1.3...dst-v0.2.0) (2026-06-15)
+
+
+### Features
+
+* **bench, libtau:** add deterministic benchmark crate, docs, and capped Docker stack ([bce1ce5](https://github.com/bxrne/tau/commit/bce1ce5f38569d9453d9d412444d928dbe730129))
+
 ## [0.1.3](https://github.com/bxrne/tau/compare/dst-v0.1.2...dst-v0.1.3) (2026-06-14)
 
 

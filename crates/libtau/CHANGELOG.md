@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/bxrne/tau/compare/libtau-v0.3.4...libtau-v0.4.0) (2026-06-15)
+
+
+### Features
+
+* **bench, libtau:** add deterministic benchmark crate, docs, and capped Docker stack ([bce1ce5](https://github.com/bxrne/tau/commit/bce1ce5f38569d9453d9d412444d928dbe730129))
+
 ## [0.3.4](https://github.com/bxrne/tau/compare/libtau-v0.3.3...libtau-v0.3.4) (2026-06-14)
 
 
