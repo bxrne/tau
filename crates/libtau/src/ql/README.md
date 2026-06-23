@@ -12,7 +12,7 @@ The grammar, AST, and parser for TauQL.
 
 ## Grammar summary
 
-Operator precedence (low to high): `||`, `&&`, comparison, `+ -`, `* /  %`, unary, primary. Keywords are case-insensitive. Identifiers are not.
+Operator precedence (low to high): `||`, `&&`, comparison, `+ -`, `* /  %`, unary, primary. Statement keywords are UPPERCASE-only; type names, aggregate functions and value literals (`true`/`false`/`null`) are lowercase-only. Identifiers are case-sensitive.
 
 Aggregation expressions (`avg(lens, rel_start, rel_end)` etc.) are first-class nodes available inside `DERIVE LENS` and `WHERE` clauses.
 

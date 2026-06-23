@@ -16,7 +16,7 @@ use std::sync::Arc;
 use nom::{
     IResult, Parser,
     branch::alt,
-    bytes::complete::{is_not, tag, tag_no_case, take_while1},
+    bytes::complete::{is_not, tag, take_while1},
     character::complete::{alpha1, alphanumeric1, char, digit1, multispace0, multispace1},
     combinator::{map, map_res, opt, recognize, value},
     multi::{many0, separated_list0},
@@ -90,7 +90,7 @@ fn stmt_create_user(i: &str) -> IResult<&str, Stmt> {
     let (i, _) = kw("USER").parse(i)?;
     let (i, name) = ident(i)?;
     let (i, _) = multispace1(i)?;
-    let (i, _) = tag_no_case("PASSWORD")(i)?;
+    let (i, _) = tag("PASSWORD")(i)?;
     let (i, _) = multispace1(i)?;
     let (i, password) = string_lit(i)?;
     Ok((i, Stmt::CreateUser { name, password }))
@@ -112,17 +112,17 @@ fn stmt_create_database(i: &str) -> IResult<&str, Stmt> {
 
 fn stmt_start_tx(i: &str) -> IResult<&str, Stmt> {
     let (i, _) = kw("START").parse(i)?;
-    let (i, _) = tag_no_case("TRANSACTION")(i)?;
+    let (i, _) = tag("TRANSACTION")(i)?;
     Ok((i, Stmt::StartTransaction))
 }
 
 fn stmt_commit(i: &str) -> IResult<&str, Stmt> {
-    let (i, _) = tag_no_case("COMMIT")(i)?;
+    let (i, _) = tag("COMMIT")(i)?;
     Ok((i, Stmt::Commit))
 }
 
 fn stmt_rollback(i: &str) -> IResult<&str, Stmt> {
-    let (i, _) = tag_no_case("ROLLBACK")(i)?;
+    let (i, _) = tag("ROLLBACK")(i)?;
     Ok((i, Stmt::Rollback))
 }
 
@@ -155,7 +155,7 @@ fn stmt_append(i: &str) -> IResult<&str, Stmt> {
 
 /// `<word> "<path>"` suffix shared by COPY FROM / BACKUP TO / RESTORE FROM.
 fn path_suffix<'a>(i: &'a str, word: &'static str) -> IResult<&'a str, String> {
-    let (i, _) = (multispace1, tag_no_case(word), multispace1).parse(i)?;
+    let (i, _) = (multispace1, tag(word), multispace1).parse(i)?;
     string_lit(i)
 }
 
@@ -173,24 +173,24 @@ fn stmt_copy(i: &str) -> IResult<&str, Stmt> {
 fn stmt_show(i: &str) -> IResult<&str, Stmt> {
     let (i, _) = kw("SHOW").parse(i)?;
     alt((
-        value(Stmt::ShowDatabases, tag_no_case("DATABASES")),
-        value(Stmt::ShowLenses, tag_no_case("LENSES")),
-        value(Stmt::ShowUsers, tag_no_case("USERS")),
-        value(Stmt::ShowStatus, tag_no_case("STATUS")),
+        value(Stmt::ShowDatabases, tag("DATABASES")),
+        value(Stmt::ShowLenses, tag("LENSES")),
+        value(Stmt::ShowUsers, tag("USERS")),
+        value(Stmt::ShowStatus, tag("STATUS")),
         stmt_show_grants,
     ))
     .parse(i)
 }
 
 fn stmt_show_grants(i: &str) -> IResult<&str, Stmt> {
-    let (i, _) = tag_no_case("GRANTS")(i)?;
+    let (i, _) = tag("GRANTS")(i)?;
     let (i, user) = opt(preceded(multispace1, ident)).parse(i)?;
     Ok((i, Stmt::ShowGrants { user }))
 }
 
 /// Optional `OVER <start> <end>` domain clause shared by DERIVE / XDERIVE.
 fn over_clause(i: &str) -> IResult<&str, (i64, i64)> {
-    let (i, _) = (multispace1, tag_no_case("OVER"), multispace1).parse(i)?;
+    let (i, _) = (multispace1, tag("OVER"), multispace1).parse(i)?;
     let (i, start) = integer(i)?;
     let (i, _) = multispace1(i)?;
     let (i, end) = integer(i)?;
@@ -202,7 +202,7 @@ fn stmt_derive(i: &str) -> IResult<&str, Stmt> {
     let (i, _) = kw("LENS").parse(i)?;
     let (i, name) = ident(i)?;
     let (i, _) = multispace1(i)?;
-    let (i, _) = tag_no_case("AS")(i)?;
+    let (i, _) = tag("AS")(i)?;
     let (i, _) = multispace1(i)?;
     let (i, e) = expr(i)?;
     let (i, range) = opt(over_clause).parse(i)?;
@@ -222,7 +222,7 @@ fn stmt_xderive(i: &str) -> IResult<&str, Stmt> {
     let (i, _) = kw("LENS").parse(i)?;
     let (i, name) = ident(i)?;
     let (i, _) = multispace1(i)?;
-    let (i, _) = tag_no_case("AS")(i)?;
+    let (i, _) = tag("AS")(i)?;
     let (i, _) = multispace1(i)?;
     let (i, e) = expr(i)?;
     let (i, range) = opt(over_clause).parse(i)?;
@@ -245,13 +245,7 @@ fn stmt_at(i: &str) -> IResult<&str, Stmt> {
 
     // Try "AS OF <timestamp>".
     let (i, as_of) = opt(preceded(
-        (
-            multispace1,
-            tag_no_case("AS"),
-            multispace1,
-            tag_no_case("OF"),
-            multispace1,
-        ),
+        (multispace1, tag("AS"), multispace1, tag("OF"), multispace1),
         integer,
     ))
     .parse(i)?;
@@ -261,7 +255,7 @@ fn stmt_at(i: &str) -> IResult<&str, Stmt> {
 
     // Try "LAYER <id>".
     let (i, layer_id) = opt(preceded(
-        (multispace1, tag_no_case("LAYER"), multispace1),
+        (multispace1, tag("LAYER"), multispace1),
         unsigned_integer,
     ))
     .parse(i)?;
@@ -287,24 +281,14 @@ fn stmt_range(i: &str) -> IResult<&str, Stmt> {
     let (i, start) = integer(i)?;
     let (i, _) = multispace1(i)?;
     let (i, end) = integer(i)?;
-    let (i, filter) = opt(preceded(
-        (multispace1, tag_no_case("WHERE"), multispace1),
-        expr,
-    ))
-    .parse(i)?;
+    let (i, filter) = opt(preceded((multispace1, tag("WHERE"), multispace1), expr)).parse(i)?;
     let (i, limit) = opt(map(
-        preceded(
-            (multispace1, tag_no_case("LIMIT"), multispace1),
-            unsigned_integer,
-        ),
+        preceded((multispace1, tag("LIMIT"), multispace1), unsigned_integer),
         |n| n as usize,
     ))
     .parse(i)?;
     let (i, offset) = opt(map(
-        preceded(
-            (multispace1, tag_no_case("OFFSET"), multispace1),
-            unsigned_integer,
-        ),
+        preceded((multispace1, tag("OFFSET"), multispace1), unsigned_integer),
         |n| n as usize,
     ))
     .parse(i)?;
@@ -348,9 +332,9 @@ fn stmt_drop_user(i: &str) -> IResult<&str, Stmt> {
 /// Shared body of GRANT/REVOKE: `<perms> ON <db|*> <prep> <user>`.
 fn perm_clause<'a>(i: &'a str, prep: &'static str) -> IResult<&'a str, (Perm, String, String)> {
     let (i, perms) = perm_letters(i)?;
-    let (i, _) = (multispace1, tag_no_case("ON"), multispace1).parse(i)?;
+    let (i, _) = (multispace1, tag("ON"), multispace1).parse(i)?;
     let (i, database) = db_target(i)?;
-    let (i, _) = (multispace1, tag_no_case(prep), multispace1).parse(i)?;
+    let (i, _) = (multispace1, tag(prep), multispace1).parse(i)?;
     let (i, user) = ident(i)?;
     Ok((i, (perms, database, user)))
 }
@@ -411,7 +395,7 @@ fn stmt_reduce(i: &str) -> IResult<&str, Stmt> {
     let (i, _) = multispace1(i)?;
     let (i, end) = integer(i)?;
     let (i, _) = multispace1(i)?;
-    let (i, _) = tag_no_case("USING")(i)?;
+    let (i, _) = tag("USING")(i)?;
     let (i, _) = multispace1(i)?;
     let (i, func) = agg_func(i)?;
     Ok((
@@ -455,11 +439,11 @@ fn stmt_use(i: &str) -> IResult<&str, Stmt> {
 
 fn agg_func(i: &str) -> IResult<&str, AggFunc> {
     alt((
-        value(AggFunc::Min, tag_no_case("min")),
-        value(AggFunc::Max, tag_no_case("max")),
-        value(AggFunc::Avg, tag_no_case("avg")),
-        value(AggFunc::Sum, tag_no_case("sum")),
-        value(AggFunc::Count, tag_no_case("count")),
+        value(AggFunc::Min, tag("min")),
+        value(AggFunc::Max, tag("max")),
+        value(AggFunc::Avg, tag("avg")),
+        value(AggFunc::Sum, tag("sum")),
+        value(AggFunc::Count, tag("count")),
     ))
     .parse(i)
 }
@@ -637,11 +621,13 @@ fn fold_left_ops(init: Expr, rest: Vec<(BinOp, Expr)>) -> Expr {
     })
 }
 
-/// A case-insensitive keyword followed by mandatory whitespace.
+/// A TauQL keyword followed by mandatory whitespace.  Matching is
+/// case-*sensitive*: TauQL statement keywords are UPPERCASE so they are visually
+/// distinct from `tauctl`'s lowercase meta-commands (`connect`, `use`, `load`).
 fn kw<'a>(
     word: &'static str,
 ) -> impl Parser<&'a str, Output = (), Error = nom::error::Error<&'a str>> {
-    map((tag_no_case(word), multispace1), |_| ())
+    map((tag(word), multispace1), |_| ())
 }
 
 /// An identifier: starts with a letter or underscore, followed by letters, digits, or underscores.
@@ -657,11 +643,11 @@ fn ident(i: &str) -> IResult<&str, String> {
 /// A type name: `int`, `float`, `str`, `bool`, or `bytes`.
 fn type_name(i: &str) -> IResult<&str, Type> {
     alt((
-        value(Type::Int, tag_no_case("int")),
-        value(Type::Float, tag_no_case("float")),
-        value(Type::Str, tag_no_case("str")),
-        value(Type::Bool, tag_no_case("bool")),
-        value(Type::Bytes, tag_no_case("bytes")),
+        value(Type::Int, tag("int")),
+        value(Type::Float, tag("float")),
+        value(Type::Str, tag("str")),
+        value(Type::Bool, tag("bool")),
+        value(Type::Bytes, tag("bytes")),
     ))
     .parse(i)
 }
@@ -702,13 +688,9 @@ fn string_lit(i: &str) -> IResult<&str, String> {
     .parse(i)
 }
 
-/// A boolean literal: `true` or `false`, case-insensitive.
+/// A boolean literal: lowercase `true` or `false`.
 fn bool_lit(i: &str) -> IResult<&str, bool> {
-    alt((
-        value(true, tag_no_case("true")),
-        value(false, tag_no_case("false")),
-    ))
-    .parse(i)
+    alt((value(true, tag("true")), value(false, tag("false")))).parse(i)
 }
 
 /// Parse a single literal value from `s`, consuming all input.
@@ -726,7 +708,7 @@ pub fn parse_literal(s: &str) -> Option<Literal> {
 /// A literal value: `null`, a boolean, a string, a float, or an integer.
 fn literal(i: &str) -> IResult<&str, Literal> {
     alt((
-        value(Literal::Null, tag_no_case("null")),
+        value(Literal::Null, tag("null")),
         map(bool_lit, Literal::Bool),
         map(string_lit, |s| Literal::Str(Arc::from(s.as_str()))),
         map(float_lit, Literal::Float),
@@ -984,13 +966,24 @@ mod tests {
     }
 
     #[hegel::test]
-    fn pbt_keywords_are_case_insensitive(tc: TestCase) {
+    fn pbt_keywords_are_case_sensitive_uppercase(tc: TestCase) {
         let name = tc.draw(ident_gen());
+        // TauQL statement keywords are UPPERCASE-only so they never collide with
+        // tauctl's lowercase meta-commands.  The uppercase form parses; the
+        // all-lowercase form (keyword `create lens`) must be rejected.
         let upper = format!("CREATE LENS {name} int");
+        assert_eq!(
+            parsed(&upper),
+            Stmt::Create {
+                name: name.clone(),
+                ty: Type::Int,
+            }
+        );
         let lower = upper.to_lowercase();
-        // Identifier `name` is lowercase by construction, so swapping case on
-        // the keywords yields the same AST.
-        assert_eq!(parsed(&upper), parsed(&lower));
+        assert!(
+            parse(&lower).is_err(),
+            "lowercase keywords must be rejected: {lower:?}"
+        );
     }
 
     #[hegel::test]
@@ -1212,25 +1205,49 @@ mod tests {
     #[test]
     fn start_transaction_parses() {
         assert_eq!(parsed("START TRANSACTION"), Stmt::StartTransaction);
-        assert_eq!(parsed("start transaction"), Stmt::StartTransaction);
+        // Lowercase keywords are not TauQL (they are reserved for tauctl
+        // meta-commands), so they must not parse.
+        assert!(parse("start transaction").is_err());
     }
 
     #[test]
     fn commit_parses() {
         assert_eq!(parsed("COMMIT"), Stmt::Commit);
-        assert_eq!(parsed("commit"), Stmt::Commit);
+        assert!(parse("commit").is_err());
     }
 
     #[test]
     fn rollback_parses() {
         assert_eq!(parsed("ROLLBACK"), Stmt::Rollback);
-        assert_eq!(parsed("rollback"), Stmt::Rollback);
+        assert!(parse("rollback").is_err());
     }
 
     #[test]
     fn malformed_inputs_fail() {
         assert!(parse("CREATE test int").is_err()); // missing LENS
         assert!(parse("APPEND LENS test 0").is_err()); // truncated tau
+    }
+
+    #[test]
+    fn lowercase_vocabulary_is_locked_lowercase() {
+        // Type names, aggregate functions and value literals are the lowercase
+        // exceptions to the UPPERCASE-keyword rule; their uppercase forms are
+        // not valid TauQL.
+        assert!(parse("CREATE LENS x int").is_ok());
+        assert!(
+            parse("CREATE LENS x INT").is_err(),
+            "uppercase type rejected"
+        );
+        assert!(parse("REDUCE LENS x 0 10 USING avg").is_ok());
+        assert!(
+            parse("REDUCE LENS x 0 10 USING AVG").is_err(),
+            "uppercase agg func rejected"
+        );
+        assert!(parse("APPEND LENS f 0 10 true").is_ok());
+        assert!(
+            parse("APPEND LENS f 0 10 TRUE").is_err(),
+            "uppercase bool literal rejected"
+        );
     }
 
     #[test]

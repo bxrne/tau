@@ -4,7 +4,23 @@ date = 2026-05-28
 template = "page.html"
 +++
 
-TauQL is a line-oriented command language. **One statement in, one response line out.** Keywords are case-insensitive. Identifiers are case-sensitive.
+TauQL is a line-oriented command language. **One statement in, one response line out.**
+
+## Casing convention
+
+Case is significant, and it is what separates the *server* language (TauQL) from the *client* meta-commands you type into `tauctl`.
+
+- **TauQL statement keywords are UPPERCASE** — `CREATE`, `APPEND`, `AT`, `RANGE`, `REDUCE`, `USE`, `AS`, `OVER`, `WHERE`, … The lowercase form of a keyword is rejected, so `at lens x 5` is a parse error.
+- **Type names, aggregate functions, and value literals are lowercase** — `int`, `float`, `str`, `bool`, `bytes`; `min`, `max`, `avg`, `sum`, `count`; `true`, `false`, `null`. Their uppercase forms are *not* valid TauQL.
+- **Identifiers** (database, lens, and user names) are case-sensitive and used verbatim.
+- **`tauctl` meta-commands are lowercase** — `connect`, `disconnect`, `use`, `load`, `exit`, `quit`. These are interpreted by the client and never reach the server, so they are deliberately lowercase to stand apart from TauQL.
+
+The one name shared across both is `use`/`USE`, and the case tells them apart:
+
+| You type | Interpreted by | Effect |
+|----------|----------------|--------|
+| `use <conn>` | `tauctl` | switch the active **connection** |
+| `USE <db>` | server (TauQL) | switch the active **database** |
 
 ## Databases
 

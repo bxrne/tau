@@ -388,6 +388,63 @@ fn xderive_persists_and_auto_updates_across_wal_restart() {
     );
 }
 
+/// Core materialisation invariant: a materialised `XDERIVE` lens must return
+/// exactly what the equivalent lazy `DERIVE` lens computes, for arbitrary source
+/// data — both on first materialisation and after a correction that overwrites
+/// part of the source (which must auto-refresh the view).
+#[hegel::test]
+fn pbt_xderive_matches_lazy_derive(tc: TestCase) {
+    let n = tc.draw(gs::integers::<usize>().min_value(1).max_value(6));
+    let mut segs: Vec<(i64, i64, i64)> = Vec::new();
+    let mut cursor: i64 = 0;
+    for _ in 0..n {
+        let gap = tc.draw(gs::integers::<i64>().min_value(0).max_value(50));
+        let len = tc.draw(gs::integers::<i64>().min_value(1).max_value(500));
+        let val = tc.draw(gs::integers::<i64>().min_value(-10_000).max_value(10_000));
+        let s = cursor + gap;
+        let e = s + len;
+        segs.push((s, e, val));
+        cursor = e;
+    }
+    let k = tc.draw(gs::integers::<i64>().min_value(-5).max_value(5));
+
+    let mut e = setup();
+    run(&mut e, "CREATE LENS c int").unwrap();
+    for &(s, en, v) in &segs {
+        run(&mut e, &format!("APPEND LENS c {s} {en} {v}")).unwrap();
+    }
+    // Lazy lens (recomputed at query time) vs materialised lens (stored layers).
+    run(&mut e, &format!("DERIVE LENS lazy AS c + {k}")).unwrap();
+    run(&mut e, &format!("XDERIVE LENS mat AS c + {k}")).unwrap();
+
+    let lo = segs.first().unwrap().0;
+    let hi = segs.last().unwrap().1;
+    assert_eq!(
+        run(&mut e, &format!("RANGE LENS mat {lo} {hi}")).unwrap(),
+        run(&mut e, &format!("RANGE LENS lazy {lo} {hi}")).unwrap(),
+        "materialised RANGE diverged from lazy derive for segs {segs:?} k {k}"
+    );
+    for &(s, en, _) in &segs {
+        let mid = s + (en - s) / 2;
+        assert_eq!(
+            run(&mut e, &format!("AT LENS mat {mid}")).unwrap(),
+            run(&mut e, &format!("AT LENS lazy {mid}")).unwrap(),
+            "materialised AT diverged at {mid} for segs {segs:?} k {k}"
+        );
+    }
+
+    // Correct the first segment in place; both views must track the new value.
+    let (cs, ce, _) = segs[0];
+    let corrected = tc.draw(gs::integers::<i64>().min_value(-10_000).max_value(10_000));
+    run(&mut e, &format!("APPEND LENS c {cs} {ce} {corrected}")).unwrap();
+    let mid = cs + (ce - cs) / 2;
+    assert_eq!(
+        run(&mut e, &format!("AT LENS mat {mid}")).unwrap(),
+        run(&mut e, &format!("AT LENS lazy {mid}")).unwrap(),
+        "materialised view failed to auto-refresh after correction"
+    );
+}
+
 #[test]
 fn divide_by_zero_errors() {
     let mut e = setup();

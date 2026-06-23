@@ -49,7 +49,9 @@
 //! db-or-star   := <ident> | `*`
 //! ```
 //!
-//! Keywords are case-insensitive; identifiers and literals are not.
+//! Statement keywords are UPPERCASE-only (to stay distinct from tauctl's
+//! lowercase meta-commands); type names, aggregate functions and value literals
+//! are lowercase-only. Identifiers are case-sensitive.
 
 use std::sync::Arc;
 

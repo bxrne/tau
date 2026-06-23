@@ -439,6 +439,20 @@ mod tests {
     }
 
     #[test]
+    fn xderive_is_reachable_when_sources_exist() {
+        // With source lenses a and b present and no XD lens yet, the behavior
+        // tree must be able to emit an XDERIVE op — otherwise materialised
+        // lenses would silently never be exercised by the simulation.
+        let paths = crate::profile::ProfileWorkspace::new(MEMORY_MULTI).paths;
+        let o = MEMORY_MULTI.bootstrap_oracle(&paths);
+        let mut rng = StdRng::seed_from_u64(7);
+        let saw_xderive = (0..3000).any(
+            |_| matches!(pick(&mut rng, &o, false, false), Op::Xderive { name, .. } if name == XD),
+        );
+        assert!(saw_xderive, "behavior tree never generated an XDERIVE op");
+    }
+
+    #[test]
     fn derive_not_picked_inside_transaction() {
         let mut o = Oracle::new();
         o.create_lens("a");
@@ -450,7 +464,10 @@ mod tests {
             assert!(
                 !matches!(
                     op,
-                    Op::Derive { .. } | Op::CreateLens { .. } | Op::DropLens { .. }
+                    Op::Derive { .. }
+                        | Op::Xderive { .. }
+                        | Op::CreateLens { .. }
+                        | Op::DropLens { .. }
                 ),
                 "registry ops must not be picked in transaction: {op:?}"
             );
