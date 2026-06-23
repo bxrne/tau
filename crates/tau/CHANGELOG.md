@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/bxrne/tau/compare/tau-v0.4.0...tau-v0.5.0) (2026-06-23)
+
+
+### Features
+
+* **libtau, tau, dst:** Add materialised lenses via XDERIVE, with optional range for it and non materialised lenses ([e67006d](https://github.com/bxrne/tau/commit/e67006dffd7f50d200d285c88c061430ab573c4b))
+
 ## [0.4.0](https://github.com/bxrne/tau/compare/tau-v0.3.3...tau-v0.4.0) (2026-06-15)
 
 

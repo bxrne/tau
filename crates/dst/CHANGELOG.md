@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.3.0](https://github.com/bxrne/tau/compare/dst-v0.2.0...dst-v0.3.0) (2026-06-23)
+
+
+### Features
+
+* **dst, libdst, libtau:** add disk, network and wal faults, fixed caught issues and updated docs ([4b5b458](https://github.com/bxrne/tau/commit/4b5b458f623fe6c7fd6ed15e00b96a13277be836))
+* **libtau, tau, dst:** Add materialised lenses via XDERIVE, with optional range for it and non materialised lenses ([e67006d](https://github.com/bxrne/tau/commit/e67006dffd7f50d200d285c88c061430ab573c4b))
+
+
+### Bug Fixes
+
+* **dst, libtau:** Case division between client and server commands and tests for xderive ([d668c90](https://github.com/bxrne/tau/commit/d668c903a13d7066868c9f1eb1f1010fe25aa4a9))
+
 ## [0.2.0](https://github.com/bxrne/tau/compare/dst-v0.1.3...dst-v0.2.0) (2026-06-15)
 
 

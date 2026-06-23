@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/bxrne/tau/compare/libdst-v0.1.1...libdst-v0.2.0) (2026-06-23)
+
+
+### Features
+
+* **dst, libdst, libtau:** add disk, network and wal faults, fixed caught issues and updated docs ([4b5b458](https://github.com/bxrne/tau/commit/4b5b458f623fe6c7fd6ed15e00b96a13277be836))
+
 ## [0.1.1](https://github.com/bxrne/tau/compare/libdst-v0.1.0...libdst-v0.1.1) (2026-06-10)
 
 
