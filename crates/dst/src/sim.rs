@@ -1,14 +1,16 @@
 //! Tau [`libdst::DualSimulation`] over direct executor or wire target + isolated oracle.
 
 use libdst::divergence::Divergence;
-use libdst::faults::truncate_file;
+use libdst::faults::{corrupt_file, truncate_file};
 use libdst::report::RunResult;
 use libdst::sim::{CheckpointAction, DualSimulation};
 use libdst::{SequentialOpts, run_sequential};
-use libtau::{Executor, wall_clock};
+use libtau::{Executor, parse, wall_clock};
+use rand::Rng;
 use rand::rngs::StdRng;
 use std::cell::RefCell;
 use std::fs;
+use std::path::PathBuf;
 use tracing::{debug, error, warn};
 
 use crate::apply::{apply_dual, apply_dual_executor, sync_transactions};
@@ -22,7 +24,7 @@ use tau::harness::EphemeralServer;
 enum RunTarget {
     Direct(Executor),
     Wire {
-        _server: EphemeralServer,
+        server: EphemeralServer,
         client: WireClient,
     },
 }
@@ -42,10 +44,7 @@ impl TauSimulation {
         let model = profile.bootstrap_oracle(&workspace.paths);
         let target = if profile.is_wire() {
             let (_shared, server, client) = profile.spawn_wire_stack(&workspace.paths);
-            RunTarget::Wire {
-                _server: server,
-                client,
-            }
+            RunTarget::Wire { server, client }
         } else {
             RunTarget::Direct(profile.bootstrap_executor(&workspace.paths))
         };
@@ -75,10 +74,7 @@ impl TauSimulation {
 
     fn rebuild_wire_target(&self) -> RunTarget {
         let (_shared, server, client) = self.profile.spawn_wire_stack(&self.workspace.paths);
-        RunTarget::Wire {
-            _server: server,
-            client,
-        }
+        RunTarget::Wire { server, client }
     }
 
     fn rebuild_model(&self) -> Oracle {
@@ -140,13 +136,160 @@ impl TauSimulation {
         target_tx || model_tx
     }
 
-    fn wal_truncation_fault(&self, rng: &mut StdRng) {
+    /// Damage the WAL file in place — a short write (`corrupt = false`) or
+    /// bit-rot / torn write (`corrupt = true`) — then reopen the WAL-backed
+    /// executor. Replaying a damaged WAL must not panic: tau applies the valid
+    /// entry prefix and stops at the first bad CRC. The WAL is then removed and
+    /// the caller rebuilds from the authoritative op log.
+    fn wal_fault(&self, rng: &mut StdRng, corrupt: bool) {
         let wal_path = self.workspace.paths.wal_path.as_ref().expect("wal path");
-        let removed = truncate_file(wal_path, rng);
-        warn!(?removed, profile = %self.profile.name(), "WAL truncated");
-        let _ = self.rebuild_direct_target();
+        let damage = if corrupt {
+            corrupt_file(wal_path, rng)
+        } else {
+            truncate_file(wal_path, rng)
+        };
+        warn!(
+            ?damage,
+            kind = if corrupt { "corrupt" } else { "truncate" },
+            profile = %self.profile.name(),
+            "WAL fault injected",
+        );
+        // Reopening replays the damaged WAL — the assertion is that it returns
+        // (Ok or a clean Err) rather than panicking or hanging.
+        self.probe_wal_reopen();
         let _ = fs::remove_file(wal_path);
-        debug!(profile = %self.profile.name(), "WAL removed after truncation fault");
+        debug!(profile = %self.profile.name(), "WAL removed after fault");
+    }
+
+    /// Reopen the (possibly damaged) WAL-backed executor. tau replays the valid
+    /// entry prefix and either recovers or returns a clean error on the first
+    /// bad entry — it must never panic. The result is discarded; unlike
+    /// [`Self::rebuild_direct_target`] this tolerates the error path instead of
+    /// `expect`-ing a successful open.
+    fn probe_wal_reopen(&self) {
+        let Some(wal) = self.workspace.paths.wal_path.as_deref() else {
+            return;
+        };
+        match Executor::with_wal_threshold(
+            wal,
+            self.profile.compact_threshold(),
+            self.profile.enc_key(),
+        ) {
+            Ok(_) => debug!(profile = %self.profile.name(), "wal reopen after fault: recovered"),
+            Err(e) => {
+                debug!(profile = %self.profile.name(), error = %e, "wal reopen after fault: clean error")
+            }
+        }
+    }
+
+    /// After a WAL fault, rebuild a fresh target + oracle from scratch (the WAL
+    /// is gone) and clear the open-transaction flag.
+    fn reset_after_wal_fault(&self) {
+        *self.target.borrow_mut() = RunTarget::Direct(self.rebuild_direct_target());
+        *self.model.borrow_mut() = self.rebuild_model();
+        self.finish_replay_state(&mut self.target.borrow_mut());
+    }
+
+    /// Pick a random `<db>.dat` file from the disk directory, if any exist.
+    /// The listing is sorted before the seeded pick so selection is
+    /// deterministic for a given seed.
+    fn random_dat_file(&self, rng: &mut StdRng) -> Option<PathBuf> {
+        let dir = self.workspace.paths.disk_dir.as_deref()?;
+        let mut dats: Vec<PathBuf> = fs::read_dir(dir)
+            .ok()?
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == "dat"))
+            .collect();
+        if dats.is_empty() {
+            return None;
+        }
+        dats.sort();
+        let idx = rng.gen_range(0..dats.len());
+        Some(dats.swap_remove(idx))
+    }
+
+    /// Reopen the (possibly damaged) disk backend and force a schema replay of
+    /// each `.dat`. tau must recover or return a clean error — never panic. The
+    /// result is discarded; the value is the assertion that the call returns.
+    fn probe_disk_reopen(&self) {
+        let Some(dir) = self.workspace.paths.disk_dir.as_deref() else {
+            return;
+        };
+        match Executor::with_disk_backend(
+            dir,
+            self.profile.compact_threshold(),
+            libtau::storage::DEFAULT_ZSTD_LEVEL,
+            self.profile.enc_key(),
+            true,
+            None,
+        ) {
+            Ok(mut ex) => {
+                // `CREATE DATABASE` replays each `.dat`'s persisted schema,
+                // forcing a read of the corrupted bytes.
+                for db in ["default", "aux"] {
+                    if let Ok((_, stmt)) = parse(&format!("CREATE DATABASE {db}")) {
+                        let _ = ex.exec(&stmt);
+                    }
+                }
+                debug!(profile = %self.profile.name(), "disk reopen after fault: recovered");
+            }
+            Err(e) => {
+                debug!(profile = %self.profile.name(), error = %e, "disk reopen after fault: clean error");
+            }
+        }
+    }
+
+    /// Corrupt or truncate a random `.dat` file, then probe that tau survives the
+    /// reopen. The caller wipes and rebuilds from the authoritative op log
+    /// afterwards, so this only adds the "tau tolerates a bad `.dat`" assertion.
+    fn disk_media_fault(&self, rng: &mut StdRng, corrupt: bool) {
+        let Some(dat) = self.random_dat_file(rng) else {
+            return;
+        };
+        let damage = if corrupt {
+            corrupt_file(&dat, rng)
+        } else {
+            truncate_file(&dat, rng)
+        };
+        warn!(
+            ?damage,
+            file = %dat.display(),
+            kind = if corrupt { "corrupt" } else { "truncate" },
+            profile = %self.profile.name(),
+            "disk .dat fault injected",
+        );
+        self.probe_disk_reopen();
+    }
+
+    /// Network fault: drop the live wire connection and reconnect a fresh client
+    /// to the *same* running server. The server keeps its in-memory state (the
+    /// executor, including any open transaction, is shared and outlives the
+    /// connection), so the oracle and op log are untouched — this exercises the
+    /// server's abrupt-disconnect teardown and the client's reconnect + re-auth
+    /// path without losing data. Returns `Continue` with no divergences.
+    fn network_drop_reconnect(&self) -> CheckpointAction {
+        let mut target = self.target.borrow_mut();
+        if let RunTarget::Wire { server, client } = &mut *target {
+            let addr = format!("{}", server.addr);
+            let was_in_tx = client.is_in_transaction();
+            // Replacing `client` drops the old socket; the server observes the
+            // disconnect and reaps that connection. The new client dials the
+            // same address and re-authenticates lazily on its first command.
+            let mut fresh = WireClient::connect(&addr, self.profile.transport, self.profile.auth)
+                .expect("wire reconnect");
+            fresh.set_in_transaction(was_in_tx);
+            *client = fresh;
+            warn!(
+                %addr,
+                in_transaction = was_in_tx,
+                profile = %self.profile.name(),
+                "network connection dropped and reconnected",
+            );
+        }
+        CheckpointAction::Continue {
+            divergences: vec![],
+        }
     }
 
     fn memory_replay(&self, log: &[Op]) -> CheckpointAction {
@@ -246,27 +389,44 @@ impl DualSimulation for TauSimulation {
         );
 
         if self.profile.is_wire() {
+            // Alternate two network-layer faults: an abrupt connection drop the
+            // server must survive (state intact), and a full server crash that
+            // loses the in-memory executor and forces a rebuild + dual-replay.
+            if checkpoint.is_multiple_of(2) {
+                return self.network_drop_reconnect();
+            }
             return self.memory_replay(log);
         }
 
         if self.profile.uses_wal_file() {
+            // Even checkpoints damage the WAL (truncate or corrupt, chosen by the
+            // seeded RNG so both kinds fire across the matrix) then rebuild from
+            // the op log; odd checkpoints cleanly replay it. Picking the kind
+            // from the RNG rather than the checkpoint index means both variants
+            // are exercised even in short CI runs with only a couple checkpoints.
             if checkpoint.is_multiple_of(2) {
-                self.wal_truncation_fault(rng);
-                *self.target.borrow_mut() = RunTarget::Direct(self.rebuild_direct_target());
-                *self.model.borrow_mut() = self.rebuild_model();
-                self.finish_replay_state(&mut self.target.borrow_mut());
-                return CheckpointAction::ResetLog {
+                let corrupt = rng.gen_bool(0.5);
+                self.wal_fault(rng, corrupt);
+                self.reset_after_wal_fault();
+                CheckpointAction::ResetLog {
                     divergences: vec![],
-                };
+                }
+            } else {
+                self.wal_dual_replay(log)
             }
-            return self.wal_dual_replay(log);
+        } else if self.profile.uses_disk_dir() {
+            // Even checkpoints damage a random `.dat` (truncate or corrupt) and
+            // probe tau's reopen path; every checkpoint then wipes the directory
+            // and rebuilds from the authoritative op log, so the damage never
+            // perturbs the oracle comparison.
+            if checkpoint.is_multiple_of(2) {
+                let corrupt = rng.gen_bool(0.5);
+                self.disk_media_fault(rng, corrupt);
+            }
+            self.replay_dual_log(log)
+        } else {
+            self.memory_replay(log)
         }
-
-        if self.profile.uses_disk_dir() {
-            return self.replay_dual_log(log);
-        }
-
-        self.memory_replay(log)
     }
 }
 

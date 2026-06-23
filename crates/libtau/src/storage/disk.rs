@@ -30,6 +30,10 @@ const MAGIC: &[u8] = b"TAUZ";
 const VERSION: u8 = 1;
 const FLAG_ENCRYPTED: u8 = 0x01;
 const HEADER_LEN: usize = 4 + 1 + 1 + 4; // magic + version + flags + crc32
+/// Upper bound on how many elements a length-prefixed read pre-allocates. A
+/// corrupted length field must not be able to trigger an oversized allocation;
+/// genuine data simply grows the vec past this hint.
+const MAX_PREALLOC_TAUS: usize = 1 << 16;
 /// Default zstd compression level. Valid range is 1–22; higher = better ratio, slower.
 pub const DEFAULT_ZSTD_LEVEL: i32 = 3;
 
@@ -48,8 +52,17 @@ fn read_str<R: Read>(reader: &mut R) -> io::Result<String> {
     let mut len_buf = [0u8; 4];
     reader.read_exact(&mut len_buf)?;
     let len = u32::from_le_bytes(len_buf) as usize;
-    let mut buf = vec![0u8; len];
-    reader.read_exact(&mut buf)?;
+    // `len` is untrusted; read incrementally rather than pre-allocating it so a
+    // corrupt length field cannot trigger an oversized allocation. Fewer than
+    // `len` bytes available is a clean InvalidData error.
+    let mut buf = Vec::new();
+    let read = reader.take(len as u64).read_to_end(&mut buf)?;
+    if read != len {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "truncated string on read",
+        ));
+    }
     String::from_utf8(buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
@@ -67,7 +80,7 @@ fn read_schema<R: Read>(reader: &mut R) -> io::Result<Vec<String>> {
     let mut count_buf = [0u8; 4];
     reader.read_exact(&mut count_buf)?;
     let count = u32::from_le_bytes(count_buf) as usize;
-    let mut schema = Vec::with_capacity(count);
+    let mut schema = Vec::with_capacity(count.min(MAX_PREALLOC_TAUS));
     for _ in 0..count {
         schema.push(read_str(reader)?);
     }
@@ -154,12 +167,23 @@ impl<V: Codec> DiskEntry<V> {
         reader.read_exact(&mut count_buf)?;
         let count = u32::from_le_bytes(count_buf) as usize;
 
-        let mut taus = Vec::with_capacity(count);
+        // `count` comes from a possibly-corrupted file, so never pre-allocate
+        // more than a sane bound — a bogus count would otherwise abort the
+        // process on an oversized allocation. Genuine layers just grow the vec.
+        let mut taus = Vec::with_capacity(count.min(MAX_PREALLOC_TAUS));
         for _ in 0..count {
             let start = read_i64(reader)?;
             let end = read_i64(reader)?;
             let value = V::read_encoded(reader)?;
-            taus.push(Tau::new(start, end, value));
+            // Corruption can decode into a degenerate/inverted interval; reject
+            // it cleanly instead of panicking in `Tau::new`.
+            let tau = Tau::try_new(start, end, value).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("invalid tau interval on read: start {start} >= end {end}"),
+                )
+            })?;
+            taus.push(tau);
         }
 
         Ok(DiskEntry {
@@ -404,6 +428,52 @@ mod tests {
     use hegel::generators::Generator;
     use pretty_assertions::assert_eq;
     use tempfile::NamedTempFile;
+
+    /// Hand-encode one `DiskEntry` body (the post-decompression layout) with a
+    /// single tau, so corruption can be modelled without touching the
+    /// compress/encrypt envelope.
+    fn encode_entry(lens: &str, start: i64, end: i64, value: i64) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&1u64.to_le_bytes()); // layer_id
+        buf.extend_from_slice(&0i64.to_le_bytes()); // written_at
+        buf.extend_from_slice(&(lens.len() as u32).to_le_bytes());
+        buf.extend_from_slice(lens.as_bytes());
+        buf.extend_from_slice(&1u32.to_le_bytes()); // tau count
+        buf.extend_from_slice(&start.to_le_bytes());
+        buf.extend_from_slice(&end.to_le_bytes());
+        buf.extend_from_slice(&value.to_le_bytes());
+        buf
+    }
+
+    #[test]
+    fn disk_entry_read_round_trips_valid_interval() {
+        let bytes = encode_entry("temp", 0, 10, 42);
+        let mut cur = Cursor::new(bytes);
+        let entry = DiskEntry::<i64>::read(&mut cur).expect("valid entry");
+        assert_eq!(entry.taus.len(), 1);
+        assert_eq!((entry.taus[0].start, entry.taus[0].end), (0, 10));
+    }
+
+    #[test]
+    fn disk_entry_read_rejects_inverted_interval_without_panicking() {
+        // Corruption can decode into start >= end; the reader must return a
+        // clean InvalidData error rather than panicking in `Tau::new`.
+        let bytes = encode_entry("temp", 10, 5, 42);
+        let mut cur = Cursor::new(bytes);
+        let err = DiskEntry::<i64>::read(&mut cur).expect_err("inverted interval");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn read_str_rejects_oversized_length_without_oom() {
+        // A corrupt length prefix far exceeding the available bytes must be a
+        // clean error, not an oversized allocation.
+        let mut bytes = u32::MAX.to_le_bytes().to_vec();
+        bytes.extend_from_slice(b"only a few bytes");
+        let mut cur = Cursor::new(bytes);
+        let err = read_str(&mut cur).expect_err("truncated string");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
 
     fn taus_gen() -> impl Generator<Vec<Tau<i32>>> {
         gs::vecs(

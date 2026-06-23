@@ -14,7 +14,7 @@ Compare a **target** (system under test) with an isolated **reference model** un
 | [`Divergence`] | Structured mismatch record (step, description, expected, got) |
 | [`Scheduler`] | Deterministic cooperative task scheduler |
 | [`shrink`] | Delta-debug op-trace minimiser |
-| [`faults`] | File truncation helpers for fault injection |
+| [`faults`] | File truncation + corruption helpers for fault injection |
 
 ## Quick start
 
@@ -112,9 +112,14 @@ Delta-debug minimiser. Given a failing op trace and a predicate, reduces it to t
 let minimal = shrink(failing_ops, |trace| replay(trace).has_errors());
 ```
 
-### `faults` — [`truncate_file`], [`truncate_wal`]
+### `faults` — [`truncate_file`], [`corrupt_file`], [`Fault`]
 
-Primitive fault injection: truncate a file at a random valid offset. `truncate_wal` finds all `.wal` files under a path and truncates one chosen by the RNG.
+Primitive fault injection over persisted bytes, the two ways a file goes bad:
+
+- `truncate_file` — shorten a file at a random valid offset (a short write); returns the bytes removed.
+- `corrupt_file` — flip a contiguous run of bytes at a random offset, length preserved (bit-rot / a torn write); returns the bytes corrupted.
+
+Both are seeded by the caller's RNG, so corruption is reproducible. `TruncateFile` / `CorruptFile` wrap them behind the [`Fault`] trait for table-driven injection.
 
 ### `report` — [`RunResult`], [`SuiteResult`]
 

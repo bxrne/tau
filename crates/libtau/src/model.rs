@@ -27,6 +27,13 @@ impl<V> Tau<V> {
         Self { start, end, value }
     }
 
+    /// Fallible constructor for untrusted input (decoding a persisted file or
+    /// WAL entry that may be corrupted). Returns `None` for a degenerate or
+    /// inverted interval instead of panicking like [`Tau::new`].
+    pub fn try_new(start: Timestamp, end: Timestamp, value: V) -> Option<Self> {
+        (start < end).then_some(Self { start, end, value })
+    }
+
     #[inline]
     pub fn contains(&self, t: Timestamp) -> bool {
         self.start <= t && t < self.end
@@ -185,6 +192,13 @@ mod tests {
     #[should_panic(expected = "Tau: start must be less than end")]
     fn tau_new_rejects_empty_or_inverted() {
         Tau::new(5, 5, 0i32);
+    }
+
+    #[test]
+    fn tau_try_new_returns_none_for_empty_or_inverted() {
+        assert!(Tau::try_new(0, 10, 1i32).is_some());
+        assert!(Tau::try_new(5, 5, 1i32).is_none(), "empty interval");
+        assert!(Tau::try_new(10, 5, 1i32).is_none(), "inverted interval");
     }
 
     #[hegel::test]

@@ -133,6 +133,14 @@ impl WireClient {
         })
     }
 
+    /// Carry the logical transaction state onto a freshly reconnected client.
+    /// tau buffers transactions in the shared executor (not per-connection), so
+    /// after a connection drop the server's open transaction survives; the new
+    /// client must inherit that flag to stay in step with the server and oracle.
+    pub fn set_in_transaction(&mut self, in_transaction: bool) {
+        self.in_transaction = in_transaction;
+    }
+
     fn send_raw(&mut self, line: &str) -> io::Result<String> {
         if matches!(self.auth, Auth::On) && !self.authenticated {
             let auth_line = format!("AUTH {DST_AUTH_USER} {DST_AUTH_PASS}");

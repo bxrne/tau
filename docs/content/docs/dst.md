@@ -79,15 +79,21 @@ RUST_LOG=warn cargo run --release --bin dst -- --seed 42 --tier nightly
 
 Each profile in a run is driven with the same `--seed` (re-seeded per profile for reproducibility).
 
-### Faults (direct only; checkpoint every 200 ops)
+### Faults (checkpoint every 200 ops)
 
-| Storage | Checkpoint behavior |
+Damage kinds — a short write (truncate) vs a length-preserving bit-flip run (corrupt) — are drawn from the seeded RNG so both fire across the matrix. File faults reopen-probe the damaged store and assert tau **recovers or returns a clean error, never panics**; the store is then rebuilt from the authoritative op log, so the damage never perturbs the oracle comparison.
+
+| Storage / transport | Checkpoint behavior |
 |---------|---------------------|
 | Memory | Rebuild target + oracle, dual-replay op log |
 | WAL (odd) | Delete WAL + oracle replay; dual-replay op log |
-| WAL (even) | Truncate WAL at random offset; fresh target; reset op log |
-| Disk | Wipe target `.dat`/`.wal` files, dual-replay op log (tests replay equivalence). A separate `pbt_disk_persists_*_across_reopen` test exercises faithful restart over the real persisted `.dat` + `.wal` files (no wipe) after WAL-backed appends. |
-| Wire | Memory-style replay (no WAL/disk files) |
+| WAL (even) | Truncate **or corrupt** the WAL; reopen-probe; fresh target; reset op log |
+| Disk (odd) | Wipe target `.dat`/`.wal` files, dual-replay op log (replay equivalence). A separate `pbt_disk_persists_*_across_reopen` test exercises faithful restart over the real persisted files (no wipe). |
+| Disk (even) | Truncate **or corrupt** a random `.dat`, reopen-probe, then wipe + dual-replay |
+| Wire (odd) | Server crash: rebuild the whole wire stack (new server, fresh executor) + dual-replay |
+| Wire (even) | Network drop: sever the TCP connection and reconnect to the same live server; state survives, op log untouched |
+
+The disk corruption probe caught a real bug: a corrupted `.dat` could decode an inverted `[start, end)` interval and panic in `Tau::new`. The loader now validates intervals and bounds untrusted length prefixes, returning `InvalidData` instead.
 
 **Transactions** are enabled for memory/disk/wire profiles. WAL profiles use `WAL_EXCLUDED` tags in the behavior tree to skip transaction and multi-DB ops until single-DB WAL replay semantics are fully validated.
 
