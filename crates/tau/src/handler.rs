@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
-use libtau::{Executor, Metrics, Response, needs_registry_lock, parse};
+use libtau::{Executor, Metrics, Response, format_parse_error, needs_registry_lock, parse};
 use tracing::{debug, info, trace, warn};
 
 // Parse an AUTH line, returning the username and password if successful.  The caller should enforce
@@ -213,7 +213,7 @@ fn handle_query(query: &str, exec: &Arc<RwLock<Executor>>, caller: Option<&str>)
     let stmt = match parse(query) {
         Ok((rest, s)) if rest.trim().is_empty() => s,
         Ok((rest, _)) => return Response::Err(format!("trailing input: {rest:?}")),
-        Err(e) => return Response::Err(format!("parse: {e}")),
+        Err(e) => return Response::Err(format_parse_error(query, e)),
     };
     // Read-only: shared executor lock + per-DB read lock.
     // Registry write (CREATE DATABASE etc.): exclusive executor lock.
@@ -320,6 +320,7 @@ mod tests {
                     | "APPEND"
                     | "COPY"
                     | "DERIVE"
+                    | "XDERIVE"
                     | "SHOW"
                     | "RANGE"
                     | "REDUCE"

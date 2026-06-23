@@ -106,7 +106,7 @@ SHOW LENSES
 
 Requires `R` permission.
 
-### `DERIVE LENS <name> AS <expr>`
+### `DERIVE LENS <name> AS <expr> [OVER <start> <end>]`
 
 Creates a derived lens. The expression is compiled into a lazy closure; nothing is materialised. Every query re-evaluates the expression at the requested timestamp.
 
@@ -121,9 +121,40 @@ DERIVE LENS cpu_hot AS cpu > avg(cpu, -1800, 0)
 → OK
 ```
 
+The optional `OVER <start> <end>` clause bounds the lens's domain to the half-open interval `[start, end)`. Outside that window the lens reads as `NIL`, even where its source lenses are covered.
+
+```
+DERIVE LENS daytime AS sensor OVER 0 43200
+→ OK
+```
+
 Cycle detection runs at `DERIVE` time. If the expression would create a dependency cycle, the statement is rejected with `ERR cycle detected`.
 
 Derived lenses work with all read statements: `AT`, `RANGE`, and `REDUCE`.
+
+Requires `C` permission on the active database.
+
+### `XDERIVE LENS <name> AS <expr> [OVER <start> <end>]`
+
+Creates a **materialised** lens. Unlike `DERIVE`, the expression is evaluated immediately and the result is stored as concrete layers — so reads are as fast as a base lens and the lens has its own layer history (`HISTORY`, `AT ... LAYER`, `AT ... AS OF`).
+
+The view stays current automatically: whenever a lens it references is written (for example, a correction), the affected segments are recomputed and appended as a new layer, so the newest result wins. You never re-run `XDERIVE` to refresh it.
+
+```
+CREATE LENS c int
+APPEND LENS c 0 100 10
+XDERIVE LENS doubled AS c * 2
+AT LENS doubled 50
+→ VAL i20
+
+APPEND LENS c 0 100 7          # a correction to the source
+AT LENS doubled 50
+→ VAL i14                       # auto-updated, no re-run
+```
+
+Without an `OVER` clause the materialisation domain is taken from the referenced lenses' extents; with `OVER <start> <end>` it is fixed to `[start, end)`.
+
+Because the lens is engine-maintained, `APPEND`/`COPY` directly into it is rejected with `ERR cannot write to materialised lens` — write the source lenses instead. Cycle detection runs at `XDERIVE` time. The definition and its data survive restarts.
 
 Requires `C` permission on the active database.
 

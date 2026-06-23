@@ -26,6 +26,27 @@ use nom::{
 use super::ast::{AggFunc, BinOp, Expr, Literal, Stmt, Type, UnOp};
 use crate::users::Perm;
 
+/// Turn a `nom` parse failure into a human-readable, single-line message that
+/// points at the column where parsing stalled.  `nom`'s own `Display`/`Debug`
+/// output (`Parsing Error: Error { input: "...", code: Tag }`) leaks internal
+/// combinator names and a confusing offset, so it is never surfaced to clients.
+pub fn format_parse_error(query: &str, err: nom::Err<nom::error::Error<&str>>) -> String {
+    let remaining = match &err {
+        nom::Err::Error(e) | nom::Err::Failure(e) => e.input,
+        nom::Err::Incomplete(_) => return "parse error: unexpected end of input".to_string(),
+    };
+    // The error slice is always a suffix of `query`; its start is the column
+    // at which the last combinator gave up.
+    let col = query.len().saturating_sub(remaining.len());
+    let near = remaining.trim_start();
+    if near.is_empty() {
+        format!("parse error at column {}: unexpected end of input", col + 1)
+    } else {
+        let snippet: String = near.chars().take(24).collect();
+        format!("parse error at column {}: near `{snippet}`", col + 1)
+    }
+}
+
 /// Parse a single statement.  Trailing whitespace is consumed but trailing
 /// crap is reported as an error.
 pub fn parse(input: &str) -> IResult<&str, Stmt> {
@@ -35,6 +56,7 @@ pub fn parse(input: &str) -> IResult<&str, Stmt> {
         stmt_batch_append,
         stmt_append,
         stmt_copy,
+        stmt_xderive,
         stmt_derive,
         stmt_at,
         stmt_range,
@@ -50,8 +72,7 @@ pub fn parse(input: &str) -> IResult<&str, Stmt> {
         stmt_history,
         stmt_backup,
         stmt_restore,
-        stmt_set_ttl,
-        stmt_unset_ttl,
+        alt((stmt_set_ttl, stmt_unset_ttl)),
     ))
     .parse(input)?;
     let (input, _) = multispace0(input)?;
@@ -167,6 +188,15 @@ fn stmt_show_grants(i: &str) -> IResult<&str, Stmt> {
     Ok((i, Stmt::ShowGrants { user }))
 }
 
+/// Optional `OVER <start> <end>` domain clause shared by DERIVE / XDERIVE.
+fn over_clause(i: &str) -> IResult<&str, (i64, i64)> {
+    let (i, _) = (multispace1, tag_no_case("OVER"), multispace1).parse(i)?;
+    let (i, start) = integer(i)?;
+    let (i, _) = multispace1(i)?;
+    let (i, end) = integer(i)?;
+    Ok((i, (start, end)))
+}
+
 fn stmt_derive(i: &str) -> IResult<&str, Stmt> {
     let (i, _) = kw("DERIVE").parse(i)?;
     let (i, _) = kw("LENS").parse(i)?;
@@ -175,7 +205,35 @@ fn stmt_derive(i: &str) -> IResult<&str, Stmt> {
     let (i, _) = tag_no_case("AS")(i)?;
     let (i, _) = multispace1(i)?;
     let (i, e) = expr(i)?;
-    Ok((i, Stmt::Derive { name, expr: e }))
+    let (i, range) = opt(over_clause).parse(i)?;
+    Ok((
+        i,
+        Stmt::Derive {
+            name,
+            expr: e,
+            range,
+        },
+    ))
+}
+
+/// `XDERIVE LENS <name> AS <expr> [OVER <start> <end>]` - materialised lens.
+fn stmt_xderive(i: &str) -> IResult<&str, Stmt> {
+    let (i, _) = kw("XDERIVE").parse(i)?;
+    let (i, _) = kw("LENS").parse(i)?;
+    let (i, name) = ident(i)?;
+    let (i, _) = multispace1(i)?;
+    let (i, _) = tag_no_case("AS")(i)?;
+    let (i, _) = multispace1(i)?;
+    let (i, e) = expr(i)?;
+    let (i, range) = opt(over_clause).parse(i)?;
+    Ok((
+        i,
+        Stmt::Xderive {
+            name,
+            expr: e,
+            range,
+        },
+    ))
 }
 
 fn stmt_at(i: &str) -> IResult<&str, Stmt> {
@@ -963,6 +1021,7 @@ mod tests {
                     | "BATCH"
                     | "COPY"
                     | "DERIVE"
+                    | "XDERIVE"
                     | "SHOW"
                     | "AT"
                     | "RANGE"
@@ -1053,14 +1112,58 @@ mod tests {
     #[test]
     fn derive_with_agg_call_and_arithmetic() {
         let stmt = parsed("DERIVE LENS hot AS x > avg(x, -10, 0)");
-        let Stmt::Derive { name, expr } = stmt else {
+        let Stmt::Derive { name, expr, range } = stmt else {
             panic!()
         };
         assert_eq!(name, "hot");
+        assert_eq!(range, None);
         let Expr::Binary { op, .. } = expr else {
             panic!()
         };
         assert_eq!(op, BinOp::Gt);
+    }
+
+    #[test]
+    fn xderive_parses_with_and_without_over() {
+        let stmt = parsed("XDERIVE LENS doubled AS c * 2");
+        assert_eq!(
+            stmt,
+            Stmt::Xderive {
+                name: "doubled".into(),
+                expr: Expr::Binary {
+                    op: BinOp::Mul,
+                    lhs: Box::new(Expr::Ident("c".into())),
+                    rhs: Box::new(Expr::Lit(Literal::Int(2))),
+                },
+                range: None,
+            }
+        );
+        let stmt = parsed("XDERIVE LENS w AS c OVER 0 100");
+        let Stmt::Xderive { name, range, .. } = stmt else {
+            panic!()
+        };
+        assert_eq!(name, "w");
+        assert_eq!(range, Some((0, 100)));
+    }
+
+    #[test]
+    fn format_parse_error_is_human_readable() {
+        // A typo'd keyword (the failure mode behind the original XDERIVE bug
+        // report, where an old server didn't know the keyword) must produce a
+        // friendly column-anchored message, never nom's `code: Tag` debug dump.
+        let q = "XDERIV LENS x AS y * 3";
+        let msg = format_parse_error(q, parse(q).unwrap_err());
+        assert!(msg.starts_with("parse error at column"), "{msg}");
+        assert!(!msg.contains("code:"), "{msg}");
+    }
+
+    #[test]
+    fn derive_with_over_clause_parses() {
+        let stmt = parsed("DERIVE LENS d AS c OVER -5 10");
+        let Stmt::Derive { range, .. } = stmt else {
+            panic!()
+        };
+        assert_eq!(range, Some((-5, 10)));
     }
 
     #[test]

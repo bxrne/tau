@@ -11,3 +11,4 @@ crates/fuzztau/corpus
 /target
 /crates/fuzztau/target
 /demo
+/sample_data

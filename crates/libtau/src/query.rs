@@ -69,6 +69,12 @@ pub(crate) fn eval_lens(
         }
         Ok(state.db.at_name(name, t))
     } else if let Some(expr) = state.derived.get(name) {
+        // An `OVER` bound on a derived lens limits its visible domain.
+        if let Some(&(s, e)) = state.derived_ranges.get(name)
+            && (t < s || t >= e)
+        {
+            return Ok(None);
+        }
         eval_expr(state, expr, t)
     } else {
         Err(ExecError::UnknownLens(name.into()))
@@ -428,6 +434,87 @@ pub(crate) fn collect_expr_bounds(
     }
 }
 
+/// Materialise `expr` into concrete `(start, end, value)` segments for an
+/// `XDERIVE` lens.  Breakpoints come from the referenced lenses (the same
+/// boundary set a `RANGE` scan would use); the value of each segment is the
+/// expression evaluated at the segment start.  Adjacent equal segments merge.
+///
+/// The domain is `range` when given, otherwise the union extent of the
+/// referenced base lenses' layers.  An empty domain (no `OVER`, no data yet)
+/// yields no segments — the view is populated later as its sources are written.
+pub(crate) fn materialise_expr(
+    state: &DbState,
+    expr: &Expr,
+    range: Option<(Timestamp, Timestamp)>,
+) -> Result<Vec<(Timestamp, Timestamp, Value)>, ExecError> {
+    let (start, end) = match range {
+        Some((s, e)) => (s, e),
+        None => match expr_domain(state, expr) {
+            Some(d) => d,
+            None => return Ok(Vec::new()),
+        },
+    };
+    if start >= end {
+        return Ok(Vec::new());
+    }
+    let mut bounds = vec![start, end];
+    collect_expr_bounds(state, expr, start, end, &mut bounds)?;
+    bounds.retain(|&b| b >= start && b <= end);
+    bounds.sort_unstable();
+    bounds.dedup();
+    let mut out: Vec<(Timestamp, Timestamp, Value)> =
+        Vec::with_capacity(bounds.len().saturating_sub(1));
+    for w in bounds.windows(2) {
+        let (s, e) = (w[0], w[1]);
+        if let Some(v) = eval_expr(state, expr, s)? {
+            match out.last_mut() {
+                Some(last) if last.1 == s && last.2 == v => last.1 = e,
+                _ => out.push((s, e, v)),
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The combined time extent `[min_start, max_end)` of every base/materialised
+/// lens referenced by `expr`, following lazy derived lenses transitively.
+/// `None` when no referenced lens holds any data.
+fn expr_domain(state: &DbState, expr: &Expr) -> Option<(Timestamp, Timestamp)> {
+    let mut min: Option<Timestamp> = None;
+    let mut max: Option<Timestamp> = None;
+    collect_domain(state, expr, &mut min, &mut max);
+    Some((min?, max?))
+}
+
+fn collect_domain(
+    state: &DbState,
+    expr: &Expr,
+    min: &mut Option<Timestamp>,
+    max: &mut Option<Timestamp>,
+) {
+    match expr {
+        Expr::Lit(_) => {}
+        Expr::Ident(name) | Expr::Agg { lens: name, .. } => {
+            if state.base_types.contains_key(name) {
+                if let Some(layers) = state.db.layers(name) {
+                    for l in layers.iter() {
+                        *min = Some(min.map_or(l.min_start, |m: Timestamp| m.min(l.min_start)));
+                        *max = Some(max.map_or(l.max_end, |m: Timestamp| m.max(l.max_end)));
+                    }
+                }
+            } else if let Some(inner) = state.derived.get(name) {
+                let inner = inner.clone();
+                collect_domain(state, &inner, min, max);
+            }
+        }
+        Expr::Unary { expr, .. } => collect_domain(state, expr, min, max),
+        Expr::Binary { lhs, rhs, .. } => {
+            collect_domain(state, lhs, min, max);
+            collect_domain(state, rhs, min, max);
+        }
+    }
+}
+
 pub(crate) fn agg_sum(segments: &[(i64, Value)]) -> Result<Value, ExecError> {
     let mut int_sum: i64 = 0;
     let mut float_sum: Option<f64> = None;
@@ -576,6 +663,8 @@ mod tests {
             base_types,
             next_layer_id: 2,
             derived: HashMap::default(),
+            derived_ranges: HashMap::default(),
+            xderived: HashMap::default(),
             ttl_secs: HashMap::default(),
         }
     }

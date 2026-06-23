@@ -262,6 +262,133 @@ fn derive_unknown_ident_errors_at_query_time() {
 }
 
 #[test]
+fn derive_over_clause_bounds_domain() {
+    let mut e = setup();
+    run(&mut e, "CREATE LENS c int").unwrap();
+    run(&mut e, "APPEND LENS c 0 100 10").unwrap();
+    run(&mut e, "DERIVE LENS d AS c * 2 OVER 0 50").unwrap();
+    assert_eq!(
+        run(&mut e, "AT LENS d 25").unwrap(),
+        Output::Value(Some(Value::Int(20)))
+    );
+    // Outside the OVER window the lens reads as NIL even though `c` covers it.
+    assert_eq!(run(&mut e, "AT LENS d 60").unwrap(), Output::Value(None));
+}
+
+#[test]
+fn xderive_materialises_current_value() {
+    let mut e = setup();
+    run(&mut e, "CREATE LENS c int").unwrap();
+    run(&mut e, "APPEND LENS c 0 100 10").unwrap();
+    run(&mut e, "XDERIVE LENS doubled AS c * 2").unwrap();
+    assert_eq!(
+        run(&mut e, "AT LENS doubled 50").unwrap(),
+        Output::Value(Some(Value::Int(20)))
+    );
+}
+
+#[test]
+fn xderive_auto_updates_on_source_correction() {
+    let mut e = setup();
+    run(&mut e, "CREATE LENS c int").unwrap();
+    run(&mut e, "APPEND LENS c 0 100 10").unwrap();
+    run(&mut e, "XDERIVE LENS doubled AS c * 2").unwrap();
+    assert_eq!(
+        run(&mut e, "AT LENS doubled 50").unwrap(),
+        Output::Value(Some(Value::Int(20)))
+    );
+    // Correct the source: a newer layer wins, and the materialised view must
+    // reflect it without re-running XDERIVE.
+    run(&mut e, "APPEND LENS c 0 100 7").unwrap();
+    assert_eq!(
+        run(&mut e, "AT LENS doubled 50").unwrap(),
+        Output::Value(Some(Value::Int(14)))
+    );
+    // A fresh materialised layer was appended (the original + the refresh).
+    let Output::LayerHistory(layers) = run(&mut e, "HISTORY LENS doubled").unwrap() else {
+        panic!("expected layer history");
+    };
+    assert!(
+        layers.len() >= 2,
+        "expected a refresh layer, got {}",
+        layers.len()
+    );
+}
+
+#[test]
+fn xderive_rejects_direct_append() {
+    let mut e = setup();
+    run(&mut e, "CREATE LENS c int").unwrap();
+    run(&mut e, "APPEND LENS c 0 100 10").unwrap();
+    run(&mut e, "XDERIVE LENS m AS c + 1").unwrap();
+    assert_eq!(
+        run(&mut e, "APPEND LENS m 0 10 5"),
+        Err(ExecError::MaterialisedLens("m".into()))
+    );
+}
+
+#[test]
+fn xderive_over_clause_bounds_materialisation() {
+    let mut e = setup();
+    run(&mut e, "CREATE LENS c int").unwrap();
+    run(&mut e, "APPEND LENS c 0 100 4").unwrap();
+    run(&mut e, "XDERIVE LENS m AS c * 3 OVER 0 40").unwrap();
+    assert_eq!(
+        run(&mut e, "AT LENS m 10").unwrap(),
+        Output::Value(Some(Value::Int(12)))
+    );
+    assert_eq!(run(&mut e, "AT LENS m 50").unwrap(), Output::Value(None));
+}
+
+#[test]
+fn xderive_self_reference_rejected() {
+    let mut e = setup();
+    assert_eq!(
+        run(&mut e, "XDERIVE LENS m AS m + 1"),
+        Err(ExecError::CycleDetected("m".into()))
+    );
+}
+
+#[test]
+fn xderive_range_reflects_materialised_segments() {
+    let mut e = setup();
+    run(&mut e, "CREATE LENS c int").unwrap();
+    run(&mut e, "APPEND LENS c 0 10 1, 10 20 2").unwrap();
+    run(&mut e, "XDERIVE LENS m AS c + 100").unwrap();
+    let Output::Range(segs) = run(&mut e, "RANGE LENS m 0 20").unwrap() else {
+        panic!("expected range");
+    };
+    assert_eq!(
+        segs,
+        vec![(0, 10, Value::Int(101)), (10, 20, Value::Int(102))]
+    );
+}
+
+#[test]
+fn xderive_persists_and_auto_updates_across_wal_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let wal_path = dir.path().join("xd.wal");
+    {
+        let mut e = Executor::with_wal(&wal_path, None).unwrap();
+        run(&mut e, "CREATE LENS c int").unwrap();
+        run(&mut e, "APPEND LENS c 0 100 10").unwrap();
+        run(&mut e, "XDERIVE LENS doubled AS c * 2").unwrap();
+    }
+    // Reopen: the materialised data and the auto-update rule must both survive.
+    let mut e2 = Executor::with_wal(&wal_path, None).unwrap();
+    assert_eq!(
+        run(&mut e2, "AT LENS doubled 50").unwrap(),
+        Output::Value(Some(Value::Int(20)))
+    );
+    // A post-restart correction still refreshes the view.
+    run(&mut e2, "APPEND LENS c 0 100 8").unwrap();
+    assert_eq!(
+        run(&mut e2, "AT LENS doubled 50").unwrap(),
+        Output::Value(Some(Value::Int(16)))
+    );
+}
+
+#[test]
 fn divide_by_zero_errors() {
     let mut e = setup();
     run(&mut e, "CREATE LENS x int").unwrap();

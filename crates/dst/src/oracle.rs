@@ -46,6 +46,15 @@ enum LensData {
         ttl_secs: Option<i64>,
     },
     Derived(DeriveSpec),
+    /// Materialised (`XDERIVE`) lens.  The SUT stores the result as layers and
+    /// re-materialises on every dependency write; because the domain and the
+    /// defined region grow monotonically, that stored result is always equal to
+    /// the lazy, domain-bounded `a + b`.  Modelling it lazily here is therefore
+    /// exact and far simpler than replaying layer storage.
+    Xderived {
+        spec: DeriveSpec,
+        range: Option<(Ts, Ts)>,
+    },
 }
 
 /// Per-database state.
@@ -97,6 +106,56 @@ impl OracleDb {
                     _ => None,
                 }
             }
+            LensData::Xderived { spec, range } => {
+                let (ds, de) = Self::xderive_domain(spec, *range, lenses)?;
+                if t < ds || t >= de {
+                    return None;
+                }
+                let va = Self::at_in(&spec.a, t, now_secs, lenses)?;
+                let vb = Self::at_in(&spec.b, t, now_secs, lenses)?;
+                match (va, vb) {
+                    (Value::Int(x), Value::Int(y)) => Some(Value::Int(x.wrapping_add(y))),
+                    _ => None,
+                }
+            }
+        }
+    }
+
+    /// Combined `[min_start, max_end)` extent of a base lens's stored intervals.
+    fn lens_extent(name: &str, lenses: &HashMap<String, LensData>) -> Option<(Ts, Ts)> {
+        match lenses.get(name)? {
+            LensData::Base { layers, .. } => {
+                let mut min: Option<Ts> = None;
+                let mut max: Option<Ts> = None;
+                for layer in layers {
+                    for tau in &layer.intervals {
+                        min = Some(min.map_or(tau.start, |m| m.min(tau.start)));
+                        max = Some(max.map_or(tau.end, |m| m.max(tau.end)));
+                    }
+                }
+                Some((min?, max?))
+            }
+            _ => None,
+        }
+    }
+
+    /// Materialisation domain for an XDERIVE lens: the explicit `OVER` range when
+    /// given, else the union extent of its two referenced lenses (mirroring the
+    /// SUT's `expr_domain`).  `None` when neither has data and no range is set.
+    fn xderive_domain(
+        spec: &DeriveSpec,
+        range: Option<(Ts, Ts)>,
+        lenses: &HashMap<String, LensData>,
+    ) -> Option<(Ts, Ts)> {
+        if let Some(r) = range {
+            return Some(r);
+        }
+        let ea = Self::lens_extent(&spec.a, lenses);
+        let eb = Self::lens_extent(&spec.b, lenses);
+        match (ea, eb) {
+            (Some((as_, ae)), Some((bs, be))) => Some((as_.min(bs), ae.max(be))),
+            (Some(e), None) | (None, Some(e)) => Some(e),
+            (None, None) => None,
         }
     }
 
@@ -132,6 +191,20 @@ impl OracleDb {
             Some(LensData::Derived(spec)) => {
                 Self::collect_boundaries(&spec.a, qs, qe, now_secs, lenses, pts);
                 Self::collect_boundaries(&spec.b, qs, qe, now_secs, lenses, pts);
+            }
+            Some(LensData::Xderived { spec, range }) => {
+                Self::collect_boundaries(&spec.a, qs, qe, now_secs, lenses, pts);
+                Self::collect_boundaries(&spec.b, qs, qe, now_secs, lenses, pts);
+                // The domain edges coincide with a/b interval boundaries already
+                // collected; only an explicit OVER range can cut elsewhere.
+                if let Some((rs, re)) = range {
+                    if *rs > qs && *rs < qe {
+                        pts.insert(*rs);
+                    }
+                    if *re > qs && *re < qe {
+                        pts.insert(*re);
+                    }
+                }
             }
             None => {}
         }
@@ -339,6 +412,11 @@ enum PendingMutation {
         name: String,
         spec: DeriveSpec,
     },
+    Xderive {
+        name: String,
+        spec: DeriveSpec,
+        range: Option<(Ts, Ts)>,
+    },
     SetTtl {
         lens: String,
         secs: i64,
@@ -422,6 +500,12 @@ impl Oracle {
             .insert(name.to_string(), LensData::Derived(spec));
     }
 
+    pub fn xderive_lens(&mut self, name: &str, spec: DeriveSpec, range: Option<(Ts, Ts)>) {
+        self.db_mut()
+            .lenses
+            .insert(name.to_string(), LensData::Xderived { spec, range });
+    }
+
     pub fn set_ttl(&mut self, lens: &str, secs: i64) {
         if let Some(LensData::Base { ttl_secs, .. }) = self.db_mut().lenses.get_mut(lens) {
             *ttl_secs = Some(secs);
@@ -476,6 +560,7 @@ impl Oracle {
             PendingMutation::CreateLens { name } => self.create_lens(&name),
             PendingMutation::DropLens { name } => self.drop_lens(&name),
             PendingMutation::Derive { name, spec } => self.derive_lens(&name, spec),
+            PendingMutation::Xderive { name, spec, range } => self.xderive_lens(&name, spec, range),
             PendingMutation::SetTtl { lens, secs } => self.set_ttl(&lens, secs),
             PendingMutation::UnsetTtl { lens } => self.unset_ttl(&lens),
         }
@@ -545,6 +630,13 @@ impl Oracle {
                 self.buffer_mutation(PendingMutation::Derive {
                     name: name.clone(),
                     spec: spec.clone(),
+                });
+            }
+            Op::Xderive { name, spec, range } => {
+                self.buffer_mutation(PendingMutation::Xderive {
+                    name: name.clone(),
+                    spec: spec.clone(),
+                    range: *range,
                 });
             }
             Op::Ttl {

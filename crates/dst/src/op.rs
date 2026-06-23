@@ -11,6 +11,7 @@ pub const FL: &str = "fl";
 pub const BOOL: &str = "bl";
 pub const SV: &str = "sv";
 pub const DS: &str = "ds";
+pub const XD: &str = "xd";
 
 /// Named lenses used by the DST workload (aux + dynamic create/drop targets).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,6 +84,11 @@ pub enum Op {
         name: String,
         spec: DeriveSpec,
     },
+    Xderive {
+        name: String,
+        spec: DeriveSpec,
+        range: Option<(Ts, Ts)>,
+    },
     #[allow(dead_code)]
     Ttl {
         lens: String,
@@ -110,6 +116,13 @@ impl Op {
             Op::CreateLens { name, ty } => format!("CREATE LENS {name} {ty}"),
             Op::DropLens { name } => format!("DROP LENS {name}"),
             Op::Derive { name, spec } => format!("DERIVE LENS {name} AS {} + {}", spec.a, spec.b),
+            Op::Xderive { name, spec, range } => {
+                let mut sql = format!("XDERIVE LENS {name} AS {} + {}", spec.a, spec.b);
+                if let Some((s, e)) = range {
+                    sql.push_str(&format!(" OVER {s} {e}"));
+                }
+                sql
+            }
             Op::Ttl {
                 lens,
                 secs: Some(s),

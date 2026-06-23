@@ -3,7 +3,7 @@
 //! The grammar is deliberately minimal:
 //!
 //! ```text
-//! stmt   := create | append | batch_append | copy | derive | show | at | range
+//! stmt   := create | append | batch_append | copy | derive | xderive | show | at | range
 //!         | reduce | drop | use | create_user | drop_user | grant | revoke
 //!         | history | backup | restore
 //!
@@ -12,7 +12,8 @@
 //! append := APPEND LENS <ident> <int> <int> <literal> [, <int> <int> <literal> …]
 //! batch_append := BATCH APPEND LENS <ident> { <int> <int> <literal> [; <int> <int> <literal> …] }
 //! copy   := COPY LENS <ident> FROM "<path>"
-//! derive := DERIVE LENS <ident> AS <expr>
+//! derive := DERIVE  LENS <ident> AS <expr> [OVER <int> <int>]
+//! xderive := XDERIVE LENS <ident> AS <expr> [OVER <int> <int>]
 //! show   := SHOW DATABASES
 //!         | SHOW LENSES
 //!         | SHOW USERS
@@ -185,9 +186,24 @@ pub enum Stmt {
         name: String,
         path: String,
     },
+    /// `DERIVE LENS <name> AS <expr> [OVER <start> <end>]` - a lazy derived
+    /// lens, re-evaluated on every query.  The optional `OVER` clause bounds the
+    /// lens's domain: outside `[start, end)` it reads as NIL.
     Derive {
         name: String,
         expr: Expr,
+        range: Option<(i64, i64)>,
+    },
+    /// `XDERIVE LENS <name> AS <expr> [OVER <start> <end>]` - a *materialised*
+    /// lens.  Its result is computed and stored as concrete layers, and the
+    /// engine keeps it current: whenever a lens it references is written, the
+    /// affected segments are recomputed and appended as a new layer (newest
+    /// wins).  The optional `OVER` clause fixes the materialisation domain;
+    /// without it the domain is derived from the referenced lenses' extents.
+    Xderive {
+        name: String,
+        expr: Expr,
+        range: Option<(i64, i64)>,
     },
     At {
         name: String,
@@ -444,7 +460,20 @@ impl std::fmt::Display for Stmt {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Stmt::Create { name, ty } => write!(f, "CREATE LENS {name} {ty}"),
-            Stmt::Derive { name, expr } => write!(f, "DERIVE LENS {name} AS {expr}"),
+            Stmt::Derive { name, expr, range } => {
+                write!(f, "DERIVE LENS {name} AS {expr}")?;
+                if let Some((s, e)) = range {
+                    write!(f, " OVER {s} {e}")?;
+                }
+                Ok(())
+            }
+            Stmt::Xderive { name, expr, range } => {
+                write!(f, "XDERIVE LENS {name} AS {expr}")?;
+                if let Some((s, e)) = range {
+                    write!(f, " OVER {s} {e}")?;
+                }
+                Ok(())
+            }
             Stmt::SetTtl { name, secs } => write!(f, "SET TTL LENS {name} {secs}"),
             Stmt::UnsetTtl { name } => write!(f, "UNSET TTL LENS {name}"),
             _ => unreachable!("Stmt::Display is only implemented for WAL-persisted DDL variants"),
@@ -493,11 +522,44 @@ mod tests {
         let stmt = Stmt::Derive {
             name: name.clone(),
             expr: Expr::Ident(src.clone()),
+            range: None,
         };
         let line = stmt.to_string();
         let (rest, parsed) = parse(&line).expect("Display output must re-parse");
         assert!(rest.trim().is_empty(), "trailing input: {rest:?}");
         assert_eq!(parsed, stmt);
+    }
+
+    // DERIVE/XDERIVE with an OVER clause and XDERIVE without one must also
+    // round-trip through Display, since both are persisted as schema DDL.
+    #[hegel::test]
+    fn pbt_derive_xderive_over_display_roundtrips(tc: TestCase) {
+        let name = tc.draw(ident_gen());
+        let src = tc.draw(ident_gen());
+        let s = tc.draw(gs::integers::<i64>().min_value(-1000).max_value(1000));
+        let e = tc.draw(gs::integers::<i64>().min_value(-1000).max_value(1000));
+        for stmt in [
+            Stmt::Derive {
+                name: name.clone(),
+                expr: Expr::Ident(src.clone()),
+                range: Some((s, e)),
+            },
+            Stmt::Xderive {
+                name: name.clone(),
+                expr: Expr::Ident(src.clone()),
+                range: None,
+            },
+            Stmt::Xderive {
+                name: name.clone(),
+                expr: Expr::Ident(src.clone()),
+                range: Some((s, e)),
+            },
+        ] {
+            let line = stmt.to_string();
+            let (rest, parsed) = parse(&line).expect("Display output must re-parse");
+            assert!(rest.trim().is_empty(), "trailing input: {rest:?}");
+            assert_eq!(parsed, stmt);
+        }
     }
 
     /// Regression: And/Or/Not and whole floats used to Display as `and`/`or`/
@@ -530,6 +592,7 @@ mod tests {
             let stmt = Stmt::Derive {
                 name: "d".into(),
                 expr,
+                range: None,
             };
             let line = stmt.to_string();
             let (rest, parsed) = parse(&line).expect("Display output must re-parse");

@@ -11,7 +11,7 @@ use libtau::AggFunc;
 use rand::Rng;
 use rand::rngs::StdRng;
 
-use crate::op::{self, BOOL, DS, FL, INT, Lens, Op, Payload, SV};
+use crate::op::{self, BOOL, DS, FL, INT, Lens, Op, Payload, SV, XD};
 use crate::oracle::{DeriveSpec, Oracle};
 
 /// Tag bits for the Tau behavior tree.
@@ -284,6 +284,68 @@ fn build_tree() -> Tree<SimCtx, Op> {
             },
             |_, _| Op::DropLens {
                 name: DS.to_string(),
+            },
+        ))
+        // XDERIVE: materialise xd = a + b (optionally bounded by OVER).
+        .leaf(Leaf::new(
+            2,
+            0,
+            |c: &SimCtx| {
+                !c.in_transaction
+                    && c.oracle().active_db() == "default"
+                    && !c.oracle().has_lens(XD)
+                    && c.oracle().has_lens("a")
+                    && c.oracle().has_lens("b")
+            },
+            |rng, _| Op::Xderive {
+                name: XD.to_string(),
+                spec: DeriveSpec {
+                    a: "a".into(),
+                    b: "b".into(),
+                },
+                range: if rng.gen_bool(0.5) {
+                    let s = rng.gen_range(-50..1500);
+                    Some((s, s + rng.gen_range(1..1500)))
+                } else {
+                    None
+                },
+            },
+        ))
+        .leaf(Leaf::new(
+            1,
+            0,
+            |c: &SimCtx| {
+                !c.in_transaction && c.oracle().active_db() == "default" && c.oracle().has_lens(XD)
+            },
+            |_, _| Op::DropLens {
+                name: XD.to_string(),
+            },
+        ))
+        // AT / RANGE against the materialised lens.
+        .leaf(Leaf::new(
+            3,
+            0,
+            |c: &SimCtx| {
+                !c.in_transaction && c.oracle().active_db() == "default" && c.oracle().has_lens(XD)
+            },
+            |rng, _| Op::At {
+                lens: XD.to_string(),
+                t: rng.gen_range(-50..3000),
+            },
+        ))
+        .leaf(Leaf::new(
+            3,
+            0,
+            |c: &SimCtx| {
+                !c.in_transaction && c.oracle().active_db() == "default" && c.oracle().has_lens(XD)
+            },
+            |rng, _| {
+                let s = rng.gen_range(-50..2500);
+                Op::Range {
+                    lens: XD.to_string(),
+                    start: s,
+                    end: s + rng.gen_range(1..500),
+                }
             },
         ))
         // USE aux

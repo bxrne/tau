@@ -120,6 +120,9 @@ pub enum ExecError {
     TransactionAlreadyActive,
     /// `COMMIT` or `ROLLBACK` issued without a preceding `START TRANSACTION`.
     NoActiveTransaction,
+    /// A direct write (`APPEND` / `COPY`) targeted a materialised (`XDERIVE`)
+    /// lens.  These are maintained by the engine; write the source lenses.
+    MaterialisedLens(String),
 }
 
 impl From<io::Error> for ExecError {
@@ -149,10 +152,23 @@ pub enum StorageBackend {
     },
 }
 
+/// Definition of a materialised (`XDERIVE`) lens: the expression to compute,
+/// an optional domain bound, and the set of lens names whose writes should
+/// trigger a re-materialisation.  `deps` is resolved transitively through lazy
+/// derived lenses so a write to a leaf base lens still refreshes the view.
+#[derive(Clone)]
+pub(crate) struct XderiveDef {
+    pub(crate) expr: Expr,
+    pub(crate) range: Option<(Timestamp, Timestamp)>,
+    pub(crate) deps: Vec<String>,
+}
+
 pub(crate) struct DbState {
     pub(crate) db: Database<Value>,
     /// Declared type of every base lens in this database.  Absence of an
-    /// entry means the lens is either derived or unknown.
+    /// entry means the lens is either derived or unknown.  Materialised
+    /// (`XDERIVE`) lenses also get an entry here so they share the base-lens
+    /// query, range, and history paths.
     pub(crate) base_types: HashMap<String, Type>,
     /// Monotonic layer-id source so `APPEND` doesn't need the caller to
     /// supply one.
@@ -160,6 +176,13 @@ pub(crate) struct DbState {
     /// Derived lens definitions, stored by name.  Lookups recursively
     /// re-evaluate these - no caching.
     pub(crate) derived: HashMap<String, Expr>,
+    /// Optional `OVER` domain bound for a derived lens.  Outside the bound the
+    /// lens reads as NIL.  Only lazy derived lenses use this; materialised
+    /// lenses bake the bound into their stored layers.
+    pub(crate) derived_ranges: HashMap<String, (Timestamp, Timestamp)>,
+    /// Materialised lens definitions, keyed by name.  These names are also
+    /// present in `base_types`; this map only drives re-materialisation.
+    pub(crate) xderived: HashMap<String, XderiveDef>,
     /// Per-lens TTL in seconds.  A lens with an entry here hides data whose
     /// temporal interval ends before `(now - ttl_secs)` seconds ago.
     pub(crate) ttl_secs: HashMap<String, i64>,
@@ -175,6 +198,8 @@ impl DbState {
             base_types: HashMap::default(),
             next_layer_id,
             derived: HashMap::default(),
+            derived_ranges: HashMap::default(),
+            xderived: HashMap::default(),
             ttl_secs: HashMap::default(),
         }
     }
@@ -328,7 +353,7 @@ fn stmt_to_op(stmt: &Stmt) -> Op {
         Stmt::Range { .. } => Op::Range,
         Stmt::Reduce { .. } => Op::Reduce,
         Stmt::HistoryLens { .. } => Op::History,
-        Stmt::Create { .. } | Stmt::Derive { .. } => Op::CreateLens,
+        Stmt::Create { .. } | Stmt::Derive { .. } | Stmt::Xderive { .. } => Op::CreateLens,
         Stmt::Drop { .. } => Op::DropLens,
         Stmt::ShowDatabases
         | Stmt::ShowLenses
@@ -529,7 +554,8 @@ impl Executor {
             Stmt::Create { name, ty } => self.create_lens(name, ty.clone()),
             Stmt::Append { name, taus } => self.write_layer(name, literal_taus(taus)),
             Stmt::Copy { name, path } => self.copy_lens(name, path),
-            Stmt::Derive { name, expr } => self.derive_lens(name, expr.clone()),
+            Stmt::Derive { name, expr, range } => self.derive_lens(name, expr.clone(), *range),
+            Stmt::Xderive { name, expr, range } => self.xderive_lens(name, expr.clone(), *range),
             Stmt::At { name, t } => self.at_lens(name, *t),
             Stmt::Range {
                 name,
@@ -635,7 +661,8 @@ impl Executor {
                 self.write_layer(name, literal_taus(taus))
             }
             Stmt::Copy { name, path } => self.copy_lens(name, path),
-            Stmt::Derive { name, expr } => self.derive_lens(name, expr.clone()),
+            Stmt::Derive { name, expr, range } => self.derive_lens(name, expr.clone(), *range),
+            Stmt::Xderive { name, expr, range } => self.xderive_lens(name, expr.clone(), *range),
             Stmt::Drop { name } => self.drop_lens(name),
             Stmt::BackupDatabase { name, path } => self.backup_database(name, path),
             _ => Err(ExecError::InvalidExpr(
@@ -715,7 +742,7 @@ impl Executor {
             Stmt::UseDatabase { name } => require_any_grant(name),
             Stmt::Create { .. } => require(require_active()?, Perm::C),
             Stmt::Append { .. } | Stmt::Copy { .. } => require(require_active()?, Perm::U),
-            Stmt::Derive { .. } => require(require_active()?, Perm::C),
+            Stmt::Derive { .. } | Stmt::Xderive { .. } => require(require_active()?, Perm::C),
             Stmt::At { .. } | Stmt::Range { .. } | Stmt::Reduce { .. } => {
                 require(require_active()?, Perm::R)
             }
@@ -945,6 +972,11 @@ impl Executor {
         }
         let db_arc = self.active_db_arc()?;
         let mut state = db_arc.write().expect("db lock poisoned");
+        // Materialised lenses are engine-maintained — reject direct writes
+        // (their name is also in `base_types`, so this check must come first).
+        if state.xderived.contains_key(name) {
+            return Err(ExecError::MaterialisedLens(name.into()));
+        }
         let ty = state
             .base_types
             .get(name)
@@ -974,6 +1006,12 @@ impl Executor {
         state.next_layer_id += 1;
         let layer = Layer::new_sorted_unchecked(id, tau_vec, crate::model::now_ms());
         state.db.append(name, layer)?;
+        // Refresh any materialised views that read from this lens so a
+        // correction here propagates as a new (newest-wins) layer.
+        if !state.xderived.is_empty() {
+            let mut visited = HashSet::default();
+            rematerialise_dependents(&mut state, name, &mut visited)?;
+        }
         Ok(Output::Empty)
     }
 
@@ -1002,7 +1040,12 @@ impl Executor {
         self.write_layer(name, taus)
     }
 
-    fn derive_lens(&self, name: &str, expr: Expr) -> Result<Output, ExecError> {
+    fn derive_lens(
+        &self,
+        name: &str,
+        expr: Expr,
+        range: Option<(Timestamp, Timestamp)>,
+    ) -> Result<Output, ExecError> {
         let in_replay = self.in_replay;
         let db_arc = self.active_db_arc()?;
         let mut state = db_arc.write().expect("db lock poisoned");
@@ -1015,11 +1058,76 @@ impl Executor {
             return Err(ExecError::CycleDetected(name.into()));
         }
         if !in_replay {
-            state
-                .db
-                .append_schema(&format!("DERIVE LENS {name} AS {expr}"))?;
+            let stmt = Stmt::Derive {
+                name: name.into(),
+                expr: expr.clone(),
+                range,
+            };
+            state.db.append_schema(&stmt.to_string())?;
         }
         state.derived.insert(name.into(), expr);
+        if let Some(r) = range {
+            state.derived_ranges.insert(name.into(), r);
+        }
+        Ok(Output::Empty)
+    }
+
+    /// `XDERIVE LENS` - create a materialised lens: compute the expression now,
+    /// store the result as concrete layers, and register the definition so any
+    /// later write to a referenced lens re-materialises it (newest wins).
+    fn xderive_lens(
+        &self,
+        name: &str,
+        expr: Expr,
+        range: Option<(Timestamp, Timestamp)>,
+    ) -> Result<Output, ExecError> {
+        let db_arc = self.active_db_arc()?;
+        let mut state = db_arc.write().expect("db lock poisoned");
+
+        if self.in_replay {
+            // The materialised layers and the `base_types` entry are already
+            // restored (data via WAL replay, type via the persisted CREATE
+            // LENS). Only re-register the definition so future writes keep the
+            // view current — do not re-materialise or re-persist.
+            let deps = collect_deps(&state, &expr);
+            state
+                .xderived
+                .insert(name.into(), XderiveDef { expr, range, deps });
+            return Ok(Output::Empty);
+        }
+
+        if state.base_types.contains_key(name)
+            || state.derived.contains_key(name)
+            || state.xderived.contains_key(name)
+        {
+            return Err(ExecError::DuplicateLens(name.into()));
+        }
+        let mut visited = HashSet::default();
+        if would_cycle(&state.derived, name, &expr, &mut visited) {
+            return Err(ExecError::CycleDetected(name.into()));
+        }
+
+        let taus = crate::query::materialise_expr(&state, &expr, range)?;
+        let ty = infer_type(&taus).unwrap_or(Type::Int);
+        let deps = collect_deps(&state, &expr);
+
+        // Persist as a base lens (type + routing) plus the XDERIVE definition
+        // so a restart restores both the stored data and the auto-update rule.
+        state
+            .db
+            .append_schema(&format!("CREATE LENS {name} {ty}"))?;
+        let stmt = Stmt::Xderive {
+            name: name.into(),
+            expr: expr.clone(),
+            range,
+        };
+        state.db.append_schema(&stmt.to_string())?;
+
+        state.base_types.insert(name.into(), ty);
+        state
+            .xderived
+            .insert(name.into(), XderiveDef { expr, range, deps });
+        append_materialised_layer(&mut state, name, taus)?;
         Ok(Output::Empty)
     }
 
@@ -1162,7 +1270,9 @@ impl Executor {
         let mut state = db_arc.write().expect("db lock poisoned");
         let in_types = state.base_types.remove(name).is_some();
         let in_derived = state.derived.remove(name).is_some();
-        if in_types || in_derived {
+        state.derived_ranges.remove(name);
+        let in_xderived = state.xderived.remove(name).is_some();
+        if in_types || in_derived || in_xderived {
             state.db.drop_lens(name);
             if !in_replay {
                 state.db.append_schema(&format!("DROP LENS {name}"))?;
@@ -1241,7 +1351,22 @@ impl Executor {
             schema_stmts.push(format!("CREATE LENS {lens_name} {lens_type}"));
         }
         for (lens_name, expr) in &state.derived {
-            schema_stmts.push(format!("DERIVE LENS {lens_name} AS {expr}"));
+            let stmt = Stmt::Derive {
+                name: lens_name.clone(),
+                expr: expr.clone(),
+                range: state.derived_ranges.get(lens_name).copied(),
+            };
+            schema_stmts.push(stmt.to_string());
+        }
+        // Materialised lenses are already emitted as `CREATE LENS` + data above;
+        // emit the XDERIVE definition so the auto-update rule survives restore.
+        for (lens_name, def) in &state.xderived {
+            let stmt = Stmt::Xderive {
+                name: lens_name.clone(),
+                expr: def.expr.clone(),
+                range: def.range,
+            };
+            schema_stmts.push(stmt.to_string());
         }
 
         let bk_path = Path::new(path);
@@ -1318,6 +1443,95 @@ impl Executor {
     }
 }
 
+/// Infer a declared type for a materialised lens from its computed taus: the
+/// type of the first non-null value, or `None` when every value is null/empty.
+fn infer_type(taus: &[(Timestamp, Timestamp, Value)]) -> Option<Type> {
+    taus.iter().find_map(|(_, _, v)| v.ty())
+}
+
+/// Resolve the set of lens names whose writes should refresh a materialised
+/// view defined by `expr`.  Lazy derived lenses are inlined (their own deps are
+/// followed) so a leaf base-lens write still triggers the view; base and
+/// materialised lenses are recorded as opaque leaves.
+fn collect_deps(state: &DbState, expr: &Expr) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_deps_into(state, expr, &mut out);
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn collect_deps_into(state: &DbState, expr: &Expr, out: &mut Vec<String>) {
+    match expr {
+        Expr::Lit(_) => {}
+        Expr::Ident(name) | Expr::Agg { lens: name, .. } => {
+            if state.base_types.contains_key(name) {
+                out.push(name.clone());
+            } else if let Some(inner) = state.derived.get(name) {
+                let inner = inner.clone();
+                collect_deps_into(state, &inner, out);
+            } else {
+                // Unknown lens — record it so a later definition still wires up.
+                out.push(name.clone());
+            }
+        }
+        Expr::Unary { expr, .. } => collect_deps_into(state, expr, out),
+        Expr::Binary { lhs, rhs, .. } => {
+            collect_deps_into(state, lhs, out);
+            collect_deps_into(state, rhs, out);
+        }
+    }
+}
+
+/// Append a freshly computed materialised result as a new layer.  Engine-
+/// generated, so no per-tau type check — the value types come from the
+/// expression, not user input.  Newest layer wins at query time.
+fn append_materialised_layer(
+    state: &mut DbState,
+    name: &str,
+    taus: Vec<(Timestamp, Timestamp, Value)>,
+) -> Result<(), ExecError> {
+    if taus.is_empty() {
+        return Ok(());
+    }
+    let mut tau_vec: Vec<Tau<Value>> = taus
+        .into_iter()
+        .map(|(s, e, v)| Tau::new(s, e, v))
+        .collect();
+    tau_vec.sort_by_key(|t| t.start);
+    let id = state.next_layer_id;
+    state.next_layer_id += 1;
+    let layer = Layer::new_sorted_unchecked(id, tau_vec, crate::model::now_ms());
+    state.db.append(name, layer)?;
+    Ok(())
+}
+
+/// Re-materialise every view that depends on `changed` and, recursively, any
+/// views that depend on those (chained XDERIVEs).  `visited` makes the walk
+/// terminate; definition cycles are already rejected at `XDERIVE` time.
+fn rematerialise_dependents(
+    state: &mut DbState,
+    changed: &str,
+    visited: &mut HashSet<String>,
+) -> Result<(), ExecError> {
+    let targets: Vec<String> = state
+        .xderived
+        .iter()
+        .filter(|(mname, def)| def.deps.iter().any(|d| d == changed) && !visited.contains(*mname))
+        .map(|(mname, _)| mname.clone())
+        .collect();
+    for m in targets {
+        if !visited.insert(m.clone()) {
+            continue;
+        }
+        let def = state.xderived.get(&m).expect("present above").clone();
+        let taus = crate::query::materialise_expr(state, &def.expr, def.range)?;
+        append_materialised_layer(state, &m, taus)?;
+        rematerialise_dependents(state, &m, visited)?;
+    }
+    Ok(())
+}
+
 /// Returns `true` for the statement kinds that are deferred when a transaction
 /// is active.  Only lens-scoped mutations are buffered; database management,
 /// user management, and DDL that operates outside lens storage are not.
@@ -1329,6 +1543,7 @@ fn is_transactable(stmt: &Stmt) -> bool {
             | Stmt::BatchAppend { .. }
             | Stmt::Copy { .. }
             | Stmt::Derive { .. }
+            | Stmt::Xderive { .. }
             | Stmt::Drop { .. }
             | Stmt::SetTtl { .. }
             | Stmt::UnsetTtl { .. }

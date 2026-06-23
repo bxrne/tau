@@ -291,6 +291,9 @@ pub fn encode_error(e: &ExecError) -> String {
         ExecError::UnknownUser(n) => format!("unknown user: {n}"),
         ExecError::TransactionAlreadyActive => "transaction already active".into(),
         ExecError::NoActiveTransaction => "no active transaction".into(),
+        ExecError::MaterialisedLens(n) => {
+            format!("cannot write to materialised lens: {n}")
+        }
     }
 }
 
