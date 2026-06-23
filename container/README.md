@@ -125,34 +125,6 @@ The runtime base image is `scratch` — no shell, no `curl`. Use Prometheus:
 - `up{job="tau"}` = 1 means the server is reachable.
 - `GET /healthz` on the metrics port for Kubernetes/Nomad liveness probes.
 
-## Benchmarks
-
-`docker-compose.bench.yml` runs the `bench` crate's `benchtau` binary in a resource-capped,
-read-only, `cap_drop: ALL` container and writes a JSON results file to the `bench_results`
-volume. It builds its own ephemeral `tau` server in-process for the wire layer, so no separate
-`tau` service is required.
-
-```sh
-docker compose -f container/docker-compose.bench.yml up
-docker compose -f container/docker-compose.bench.yml run --rm bench
-```
-
-| Variable | Purpose | Default |
-|----------|---------|---------|
-| `TAU_BENCH_PRESET` | Config-grid preset (`quick`, `security`, `storage`, `full`) | `quick` |
-| `TAU_BENCH_SCALE` | Measured operations per workload | `1000` |
-| `TAU_BENCH_SEED` | RNG seed (deterministic workloads) | `42` |
-| `TAU_BENCH_CPU_LIMIT` | CPU limit passed to `deploy.resources.limits.cpus` | `1.0` |
-| `TAU_BENCH_MEM_LIMIT` | Memory limit passed to `deploy.resources.limits.memory` | `512M` |
-
-The output JSON has `seed`, `scale`, and a `results` array with `workload`, `cell` (the
-config-grid cell name, e.g. `tls`, `auth`, `disk_wal`), `layer` (`engine` or `wire`), `ops`,
-`throughput_ops_sec`, `p50_us`, and `p99_us`. The TLS and encryption-at-rest sections above
-correspond to the `tls`, `auth`, and `encryption` cells in the grid — see
-[`crates/bench/README.md`](../crates/bench/README.md) for the full grid definition and the
-[benchmarks docs](https://tau.bxrne.com/docs/benchmarks/) for methodology, caps, and published
-numbers.
-
 ## Production hardening checklist
 
 - [ ] Set strong `[auth] password` in `tau-config.toml` and `GRAFANA_PASSWORD` in `.env`

@@ -37,7 +37,6 @@ main_menu = [
           {url="/docs/testing/", name="Testing"},
           {url="/docs/configuration/", name="Configuration"},
           {url="/docs/containers/", name="Containers"},
-          {url="/docs/benchmarks/", name="Benchmarks"},
 ]
 
 menu_more = "show more"

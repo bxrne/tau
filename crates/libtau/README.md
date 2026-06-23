@@ -10,7 +10,7 @@ Three primitive types form everything:
 |------|-------------|
 | `Tau<V>` | An immutable value `V` over the half-open interval `[start, end)` |
 | `Layer<V>` | A sorted, non-overlapping batch of taus, `Arc`-backed so clones are pointer bumps |
-| lens | A named temporal function. **Base** lenses are storage-backed with a declared `Type`; **derived** lenses are a TauQL `Expr` AST evaluated lazily at query time (no caching). The executor tracks the two kinds in separate `DbState` maps — there is no single `Lens` type. |
+| lens | A named temporal function. **Base** lenses are storage-backed with a declared `Type`; **derived** lenses (`DERIVE`) are a TauQL `Expr` AST evaluated lazily at query time (no caching); **materialised** lenses (`XDERIVE`) evaluate the same expression eagerly into stored layers and auto-refresh when a source lens is corrected. The executor tracks these kinds in separate `DbState` maps — there is no single `Lens` type. |
 
 Layers are append-only; **newest-layer-wins** on overlap at query time. Auto-compaction merges N layers into one canonical layer when a per-lens threshold is crossed.
 
@@ -23,7 +23,7 @@ Layers are append-only; **newest-layer-wins** on overlap at query time. Auto-com
 | `query` | Pure query evaluator — `eval_lens`, `eval_expr`, aggregations |
 | `database` | `Database<V>` — wraps a store + optional WAL |
 | `storage` | `Store<V>` trait; `InMemory` and `Disk` implementations; `Wal` |
-| `ql` | `ast`, `parser` — TauQL grammar and statement types |
+| `ql` | `ast`, `parser` — TauQL grammar and statement types. Statement keywords are UPPERCASE-only; type names, aggregate functions and value literals are lowercase. `format_parse_error` renders a column-anchored, human-readable message instead of nom's debug output. |
 | `wire` | `Response` — shared wire codec for server encoder and client decoder |
 | `users` | `User`, `UserStore`, `Perm` — multi-user auth and CRUDA grants |
 | `value` | `Value` — the runtime value type with type-tagged codec |
@@ -55,12 +55,6 @@ let result = exec.exec_read(&stmt).unwrap();
 - `exec_as` / `exec_read_as` enforce CRUDA grants — used by the TCP server.
 - Append order: **WAL first, then store**. A WAL fsync failure leaves in-memory state unchanged.
 - `Database::layers()` returns `Option<Arc<Vec<Layer<V>>>>` — query phases share one snapshot without re-locking.
-
-## Benchmarking
-
-The `bench` crate drives `Executor` directly (no wire overhead) for its engine-layer
-workloads, using the same `Database`/`Store` constructors as the server. See
-`crates/bench/README.md`.
 
 ## Performance levers
 

@@ -35,10 +35,10 @@ No `libtau` storage code is imported. Divergences in libtau's sweep-line, compac
 
 ### Behavior tree (`src/btree.rs`)
 
-A static `LazyLock<Tree<SimCtx, Op>>` built from 20 closure-based [`libdst::btree::Leaf`] entries covering:
+A static `LazyLock<Tree<SimCtx, Op>>` built from 26 closure-based [`libdst::btree::Leaf`] entries covering:
 - `APPEND` (int, float, bool, str; default DB and aux DB)
-- `AT` / `RANGE` / `REDUCE` (base, derived, and mixed-type lenses)
-- `CREATE` / `DROP` / `DERIVE` lens operations
+- `AT` / `RANGE` / `REDUCE` (base, derived, materialised, and mixed-type lenses)
+- `CREATE` / `DROP` / `DERIVE` / `XDERIVE` lens operations (the materialised `XDERIVE` form optionally bounded by an `OVER` range)
 - `USE DATABASE` switching
 - `START TRANSACTION` / `COMMIT` / `ROLLBACK`
 - Extreme timestamp probes
@@ -76,13 +76,5 @@ After sequential profiles, `--concurrency N` spawns N reader threads checking RA
 ```bash
 cargo nextest run --release -p dst
 ```
-
-## Relationship to `bench`
-
-The `bench` crate's `ConfigCell`/grid (`crates/bench/src/grid.rs`) covers similar ground to the
-profile matrix in `src/profile/spec.rs`: both enumerate storage × WAL × TLS × auth ×
-encryption combinations, independently. A shared `ConfigMatrix` type that both crates build
-their cells/profiles from has been discussed but is **not yet implemented** — this section is a
-forward pointer for whoever picks that refactor up, not a description of current behavior.
 
 Tests in `src/sim.rs` run every profile variant across multiple seeds. Tests in `src/apply.rs`, `src/btree.rs`, and `src/oracle.rs` include `#[hegel::test]` property-based invariants.

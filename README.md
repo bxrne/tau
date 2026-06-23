@@ -43,7 +43,12 @@ VAL f18.5
 τ APPEND LENS temperature 0 3600 20.0   # correction: new layer over same range
 τ AT LENS temperature 1800
 VAL f20                                  # newest layer wins; prior value preserved
+
+τ DERIVE LENS fahrenheit AS temperature * 1.8 + 32   # lazy lens, recomputed at query time
+τ XDERIVE LENS fahrenheit_mat AS temperature * 1.8 + 32   # materialised: stored, auto-refreshes
 ```
+
+Casing carries meaning: **TauQL statement keywords are UPPERCASE** (`CREATE`, `APPEND`, `AT`, `DERIVE`, …), while **`tauctl`'s own meta-commands are lowercase** (`connect`, `use`, `load`). So `use` switches the active connection in the client, and `USE` switches the active database on the server.
 
 See the [tutorial](https://tau.bxrne.com/docs/tutorial/) for an end-to-end walkthrough and the [TauQL reference](https://tau.bxrne.com/docs/tauql/) for every statement. Storage, configuration, and testing are covered in [how it works](https://tau.bxrne.com/docs/how-it-works/), [configuration](https://tau.bxrne.com/docs/configuration/), and [testing](https://tau.bxrne.com/docs/testing/).
 
@@ -95,22 +100,6 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo nextest run --release
 cargo run --release --bin dst -- --seed 42
 ```
-
-## Benchmarks
-
-The `bench` crate runs deterministic workloads against `libtau::Executor` directly (engine
-layer) and against a live `tau` server over the wire (wire layer), across a grid of storage,
-WAL, TLS, auth, and encryption configurations.
-
-```bash
-cargo bench -p bench                                          # Divan microbenchmarks
-cargo run --release -p bench --bin benchtau -- --preset quick # table of throughput/latency
-docker compose -f container/docker-compose.bench.yml up       # resource-capped run -> JSON
-```
-
-Numbers are limited-scale, single-host, and always quoted alongside their seed, scale, cell,
-and caps. They are not competitive benchmarks. See the [benchmarks
-docs](https://tau.bxrne.com/docs/benchmarks/) for methodology and results.
 
 ## License
 

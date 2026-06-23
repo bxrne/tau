@@ -72,7 +72,7 @@ The algorithm is a **sweep-line normalisation**:
 
 The result is one canonical layer. **Every `AT`, `RANGE`, and `REDUCE` result is identical before and after compaction.** This equivalence is the central invariant of the storage model, and it is checked by the property-based test suite against randomised layer sequences on every build.
 
-Compaction fires automatically when a lens accumulates more layers than the configured threshold (default: 8). It is not a background job — it runs inline after the append that crosses the threshold. For disk-backed databases, compaction does not by itself force a full rewrite of the on-disk file: that checkpoint is throttled to every 8 compactions (or sooner if the WAL size cap is reached), keeping the per-append cost of the disk backend close to the in-memory backend. See [How it works](/docs/how-it-works/#write-ahead-log) and [Benchmarks](/docs/benchmarks/).
+Compaction fires automatically when a lens accumulates more layers than the configured threshold (default: 8). It is not a background job — it runs inline after the append that crosses the threshold. For disk-backed databases, compaction does not by itself force a full rewrite of the on-disk file: that checkpoint is throttled to every 8 compactions (or sooner if the WAL size cap is reached), keeping the per-append cost of the disk backend close to the in-memory backend. See [How it works](/docs/how-it-works/#write-ahead-log).
 
 ---
 

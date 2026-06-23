@@ -3,6 +3,5 @@
 	"crates/libdst": "0.1.1",
 	"crates/dst": "0.2.0",
 	"crates/tau": "0.4.0",
-	"crates/tauctl": "0.1.0",
-	"crates/bench": "0.1.0"
+	"crates/tauctl": "0.1.0"
 }

@@ -6,7 +6,7 @@ The core engine library. All binaries depend only on this crate.
 
 | Module | Purpose |
 |--------|---------|
-| `model` | `Tau<V>`, `Layer<V>` — the core temporal primitives (a "lens" is a named base/derived entry tracked by the executor, not a standalone type) |
+| `model` | `Tau<V>`, `Layer<V>` — the core temporal primitives (a "lens" is a named base/derived/materialised entry tracked by the executor, not a standalone type) |
 | `value` | `Value` enum (Int/Float/Str/Bool/Null) + tagged wire encoding |
 | `ql/ast` | TauQL AST (`Stmt`, `Expr`, `Literal`, `Type`, `BinOp` …) |
 | `ql/parser` | `nom`-based parser; entry point `parse()`, scalar helper `parse_literal()` |

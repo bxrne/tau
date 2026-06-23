@@ -6,7 +6,6 @@ members = [
     "crates/tau",
     "crates/tauctl",
     "crates/dst",
-    "crates/bench",
 ]
 
 [workspace.package]
@@ -49,4 +48,3 @@ hegeltest = "0.14.12"
 hegeltest-macros = "0.14.12"
 pretty_assertions = "1.4"
 tempfile = "3.27.0"
-divan = "0.1.21"

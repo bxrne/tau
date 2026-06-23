@@ -140,7 +140,7 @@ Auto-compaction fires when a lens exceeds a threshold (default: 8 layers, config
 
 This is O(E log E) where E is the total number of taus. After compaction, the lens has exactly one layer.
 
-`Store::append` returns a `bool` indicating whether compaction fired. The `Database` layer counts these and triggers a WAL-checkpoint every `CHECKPOINT_COMPACTION_INTERVAL` (8) compactions (or sooner, if `[wal] max_size_mb` is reached first) rather than on every single one — see [Benchmarks](/docs/benchmarks/) for the throughput impact on the disk backend.
+`Store::append` returns a `bool` indicating whether compaction fired. The `Database` layer counts these and triggers a WAL-checkpoint every `CHECKPOINT_COMPACTION_INTERVAL` (8) compactions (or sooner, if `[wal] max_size_mb` is reached first) rather than on every single one, which keeps the per-append cost of the disk backend close to the in-memory backend.
 
 ---
 

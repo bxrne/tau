@@ -17,10 +17,28 @@ cargo install --git https://github.com/bxrne/tau tauctl
 
 Launches a ratatui TUI when stdout is a TTY. Exits with an error if stdout is not a terminal.
 
+The screen has four panes: an input box plus three read-only panes — **Connections**, **Results**, and **Log** — each tagged with a lazygit-style number badge (`[1]`/`[2]`/`[3]`).
 
-Key bindings: `Enter` submits, `↑`/`↓` navigate history, `Ctrl-C` quits.
+### Key bindings
+
+| Key | Action |
+|-----|--------|
+| `Enter` | Submit the query |
+| `↑` / `↓` | Navigate input history (in the input box) |
+| `Alt`+`1`/`2`/`3` | Focus the Connections / Results / Log pane (works mid-edit) |
+| `Esc` / `i` | Return focus to the input box |
+| `j`/`k`, `↑`/`↓` | Move the selection / scroll within a focused pane |
+| `Enter` (Connections) | Activate the highlighted connection (`use`) |
+| `y` | Copy the focused pane to the clipboard |
+| `Ctrl-Y` | Copy the Results pane from anywhere |
+| paste | Bracketed paste lands in the input box |
+| `Ctrl-C` | Quit |
+
+Clipboard copy uses OSC 52, so it works over SSH and on terminals without a native clipboard binding. Parse failures from the server are shown as a column-anchored message (e.g. `parse error at column 4: near \`...\``) rather than a raw debug dump.
 
 ## Built-in commands
+
+`tauctl` meta-commands are **lowercase** — this is what distinguishes them from UPPERCASE TauQL, which is forwarded to the server. For example, lowercase `use` switches the active connection here, while UPPERCASE `USE` switches the active database on the server.
 
 | Command | Description |
 |---------|-------------|

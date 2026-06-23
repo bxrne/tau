@@ -118,6 +118,5 @@ cargo run --release --bin tau -- --config cfg.toml  # with config file
 ## Test harness
 
 `tau::harness::EphemeralServer` and `HarnessOpts` spawn this server on `127.0.0.1:0` with an
-in-memory or supplied `Executor`, with optional TLS and auth. They back the DST wire profiles
-and the `bench` crate's wire layer (`cargo run -p bench --bin benchtau`), so any change to the
-accept loop or auth handshake here is exercised by both.
+in-memory or supplied `Executor`, with optional TLS and auth. They back the DST wire profiles,
+so any change to the accept loop or auth handshake here is exercised by simulation testing.

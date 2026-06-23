@@ -83,10 +83,9 @@ idle_timeout_secs = 300     # omit to disable (default: no timeout)
 | `path` | (none) | Directory for the per-database `.dat` files — required when `backend = "disk"`. |
 | `compression_level` | `3` | zstd compression level applied when the disk store flushes. Range 1–22: 1 is fastest with least compression, 22 is best ratio but slowest. |
 
-For the throughput impact of `compression_level` and `compact_threshold` (a checkpoint on the
-disk backend flushes and recompresses the file; checkpoints fire at most every 8 compactions,
-or sooner if `[wal].max_size_mb` is reached), see the storage grid results in
-[Benchmarks](/docs/benchmarks/).
+`compression_level` and `compact_threshold` trade write throughput against on-disk size: a
+checkpoint on the disk backend flushes and recompresses the file, and checkpoints fire at most
+every 8 compactions (or sooner if `[wal].max_size_mb` is reached).
 
 With `backend = "disk"`, each database gets a `<name>.dat` file plus a
 `<name>.wal` file in `[disk].path`. `APPEND` writes go to the WAL first
