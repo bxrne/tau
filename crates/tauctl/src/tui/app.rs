@@ -12,6 +12,40 @@ pub(super) struct LogEntry {
     pub(super) is_err: bool,
 }
 
+/// Which pane currently has keyboard focus.  `Input` is the editing prompt
+/// (the default); the other three are read-only panes you navigate with
+/// lazygit-style number keys.  Each non-input variant carries the digit shown
+/// in its title badge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    Input,
+    Connections,
+    Results,
+    Log,
+}
+
+impl Focus {
+    /// The pane bound to number key `n` (1-3), if any.
+    pub fn from_digit(n: u32) -> Option<Self> {
+        match n {
+            1 => Some(Focus::Connections),
+            2 => Some(Focus::Results),
+            3 => Some(Focus::Log),
+            _ => None,
+        }
+    }
+
+    /// The badge digit rendered in this pane's title, if it is navigable.
+    pub fn digit(self) -> Option<u8> {
+        match self {
+            Focus::Connections => Some(1),
+            Focus::Results => Some(2),
+            Focus::Log => Some(3),
+            Focus::Input => None,
+        }
+    }
+}
+
 pub struct App {
     pub net: NetHandle,
     /// Rendered connection list: (name, addr, is_active, is_tls).
@@ -25,6 +59,12 @@ pub struct App {
     /// Status bar message.
     pub status: String,
     pub should_quit: bool,
+    /// Pane with keyboard focus.
+    pub focus: Focus,
+    /// Highlighted row in the connections pane (when focused).
+    pub conn_sel: usize,
+    /// Scroll offset (rows from the top) for the log pane when focused.
+    pub log_scroll: u16,
 }
 
 impl App {
@@ -37,7 +77,78 @@ impl App {
             pending: false,
             status: "Ready".into(),
             should_quit: false,
+            focus: Focus::Input,
+            conn_sel: 0,
+            log_scroll: 0,
         }
+    }
+
+    /// Move focus to `target`.  Resets per-pane navigation state so a freshly
+    /// focused pane starts at a sensible position.
+    pub fn focus_pane(&mut self, target: Focus) {
+        self.focus = target;
+        match target {
+            Focus::Connections => {
+                self.conn_sel = self.conn_sel.min(self.connections.len().saturating_sub(1))
+            }
+            Focus::Log => self.log_scroll = 0,
+            _ => {}
+        }
+    }
+
+    /// Plain-text rendering of a pane, used for clipboard copy.
+    pub fn pane_text(&self, focus: Focus) -> String {
+        match focus {
+            Focus::Connections => self
+                .connections
+                .iter()
+                .map(|(name, addr, active, tls)| {
+                    let marker = if *active { "* " } else { "  " };
+                    let tls = if *tls { " [tls]" } else { "" };
+                    format!("{marker}{name}  {addr}{tls}")
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+            Focus::Results | Focus::Input => self
+                .last_response
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_default(),
+            Focus::Log => self
+                .log
+                .iter()
+                .map(|e| {
+                    if e.query.is_empty() {
+                        e.response.clone()
+                    } else {
+                        format!("{} -> {}", e.query, e.response)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        }
+    }
+
+    /// Move the connection selection by `delta`, saturating at the ends.
+    pub fn select_conn(&mut self, delta: isize) {
+        if self.connections.is_empty() {
+            return;
+        }
+        let last = self.connections.len() - 1;
+        self.conn_sel = (self.conn_sel as isize + delta).clamp(0, last as isize) as usize;
+    }
+
+    /// Activate (`USE`) the currently highlighted connection.
+    pub fn activate_selected_conn(&mut self) {
+        if let Some((name, ..)) = self.connections.get(self.conn_sel) {
+            self.send_io(IoRequest::Use(name.clone()));
+        }
+    }
+
+    /// Scroll the log pane by `delta` rows, saturating at the top.
+    pub fn scroll_log(&mut self, delta: isize) {
+        let next = (self.log_scroll as isize + delta).max(0);
+        self.log_scroll = next as u16;
     }
 
     /// Submit a query line.  Called by the input handler; does not block.
@@ -182,6 +293,9 @@ mod tests {
             pending: false,
             status: "Ready".into(),
             should_quit: false,
+            focus: Focus::Input,
+            conn_sel: 0,
+            log_scroll: 0,
         };
         (app, tx_resp)
     }
@@ -338,6 +452,74 @@ mod tests {
         app.drain();
         assert_eq!(app.log.len(), 3);
         assert_eq!(app.status, "third");
+    }
+
+    #[test]
+    fn focus_from_digit_maps_panes() {
+        assert_eq!(Focus::from_digit(1), Some(Focus::Connections));
+        assert_eq!(Focus::from_digit(2), Some(Focus::Results));
+        assert_eq!(Focus::from_digit(3), Some(Focus::Log));
+        assert_eq!(Focus::from_digit(4), None);
+    }
+
+    #[test]
+    fn select_conn_saturates_at_bounds() {
+        let (mut app, _tx) = test_app();
+        app.connections = vec![
+            ("a".into(), "x".into(), true, false),
+            ("b".into(), "y".into(), false, false),
+        ];
+        app.select_conn(-1);
+        assert_eq!(app.conn_sel, 0, "cannot go above the first row");
+        app.select_conn(1);
+        assert_eq!(app.conn_sel, 1);
+        app.select_conn(5);
+        assert_eq!(app.conn_sel, 1, "cannot go past the last row");
+    }
+
+    #[test]
+    fn scroll_log_saturates_at_top() {
+        let (mut app, _tx) = test_app();
+        app.scroll_log(3);
+        assert_eq!(app.log_scroll, 3);
+        app.scroll_log(-10);
+        assert_eq!(app.log_scroll, 0);
+    }
+
+    #[test]
+    fn activate_selected_conn_sends_use() {
+        let (tx_req, rx_req) = mpsc::channel::<IoRequest>();
+        let (_tx_resp, rx_resp) = mpsc::channel::<IoResponse>();
+        let mut app = App {
+            net: NetHandle::test_pair(tx_req, rx_resp),
+            connections: vec![("prod".into(), "10.0.0.1:7070".into(), false, true)],
+            log: vec![],
+            last_response: None,
+            pending: false,
+            status: "Ready".into(),
+            should_quit: false,
+            focus: Focus::Connections,
+            conn_sel: 0,
+            log_scroll: 0,
+        };
+        app.activate_selected_conn();
+        match rx_req.try_recv() {
+            Ok(IoRequest::Use(name)) => assert_eq!(name, "prod"),
+            other => panic!("expected Use(prod), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pane_text_renders_log_and_connections() {
+        let (mut app, _tx) = test_app();
+        app.connections = vec![("dev".into(), "127.0.0.1:7070".into(), true, false)];
+        app.log = vec![LogEntry {
+            query: "AT LENS x 0".into(),
+            response: "VAL i42".into(),
+            is_err: false,
+        }];
+        assert_eq!(app.pane_text(Focus::Connections), "* dev  127.0.0.1:7070");
+        assert_eq!(app.pane_text(Focus::Log), "AT LENS x 0 -> VAL i42");
     }
 
     #[test]

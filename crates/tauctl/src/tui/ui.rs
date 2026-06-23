@@ -13,16 +13,34 @@ use tui_textarea::TextArea;
 
 use libtau::{Response, storage::Codec};
 
-use super::app::App;
+use super::app::{App, Focus};
 
 const ACCENT: Color = Color::Rgb(255, 168, 106);
 
-fn panel(title: impl std::fmt::Display, border_color: Color) -> Block<'static> {
-    Block::default()
+/// Border colour for a pane given whether it currently holds focus.
+fn border_for(focused: bool) -> Color {
+    if focused { ACCENT } else { Color::DarkGray }
+}
+
+/// A bordered panel.  When `badge` is set, a lazygit-style number chip is shown
+/// at the left of the title so the pane can be reached with Alt+<n>.
+fn panel(title: impl std::fmt::Display, border_color: Color, badge: Option<u8>) -> Block<'static> {
+    let mut block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(border_color))
-        .title(format!(" {title} "))
+        .border_style(Style::default().fg(border_color));
+    if let Some(n) = badge {
+        block = block.title(Line::from(vec![
+            Span::styled(
+                format!(" [{n}] "),
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(format!("{title} ")),
+        ]));
+    } else {
+        block = block.title(format!(" {title} "));
+    }
+    block
 }
 
 /// Draw the full TUI.
@@ -59,12 +77,18 @@ pub fn draw(f: &mut Frame, app: &App, input: &TextArea) {
 }
 
 fn draw_connections(f: &mut Frame, app: &App, area: Rect) {
-    let border_color = if app.pending { ACCENT } else { Color::DarkGray };
+    let focused = app.focus == Focus::Connections;
+    let border_color = if focused || app.pending {
+        ACCENT
+    } else {
+        Color::DarkGray
+    };
 
     let items: Vec<ListItem> = app
         .connections
         .iter()
-        .map(|(name, addr, active, tls)| {
+        .enumerate()
+        .map(|(i, (name, addr, active, tls))| {
             let tls_tag = if *tls {
                 Span::styled(
                     " [tls]",
@@ -73,9 +97,19 @@ fn draw_connections(f: &mut Frame, app: &App, area: Rect) {
             } else {
                 Span::raw("")
             };
-            if *active {
-                ListItem::new(Line::from(vec![
-                    Span::styled("▶ ", Style::default().fg(ACCENT)),
+            // While the pane is focused, the highlighted row gets a cursor and
+            // a reverse-video sweep so navigation is visible.
+            let selected = focused && i == app.conn_sel;
+            let cursor = if selected {
+                "› "
+            } else if *active {
+                "▶ "
+            } else {
+                "  "
+            };
+            let mut line = if *active {
+                Line::from(vec![
+                    Span::styled(cursor, Style::default().fg(ACCENT)),
                     Span::styled(
                         name.as_str(),
                         Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
@@ -85,30 +119,41 @@ fn draw_connections(f: &mut Frame, app: &App, area: Rect) {
                         Style::default().fg(ACCENT).add_modifier(Modifier::DIM),
                     ),
                     tls_tag,
-                ]))
+                ])
             } else {
-                ListItem::new(Line::from(vec![
-                    Span::raw("  "),
+                Line::from(vec![
+                    Span::raw(cursor),
                     Span::styled(
                         format!("{name}  {addr}"),
                         Style::default().add_modifier(Modifier::DIM),
                     ),
                     tls_tag,
-                ]))
+                ])
+            };
+            if selected {
+                line = line.style(Style::default().add_modifier(Modifier::REVERSED));
             }
+            ListItem::new(line)
         })
         .collect();
 
-    let list = List::new(items).block(panel("Connections", border_color));
+    let list = List::new(items).block(panel(
+        "Connections",
+        border_color,
+        Focus::Connections.digit(),
+    ));
     f.render_widget(list, area);
 }
 
 fn draw_results(f: &mut Frame, app: &App, area: Rect) {
+    let focused = app.focus == Focus::Results;
+    let base = border_for(focused);
+    let badge = Focus::Results.digit();
     match &app.last_response {
         None => {
             let p = Paragraph::new("no query yet")
                 .style(Style::default().fg(Color::DarkGray))
-                .block(panel("Results", Color::DarkGray));
+                .block(panel("Results", base, badge));
             f.render_widget(p, area);
         }
         Some(Response::Range(segs)) => {
@@ -138,7 +183,7 @@ fn draw_results(f: &mut Frame, app: &App, area: Rect) {
             let title = format!("Results  {} segments", segs.len());
             let table = Table::new(rows, widths)
                 .header(header)
-                .block(panel(title, Color::DarkGray));
+                .block(panel(title, base, badge));
             f.render_stateful_widget(table, area, &mut TableState::default());
         }
         Some(Response::Names(names)) => {
@@ -152,19 +197,21 @@ fn draw_results(f: &mut Frame, app: &App, area: Rect) {
                 })
                 .collect();
             let title = format!("Results  {} names", names.len());
-            let list = List::new(items).block(panel(title, Color::DarkGray));
+            let list = List::new(items).block(panel(title, base, badge));
             f.render_widget(list, area);
         }
         Some(other) => {
-            let (color, border_color) = if other.is_err() {
-                (Color::Red, Color::Red)
+            // Errors override the focus colour so a failure is unmissable; the
+            // leading ✗ marks it even on a monochrome terminal.
+            let (text, color, border_color) = if other.is_err() {
+                (format!("✗ {other}"), Color::Red, Color::Red)
             } else {
-                (Color::Green, Color::DarkGray)
+                (other.to_string(), Color::Green, base)
             };
-            let p = Paragraph::new(other.to_string())
+            let p = Paragraph::new(text)
                 .style(Style::default().fg(color))
                 .wrap(Wrap { trim: false })
-                .block(panel("Results", border_color));
+                .block(panel("Results", border_color, badge));
             f.render_widget(p, area);
         }
     }
@@ -175,11 +222,18 @@ fn draw_input(f: &mut Frame, input: &TextArea, area: Rect) {
 }
 
 fn draw_log(f: &mut Frame, app: &App, area: Rect) {
+    let focused = app.focus == Focus::Log;
+    let visible = area.height.saturating_sub(2) as usize;
+    // Newest first; `log_scroll` walks the window back into older entries, but
+    // never past the point where the oldest entry would scroll off the bottom.
+    let max_scroll = app.log.len().saturating_sub(visible);
+    let skip = (app.log_scroll as usize).min(max_scroll);
     let items: Vec<ListItem> = app
         .log
         .iter()
         .rev()
-        .take(area.height.saturating_sub(2) as usize)
+        .skip(skip)
+        .take(visible)
         .map(|e| {
             let (query_style, sep_style, resp_style) = if e.is_err {
                 (
@@ -207,8 +261,12 @@ fn draw_log(f: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
-    let title = format!("Log  {}", app.log.len());
-    let list = List::new(items).block(panel(title, Color::DarkGray));
+    let title = if skip > 0 {
+        format!("Log  {}  (+{skip})", app.log.len())
+    } else {
+        format!("Log  {}", app.log.len())
+    };
+    let list = List::new(items).block(panel(title, border_for(focused), Focus::Log.digit()));
     f.render_widget(list, area);
 }
 
@@ -225,12 +283,36 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
             (Color::DarkGray, status_str)
         };
 
-    let hints = "Ctrl-C quit · Alt+↵ newline";
+    // The leading mode chip mirrors the focused pane so the active key set is
+    // always obvious; hints follow the mode.
+    let (mode, hints) = match app.focus {
+        Focus::Input => (
+            " INPUT ",
+            "↵ run · Alt+1/2/3 panes · Ctrl-Y copy · Ctrl-C quit",
+        ),
+        Focus::Connections => (
+            " CONN ",
+            "j/k move · ↵ use · y copy · 1/2/3 panes · i input",
+        ),
+        Focus::Results => (" RESULT ", "y copy · 1/2/3 panes · i input · Ctrl-C quit"),
+        Focus::Log => (" LOG ", "j/k scroll · y copy · 1/2/3 panes · i input"),
+    };
+
+    let mode_span = Span::styled(
+        mode,
+        Style::default()
+            .fg(Color::Black)
+            .bg(ACCENT)
+            .add_modifier(Modifier::BOLD),
+    );
+
+    let mode_len = mode.chars().count();
     let text_len = text.chars().count() + 1;
     let hints_len = hints.chars().count() + 1;
-    let gap = (area.width as usize).saturating_sub(text_len + hints_len);
+    let gap = (area.width as usize).saturating_sub(mode_len + text_len + hints_len);
 
     let line = Line::from(vec![
+        mode_span,
         Span::styled(format!(" {text}"), Style::default().fg(fg)),
         Span::raw(" ".repeat(gap)),
         Span::styled(format!("{hints} "), Style::default().fg(Color::DarkGray)),
@@ -266,7 +348,7 @@ mod tests {
     use libtau::{Response, Value};
     use ratatui::{Terminal, backend::TestBackend};
 
-    use super::super::app::App;
+    use super::super::app::{App, Focus};
     use super::super::net::{IoRequest, IoResponse, NetHandle};
     use super::*;
 
@@ -281,6 +363,9 @@ mod tests {
             pending: false,
             status: "Ready".into(),
             should_quit: false,
+            focus: Focus::Input,
+            conn_sel: 0,
+            log_scroll: 0,
         }
     }
 
@@ -388,6 +473,37 @@ mod tests {
         ];
         let input = build_input_area("τ", "");
         t.draw(|f| draw(f, &app, &input)).unwrap();
+    }
+
+    #[test]
+    fn draw_renders_pane_badges() {
+        let mut t = terminal();
+        let app = test_app();
+        let input = build_input_area("τ", "");
+        t.draw(|f| draw(f, &app, &input)).unwrap();
+        let content: String = t
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol().to_owned())
+            .collect();
+        assert!(content.contains("[1]"), "connections badge");
+        assert!(content.contains("[2]"), "results badge");
+        assert!(content.contains("[3]"), "log badge");
+    }
+
+    #[test]
+    fn draw_does_not_panic_with_focused_panes() {
+        for focus in [Focus::Connections, Focus::Results, Focus::Log] {
+            let mut t = terminal();
+            let mut app = test_app();
+            app.focus = focus;
+            app.connections = vec![("dev".into(), "127.0.0.1:7070".into(), true, false)];
+            app.last_response = Some(Response::Ok);
+            let input = build_input_area("τ", "");
+            t.draw(|f| draw(f, &app, &input)).unwrap();
+        }
     }
 
     #[test]
