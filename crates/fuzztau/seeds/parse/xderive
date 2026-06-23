@@ -1,0 +1,2 @@
+XDERIVE LENS doubled AS temp * 2
+XDERIVE LENS w AS a + b OVER 0 86400
