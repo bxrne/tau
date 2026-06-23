@@ -37,10 +37,14 @@ path = "fuzz_targets/parse_literal.rs"
 test = false
 doc = false
 
+[[bin]]
+name = "disk_decode"
+path = "fuzz_targets/disk_decode.rs"
+test = false
+doc = false
+
 [dependencies]
 libtau = { path = "../libtau" }
-tracing = "0.1"
-tracing-subscriber = "0.3"
 
 [dependencies.libfuzzer-sys]
 version = "0.4"

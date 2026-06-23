@@ -4,15 +4,26 @@ LibFuzzer fuzz targets for `libtau`. Requires a nightly Rust toolchain.
 
 ## Targets
 
-| Target | Entry point | Attack surface |
-|--------|------------|----------------|
-| `parse` | `libtau::parse` | `nom` parser — TauQL grammar |
-| `wire` | `libtau::Response::parse` | Wire decoder — response line grammar |
-| `value_decode` | `libtau::Value::decode` (via `Codec`) | Value encoding used in wire `VAL` / `RANGE` segments |
-| `perm_parse` | `libtau::Perm::parse` | Permission letter parsing (`CRUDA`, `*`, `-`) used in wire and users file |
-| `parse_literal` | `libtau::parse_literal` | Public helper for single-literal bulk loads |
+| Target | Entry point | Input | Attack surface |
+|--------|------------|-------|----------------|
+| `parse` | `libtau::parse` | UTF-8 | `nom` parser — TauQL grammar |
+| `wire` | `libtau::Response::parse` | UTF-8 | Wire decoder — response line grammar |
+| `value_decode` | `libtau::Value::decode` (via `Codec`) | UTF-8 | Value encoding used in wire `VAL` / `RANGE` segments |
+| `perm_parse` | `libtau::Perm::parse` | UTF-8 | Permission letter parsing (`CRUDA`, `*`, `-`) used in wire and users file |
+| `parse_literal` | `libtau::parse_literal` | UTF-8 | Public helper for single-literal bulk loads |
+| `disk_decode` | `Disk::<Value>::decode_payload_bytes` / `decode_image_bytes` | **raw bytes** | **Binary** on-disk `.dat` deserialization — the path a corrupted file flows through |
 
-All targets assert a single property: **no panic or crash on any input** (including malformed UTF-8 where the API takes `&str`). Correctness is covered by unit + Hegel PBT tests in `libtau`.
+All targets assert a single property: **no panic, crash, or OOM on any input** (the runs cap RSS at 2 GiB). The text targets gate on `&str`; `disk_decode` takes raw bytes — it is the only target exercising the binary deserialization layer, where corruption can desync length prefixes and interval bounds. Correctness is covered by unit + Hegel PBT tests in `libtau`.
+
+`disk_decode` exposes two entry points: `decode_payload_bytes` hits the schema/entry/interval parsing directly (high signal — a blind fuzzer would otherwise be stuck on the CRC header and zstd frame), and `decode_image_bytes` runs the full header + decrypt + zstd + payload path. Both found real bugs on first run — an OOM from an unbounded `Value::Str` length and a panic on overlapping decoded taus — now fixed and pinned by the `seeds/disk_decode/regression-*` inputs.
+
+## Dictionary
+
+`tauql.dict` lists TauQL tokens (UPPERCASE keywords, lowercase type/agg/literal words, operators, punctuation, and wire tokens) so the mutator assembles structurally-valid inputs faster. Pass it to the text targets with `-dict=crates/fuzztau/tauql.dict`.
+
+## CI
+
+The `fuzz` CI job builds every target (`cargo fuzz check`) and then runs `parse`, `wire`, and `disk_decode` time-boxed (`FUZZ_TIME` seconds each, default 45) seeded from `seeds/` and the dictionary. A crash, panic, or OOM fails the job and uploads the reproducer as the `fuzz-artifacts` artifact.
 
 ## Quick start
 
@@ -31,16 +42,20 @@ cargo +nightly fuzz run --fuzz-dir crates/fuzztau value_decode crates/fuzztau/co
 cargo +nightly fuzz run --fuzz-dir crates/fuzztau perm_parse crates/fuzztau/corpus/perm_parse
 cargo +nightly fuzz run --fuzz-dir crates/fuzztau parse_literal crates/fuzztau/corpus/parse_literal
 
-# Or pass seeds/ directly for a short session (note: libFuzzer will append interesting cases to it):
-cargo +nightly fuzz run --fuzz-dir crates/fuzztau wire crates/fuzztau/seeds/wire \
-    -- -max_total_time=60 -print_final_stats=1
+# Text targets benefit from the dictionary:
+cargo +nightly fuzz run --fuzz-dir crates/fuzztau parse crates/fuzztau/seeds/parse \
+    -- -max_total_time=60 -dict=crates/fuzztau/tauql.dict -print_final_stats=1
+
+# Binary target — raw bytes, no dictionary:
+cargo +nightly fuzz run --fuzz-dir crates/fuzztau disk_decode crates/fuzztau/seeds/disk_decode \
+    -- -max_total_time=60 -rss_limit_mb=2048
 ```
 
-Run from the workspace root (`/path/to/tau`).
+Run from the workspace root (`/path/to/tau`). Note: passing a `seeds/` dir directly makes libFuzzer append interesting cases to it — prefer a `corpus/` dir (below) for long runs to keep committed seeds minimal.
 
 ## Seed corpus
 
-`seeds/{parse,wire,value_decode,perm_parse,parse_literal}/` contain hand-crafted valid and boundary inputs for each surface. These are committed so every run starts from a useful base.
+`seeds/{parse,wire,value_decode,perm_parse,parse_literal,disk_decode}/` contain hand-crafted valid and boundary inputs for each surface, plus pinned regression reproducers under `disk_decode/`. These are committed so every run (and CI) starts from a useful base.
 
 The fuzzer's working corpus grows in `corpus/` (gitignored). Minimise after long runs:
 

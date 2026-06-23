@@ -93,15 +93,22 @@ See [Deterministic Simulation Testing](/docs/dst/) for architecture and operatio
 
 Fuzz targets exercise the untrusted-input surfaces:
 
-| Target | Entry point | What it finds |
-|--------|------------|---------------|
-| `parse` | `libtau::parse` | Panics / OOMs / loops in the TauQL `nom` parser |
-| `wire` | `libtau::Response::parse` | Wire response decoder (different grammar, splitting, integer parsing) |
-| `value_decode` | `libtau::Value::decode` | Value codec used inside `VAL` / `RANGE` wire segments (escapes, tags) |
-| `perm_parse` | `libtau::Perm::parse` | Permission bitmap parser (`CRUDA`, `*`, `-`) used by wire `GRANTS` and users file |
-| `parse_literal` | `libtau::parse_literal` | Single-literal parser used by bulk/COPY paths |
+| Target | Entry point | Input | What it finds |
+|--------|------------|-------|---------------|
+| `parse` | `libtau::parse` | UTF-8 | Panics / OOMs / loops in the TauQL `nom` parser |
+| `wire` | `libtau::Response::parse` | UTF-8 | Wire response decoder (different grammar, splitting, integer parsing) |
+| `value_decode` | `libtau::Value::decode` | UTF-8 | Value codec used inside `VAL` / `RANGE` wire segments (escapes, tags) |
+| `perm_parse` | `libtau::Perm::parse` | UTF-8 | Permission bitmap parser (`CRUDA`, `*`, `-`) used by wire `GRANTS` and users file |
+| `parse_literal` | `libtau::parse_literal` | UTF-8 | Single-literal parser used by bulk/COPY paths |
+| `disk_decode` | `Disk::<Value>::decode_payload_bytes` / `decode_image_bytes` | **raw bytes** | **Binary** on-disk `.dat` deserialization — the corrupted-file path |
 
-**Seed corpus:** `crates/fuzztau/seeds/{parse,wire,value_decode,perm_parse,parse_literal}/` — small committed sets of valid + boundary cases. The working corpus grows in the gitignored `crates/fuzztau/corpus/` and can be minimised with `cargo fuzz cmin`.
+The text targets gate on `&str`; `disk_decode` is the only one taking **raw bytes**, exercising the binary deserialization layer where corruption desyncs length prefixes and interval bounds. It found two real bugs on its first run — an OOM from an unbounded `Value::Str` length and a panic on overlapping decoded taus — both fixed and pinned by `seeds/disk_decode/regression-*`. (DST's disk/WAL corruption faults earlier caught the inverted-interval panic in the same layer; fuzzing and DST are complementary here.)
+
+**Dictionary:** `crates/fuzztau/tauql.dict` lists TauQL/wire tokens; pass it to the text targets with `-dict=crates/fuzztau/tauql.dict` for faster structural coverage.
+
+**Seed corpus:** `crates/fuzztau/seeds/{parse,wire,value_decode,perm_parse,parse_literal,disk_decode}/` — small committed sets of valid + boundary cases (plus regression reproducers). The working corpus grows in the gitignored `crates/fuzztau/corpus/` and can be minimised with `cargo fuzz cmin`.
+
+**CI:** the `fuzz` job builds every target then runs `parse`, `wire`, and `disk_decode` time-boxed (45 s each) with the dictionary and seeds; a crash/panic/OOM fails the job and uploads the reproducer.
 
 **Prerequisites:** a nightly Rust toolchain (`rustup toolchain install nightly`).
 
@@ -113,11 +120,13 @@ mkdir -p crates/fuzztau/corpus/wire && cp crates/fuzztau/seeds/wire/* crates/fuz
 mkdir -p crates/fuzztau/corpus/parse && cp crates/fuzztau/seeds/parse/* crates/fuzztau/corpus/parse/ 2>/dev/null || true
 
 # Run a target (ctrl-c to stop; add -- -max_total_time=N to bound the session)
-cargo +nightly fuzz run --fuzz-dir crates/fuzztau wire crates/fuzztau/corpus/wire
-cargo +nightly fuzz run --fuzz-dir crates/fuzztau parse crates/fuzztau/corpus/parse
+# Text targets take the dictionary; the binary target takes raw bytes.
+cargo +nightly fuzz run --fuzz-dir crates/fuzztau parse crates/fuzztau/corpus/parse -- -dict=crates/fuzztau/tauql.dict
+cargo +nightly fuzz run --fuzz-dir crates/fuzztau wire crates/fuzztau/corpus/wire -- -dict=crates/fuzztau/tauql.dict
 cargo +nightly fuzz run --fuzz-dir crates/fuzztau value_decode crates/fuzztau/corpus/value_decode
 cargo +nightly fuzz run --fuzz-dir crates/fuzztau perm_parse crates/fuzztau/corpus/perm_parse
 cargo +nightly fuzz run --fuzz-dir crates/fuzztau parse_literal crates/fuzztau/corpus/parse_literal
+cargo +nightly fuzz run --fuzz-dir crates/fuzztau disk_decode crates/fuzztau/seeds/disk_decode -- -rss_limit_mb=2048
 
 # Minimise a corpus after a long run (keeps high coverage, drops redundant inputs)
 cargo +nightly fuzz cmin --fuzz-dir crates/fuzztau wire  crates/fuzztau/corpus/wire
@@ -139,4 +148,4 @@ cargo +nightly fuzz run --fuzz-dir crates/fuzztau wire crates/fuzztau/artifacts/
 | Unit tests | Regressions on known-shape behaviour | Always (CI) |
 | Hegel PBT | Invariant violations across random inputs | Always (inline with unit tests) |
 | libdst / dst | SUT vs reference divergence under emergent workloads | CI (after nextest, before Docker) |
-| cargo-fuzz | Panics and crashes from adversarial byte sequences on parsers/codecs | On demand / scheduled CI |
+| cargo-fuzz | Panics, crashes, and OOMs from adversarial bytes on the text parsers and the binary `.dat` decoder | Time-boxed every CI run (build-check all targets; run `parse`/`wire`/`disk_decode`), plus on demand |

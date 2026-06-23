@@ -34,6 +34,9 @@ const HEADER_LEN: usize = 4 + 1 + 1 + 4; // magic + version + flags + crc32
 /// corrupted length field must not be able to trigger an oversized allocation;
 /// genuine data simply grows the vec past this hint.
 const MAX_PREALLOC_TAUS: usize = 1 << 16;
+
+/// A decoded disk image: the schema DDL strings plus the per-lens layer stacks.
+type DecodedImage<V> = (Vec<String>, HashMap<String, Vec<Layer<V>>>);
 /// Default zstd compression level. Valid range is 1–22; higher = better ratio, slower.
 pub const DEFAULT_ZSTD_LEVEL: i32 = 3;
 
@@ -215,77 +218,13 @@ impl<V: Clone + Codec> Disk<V> {
     /// Open existing store or create new one at `path`.
     pub fn open(path: impl AsRef<Path>, key: Option<[u8; 32]>) -> io::Result<Self> {
         let path = path.as_ref().to_path_buf();
-        let mut lenses: HashMap<String, Vec<Layer<V>>> = HashMap::new();
-        let mut schema: Vec<String> = Vec::new();
-
-        if path.exists() {
+        let (schema, lenses) = if path.exists() {
             let file = File::open(&path)?;
             let mut reader = BufReader::new(file);
-
-            let mut header = [0u8; HEADER_LEN];
-            reader.read_exact(&mut header)?;
-
-            if &header[0..4] != MAGIC {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "invalid magic: expected TAUZ, got {:?}",
-                        String::from_utf8_lossy(&header[0..4])
-                    ),
-                ));
-            }
-            let version = header[4];
-            if version != VERSION {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("unsupported version: expected {VERSION}, got {version}"),
-                ));
-            }
-            let flags = header[5];
-            let stored_crc = u32::from_le_bytes(
-                header[6..10]
-                    .try_into()
-                    .expect("header slice is exactly 4 bytes"),
-            );
-            let computed_crc = checksum(&header[0..6]);
-            if stored_crc != computed_crc {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("header checksum mismatch: expected {stored_crc}, got {computed_crc}"),
-                ));
-            }
-
-            let mut body = Vec::new();
-            reader.read_to_end(&mut body)?;
-
-            let compressed = if flags & FLAG_ENCRYPTED != 0 {
-                let enc_key = key.ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "disk file is encrypted but no TAU_ENCRYPTION_KEY is set",
-                    )
-                })?;
-                crypto::decrypt(&enc_key, &body)?
-            } else {
-                body
-            };
-
-            let payload_bytes = zstd::decode_all(compressed.as_slice())?;
-            let mut cursor = Cursor::new(payload_bytes);
-            schema = read_schema(&mut cursor)?;
-            loop {
-                match DiskEntry::read(&mut cursor) {
-                    Ok(entry) => {
-                        lenses
-                            .entry(entry.lens.clone())
-                            .or_default()
-                            .push(Layer::new_at(entry.layer_id, entry.taus, entry.written_at));
-                    }
-                    Err(ref e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
-                    Err(e) => return Err(e),
-                }
-            }
-        }
+            Self::decode_image(&mut reader, key)?
+        } else {
+            (Vec::new(), HashMap::new())
+        };
 
         Ok(Self {
             path,
@@ -295,6 +234,112 @@ impl<V: Clone + Codec> Disk<V> {
             key,
             compression_level: DEFAULT_ZSTD_LEVEL,
         })
+    }
+
+    /// Decode a disk image (header, optional decryption, zstd body, schema, and
+    /// layer entries) from a reader. Shared by [`Disk::open`] and
+    /// [`Disk::decode_image_bytes`] so the exact production decode path is what
+    /// fuzzing exercises. Returns a clean [`io::Error`] on malformed input — it
+    /// must never panic.
+    fn decode_image<R: Read>(reader: &mut R, key: Option<[u8; 32]>) -> io::Result<DecodedImage<V>> {
+        let mut header = [0u8; HEADER_LEN];
+        reader.read_exact(&mut header)?;
+
+        if &header[0..4] != MAGIC {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "invalid magic: expected TAUZ, got {:?}",
+                    String::from_utf8_lossy(&header[0..4])
+                ),
+            ));
+        }
+        let version = header[4];
+        if version != VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unsupported version: expected {VERSION}, got {version}"),
+            ));
+        }
+        let flags = header[5];
+        let stored_crc = u32::from_le_bytes(
+            header[6..10]
+                .try_into()
+                .expect("header slice is exactly 4 bytes"),
+        );
+        let computed_crc = checksum(&header[0..6]);
+        if stored_crc != computed_crc {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("header checksum mismatch: expected {stored_crc}, got {computed_crc}"),
+            ));
+        }
+
+        let mut body = Vec::new();
+        reader.read_to_end(&mut body)?;
+
+        let compressed = if flags & FLAG_ENCRYPTED != 0 {
+            let enc_key = key.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "disk file is encrypted but no TAU_ENCRYPTION_KEY is set",
+                )
+            })?;
+            crypto::decrypt(&enc_key, &body)?
+        } else {
+            body
+        };
+
+        let payload_bytes = zstd::decode_all(compressed.as_slice())?;
+        let mut cursor = Cursor::new(payload_bytes);
+        Self::decode_payload(&mut cursor)
+    }
+
+    /// Decode the *decompressed* payload — the schema section followed by the
+    /// layer entries — from a reader. Split out from [`Disk::decode_image`] so
+    /// the vulnerable byte-parsing logic (`read_schema`, `DiskEntry::read`,
+    /// `read_str`) can be fuzzed directly, without a blind fuzzer first having to
+    /// satisfy the CRC header and produce valid zstd.
+    fn decode_payload<R: Read>(reader: &mut R) -> io::Result<DecodedImage<V>> {
+        let schema = read_schema(reader)?;
+        let mut lenses: HashMap<String, Vec<Layer<V>>> = HashMap::new();
+        loop {
+            match DiskEntry::read(reader) {
+                Ok(entry) => {
+                    // Corruption can decode overlapping taus; reject the layer
+                    // cleanly rather than panicking in `Layer::new_at`.
+                    let layer = Layer::try_new_at(entry.layer_id, entry.taus, entry.written_at)
+                        .ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "overlapping taus in decoded layer",
+                            )
+                        })?;
+                    lenses.entry(entry.lens.clone()).or_default().push(layer);
+                }
+                Err(ref e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok((schema, lenses))
+    }
+
+    /// Decode a full disk image (header, optional decryption, zstd, payload) from
+    /// a byte slice. In-memory entry point for the binary-format fuzz target;
+    /// runs the same path as [`Disk::open`] without touching the filesystem and
+    /// returns a clean error rather than panicking on malformed input.
+    pub fn decode_image_bytes(bytes: &[u8], key: Option<[u8; 32]>) -> io::Result<()> {
+        let mut cursor = Cursor::new(bytes);
+        Self::decode_image(&mut cursor, key).map(|_| ())
+    }
+
+    /// Decode an already-decompressed payload (schema + entries) from a byte
+    /// slice. This is the high-signal fuzz entry point: it reaches the interval
+    /// and length-prefix parsing directly, bypassing the CRC/zstd envelope a
+    /// blind fuzzer would otherwise be stuck on. Must never panic.
+    pub fn decode_payload_bytes(bytes: &[u8]) -> io::Result<()> {
+        let mut cursor = Cursor::new(bytes);
+        Self::decode_payload(&mut cursor).map(|_| ())
     }
 
     /// Create a new store at `path`. Pass `Some(key)` to encrypt at rest.
@@ -351,7 +396,7 @@ impl<V: Clone + Codec> Disk<V> {
             0u8
         };
         let body = if let Some(ref enc_key) = self.key {
-            crypto::encrypt(enc_key, &compressed)
+            crypto::encrypt(enc_key, &compressed)?
         } else {
             compressed
         };
@@ -473,6 +518,33 @@ mod tests {
         let mut cur = Cursor::new(bytes);
         let err = read_str(&mut cur).expect_err("truncated string");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn decode_image_bytes_round_trips_a_real_image() {
+        let tmp = NamedTempFile::new().unwrap();
+        let layer = Layer::new_at(1, vec![Tau::new(0, 10, 7i64)], 1_700_000_000_000);
+        let mut store = Disk::<i64>::create(tmp.path(), None).unwrap();
+        store.append("temp", layer).unwrap();
+        store.flush().unwrap();
+
+        let bytes = fs::read(tmp.path()).unwrap();
+        // The exact bytes that `Disk::open` would read must decode cleanly.
+        Disk::<i64>::decode_image_bytes(&bytes, None).expect("valid image decodes");
+    }
+
+    #[test]
+    fn decode_image_bytes_rejects_arbitrary_input_without_panicking() {
+        // The fuzz entry point's contract: any byte string is a clean Ok/Err,
+        // never a panic.
+        for bad in [
+            &b""[..],
+            &b"TAUZ"[..],
+            &b"not a tau file at all"[..],
+            &[0xff; 64][..],
+        ] {
+            let _ = Disk::<i64>::decode_image_bytes(bad, None);
+        }
     }
 
     fn taus_gen() -> impl Generator<Vec<Tau<i32>>> {

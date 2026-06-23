@@ -33,12 +33,14 @@ jobs:
           tool: nextest
       - run: cargo nextest run --release
 
-  fuzz: 
+  fuzz:
     needs: test
     runs-on: ubuntu-latest
+    env:
+      FUZZ_TIME: 45 # seconds per target; bump on a scheduled (non-PR) run
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ci
@@ -46,7 +48,25 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-fuzz
-      - run: cargo +nightly fuzz check --fuzz-dir crates/fuzztau --target x86_64-unknown-linux-gnu
+      # Build-check every target (covers the two we don't time-box below).
+      - name: Build all fuzz targets
+        run: cargo +nightly fuzz check --fuzz-dir crates/fuzztau --target x86_64-unknown-linux-gnu
+      # Time-boxed runs on the highest-value targets, seeded from the committed
+      # corpus + seeds and (for the text grammar) the TauQL dictionary. A crash
+      # or OOM fails the job and the reproducer is uploaded as an artifact.
+      - name: Fuzz parser
+        run: cargo +nightly fuzz run --fuzz-dir crates/fuzztau parse crates/fuzztau/seeds/parse -- -max_total_time=$FUZZ_TIME -dict=crates/fuzztau/tauql.dict -rss_limit_mb=2048
+      - name: Fuzz wire decoder
+        run: cargo +nightly fuzz run --fuzz-dir crates/fuzztau wire crates/fuzztau/seeds/wire -- -max_total_time=$FUZZ_TIME -dict=crates/fuzztau/tauql.dict -rss_limit_mb=2048
+      - name: Fuzz binary disk decode
+        run: cargo +nightly fuzz run --fuzz-dir crates/fuzztau disk_decode crates/fuzztau/seeds/disk_decode -- -max_total_time=$FUZZ_TIME -rss_limit_mb=2048
+      - name: Upload fuzz reproducers
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: crates/fuzztau/artifacts/
+          if-no-files-found: ignore
 
   dst:
     name: DST (all libtau profiles + concurrent)

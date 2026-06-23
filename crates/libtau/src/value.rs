@@ -220,8 +220,18 @@ impl DiskCodec for Value {
                 let mut len_buf = [0u8; 4];
                 r.read_exact(&mut len_buf)?;
                 let len = u32::from_le_bytes(len_buf) as usize;
-                let mut buf = vec![0u8; len];
-                r.read_exact(&mut buf)?;
+                // `len` is untrusted (it comes straight off disk and may be
+                // corrupted); read incrementally rather than pre-allocating it,
+                // so a bogus length cannot trigger an oversized allocation. A
+                // short read is a clean InvalidData error.
+                let mut buf = Vec::new();
+                let read = r.take(len as u64).read_to_end(&mut buf)?;
+                if read != len {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "truncated Value::Str on read",
+                    ));
+                }
                 String::from_utf8(buf)
                     .map(|s| Value::Str(Arc::from(s.as_str())))
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
@@ -325,6 +335,32 @@ mod tests {
         let mut buf = String::new();
         v.encode_into(&mut buf);
         assert_eq!(buf, v.encode());
+    }
+
+    #[test]
+    fn read_encoded_str_with_bogus_length_is_clean_error_not_oom() {
+        use std::io::Cursor;
+        // Regression for a fuzzer-found OOM: a corrupted TAG_STR length prefix
+        // (here ~4 GiB) must produce a clean InvalidData error, not an
+        // oversized allocation, when only a few payload bytes follow.
+        let mut bytes = vec![TAG_STR];
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+        bytes.extend_from_slice(b"tiny");
+        let mut cur = Cursor::new(bytes);
+        let err = <Value as DiskCodec>::read_encoded(&mut cur).expect_err("truncated str");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn read_encoded_str_round_trips() {
+        use std::io::Cursor;
+        let mut buf = Vec::new();
+        Value::Str(Arc::from("hello"))
+            .write_encoded(&mut buf)
+            .unwrap();
+        let mut cur = Cursor::new(buf);
+        let got = <Value as DiskCodec>::read_encoded(&mut cur).unwrap();
+        assert_eq!(got, Value::Str(Arc::from("hello")));
     }
 
     #[hegel::test]

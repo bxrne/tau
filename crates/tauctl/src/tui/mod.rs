@@ -82,7 +82,7 @@ impl InputHistory {
                 self.idx = Some(i - 1);
             }
         }
-        Some(self.entries[self.idx.unwrap()].clone())
+        self.idx.and_then(|i| self.entries.get(i)).cloned()
     }
 
     fn down(&mut self) -> Option<String> {
@@ -203,7 +203,7 @@ fn handle_nav_key(key: event::KeyEvent, app: &mut App) {
     match key.code {
         KeyCode::Char('i') | KeyCode::Esc => app.focus_pane(Focus::Input),
         KeyCode::Char(c @ '1'..='3') => {
-            if let Some(target) = Focus::from_digit(c.to_digit(10).unwrap()) {
+            if let Some(target) = c.to_digit(10).and_then(Focus::from_digit) {
                 app.focus_pane(target);
             }
         }
@@ -244,7 +244,7 @@ fn handle_key(
     // reach a pane mid-edit without losing the input line.
     if key.modifiers.contains(KeyModifiers::ALT)
         && let KeyCode::Char(c @ '1'..='3') = key.code
-        && let Some(target) = Focus::from_digit(c.to_digit(10).unwrap())
+        && let Some(target) = c.to_digit(10).and_then(Focus::from_digit)
     {
         app.focus_pane(target);
         return false;

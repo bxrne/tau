@@ -22,16 +22,21 @@ pub fn parse_key_from_env() -> Result<Option<[u8; 32]>, String> {
     Ok(Some(key))
 }
 
-pub fn encrypt(key: &[u8; 32], plaintext: &[u8]) -> Vec<u8> {
-    let cipher = Aes256Gcm::new_from_slice(key).expect("key is 32 bytes");
+pub fn encrypt(key: &[u8; 32], plaintext: &[u8]) -> io::Result<Vec<u8>> {
+    let cipher = Aes256Gcm::new_from_slice(key)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
     let mut nonce_bytes = [0u8; 12];
     rand::thread_rng().fill_bytes(&mut nonce_bytes);
     let nonce = Nonce::from_slice(&nonce_bytes);
-    let ciphertext = cipher.encrypt(nonce, plaintext).expect("encryption failed");
+    // AES-GCM only fails here if the plaintext exceeds the GCM message limit
+    // (~64 GiB); propagate it rather than panicking a write mid-flight.
+    let ciphertext = cipher
+        .encrypt(nonce, plaintext)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "encryption failed"))?;
     let mut out = Vec::with_capacity(12 + ciphertext.len());
     out.extend_from_slice(&nonce_bytes);
     out.extend_from_slice(&ciphertext);
-    out
+    Ok(out)
 }
 
 pub fn decrypt(key: &[u8; 32], blob: &[u8]) -> io::Result<Vec<u8>> {
@@ -42,7 +47,8 @@ pub fn decrypt(key: &[u8; 32], blob: &[u8]) -> io::Result<Vec<u8>> {
         ));
     }
     let (nonce_bytes, ciphertext) = blob.split_at(12);
-    let cipher = Aes256Gcm::new_from_slice(key).expect("key is 32 bytes");
+    let cipher = Aes256Gcm::new_from_slice(key)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
     let nonce = Nonce::from_slice(nonce_bytes);
     cipher.decrypt(nonce, ciphertext).map_err(|_| {
         io::Error::new(
@@ -65,7 +71,7 @@ mod tests {
         let plaintext = tc.draw(gs::vecs(gs::integers::<u8>()).max_size(2048));
         let mut key = [0u8; 32];
         key.copy_from_slice(&key_bytes);
-        let cipher = encrypt(&key, &plaintext);
+        let cipher = encrypt(&key, &plaintext).expect("encrypt");
         let recovered = decrypt(&key, &cipher).expect("decrypt must succeed on its own ciphertext");
         assert_eq!(plaintext, recovered);
     }
@@ -85,7 +91,7 @@ mod tests {
         let key_a: [u8; 32] = key_bytes.try_into().expect("exactly 32 bytes");
         let mut key_b = key_a;
         key_b[0] ^= 1;
-        let cipher = encrypt(&key_a, &plaintext);
+        let cipher = encrypt(&key_a, &plaintext).expect("encrypt");
         assert!(decrypt(&key_b, &cipher).is_err());
     }
 

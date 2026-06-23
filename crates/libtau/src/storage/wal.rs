@@ -89,7 +89,7 @@ fn write_data_line<V: Codec>(
     entry: &WalEntry<V>,
 ) -> io::Result<()> {
     if let Some(key) = key {
-        let blob = crypto::encrypt(key, entry.serialise().as_bytes());
+        let blob = crypto::encrypt(key, entry.serialise().as_bytes())?;
         writeln!(w, "E:{}", B64.encode(&blob))
     } else {
         writeln!(w, "{}", entry.serialise())
@@ -458,7 +458,7 @@ impl Wal {
         let ck = crc32(stmt_text);
         let inner = format!("{} {}", ck, stmt_text);
         if let Some(key) = &self.key {
-            let blob = crypto::encrypt(key, inner.as_bytes());
+            let blob = crypto::encrypt(key, inner.as_bytes())?;
             writeln!(self.writer, "SE:{}", B64.encode(&blob))?;
         } else {
             writeln!(self.writer, "S:{}", inner)?;

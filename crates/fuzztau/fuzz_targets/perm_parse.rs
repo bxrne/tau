@@ -1,20 +1,9 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use std::sync::OnceLock;
 
-static TRACING: OnceLock<()> = OnceLock::new();
-
+// `Perm::parse` (wire GRANTS + users-file loading) must never panic.
 fuzz_target!(|data: &[u8]| {
-    TRACING.get_or_init(|| {
-        tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::DEBUG)
-            .with_target(false)
-            .init();
-    });
-
     if let Ok(s) = std::str::from_utf8(data) {
-        // Perm::parse must never panic on arbitrary input.
-        // Used by wire GRANTS parsing and users file loading.
         let _ = libtau::Perm::parse(s);
     }
 });

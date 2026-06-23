@@ -66,23 +66,30 @@ impl<V> Layer<V> {
 
     /// Create a layer with an explicit write timestamp.  Used during WAL
     /// replay to restore the original timestamp rather than the replay time.
-    pub fn new_at(id: LayerId, mut taus: Vec<Tau<V>>, written_at: i64) -> Self {
+    /// Panics if the taus overlap; use [`Layer::try_new_at`] for untrusted input.
+    pub fn new_at(id: LayerId, taus: Vec<Tau<V>>, written_at: i64) -> Self {
+        Self::try_new_at(id, taus, written_at).expect("Layer: taus must not overlap")
+    }
+
+    /// Fallible counterpart to [`Layer::new_at`] for untrusted input (decoding a
+    /// persisted file that may be corrupted). Returns `None` if any two taus
+    /// overlap instead of panicking.
+    pub fn try_new_at(id: LayerId, mut taus: Vec<Tau<V>>, written_at: i64) -> Option<Self> {
         taus.sort_by_key(|t| t.start);
-        assert!(
-            taus.windows(2).all(|w| w[0].end <= w[1].start),
-            "Layer: taus must not overlap"
-        );
+        if !taus.windows(2).all(|w| w[0].end <= w[1].start) {
+            return None;
+        }
         // Because taus are sorted by start (and non-overlapping, so end is also
         // monotone), first.start is the minimum and last.end is the maximum.
         let min_start = taus.first().map_or(Timestamp::MAX, |t| t.start);
         let max_end = taus.last().map_or(Timestamp::MIN, |t| t.end);
-        Self {
+        Some(Self {
             id,
             min_start,
             max_end,
             taus: taus.into(),
             written_at,
-        }
+        })
     }
 
     /// Create a layer from taus that the caller guarantees are already sorted
@@ -199,6 +206,19 @@ mod tests {
         assert!(Tau::try_new(0, 10, 1i32).is_some());
         assert!(Tau::try_new(5, 5, 1i32).is_none(), "empty interval");
         assert!(Tau::try_new(10, 5, 1i32).is_none(), "inverted interval");
+    }
+
+    #[test]
+    fn layer_try_new_at_returns_none_for_overlapping_taus() {
+        // Non-overlapping (even when unsorted) builds; overlapping is rejected
+        // cleanly instead of panicking like `new_at`.
+        assert!(
+            Layer::try_new_at(1, vec![Tau::new(10, 20, 0i32), Tau::new(0, 10, 1i32)], 0).is_some()
+        );
+        assert!(
+            Layer::try_new_at(1, vec![Tau::new(0, 15, 0i32), Tau::new(10, 20, 1i32)], 0).is_none(),
+            "overlapping taus must be rejected"
+        );
     }
 
     #[hegel::test]
