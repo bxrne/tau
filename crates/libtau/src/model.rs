@@ -4,6 +4,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub type Timestamp = i64;
 pub type LayerId = u64;
 
+#[derive(Debug)]
+pub struct Bound {
+    pub hi: Timestamp,
+    pub lo: Timestamp,
+}
+
 /// Wall-clock milliseconds since the Unix epoch.
 #[inline]
 pub(crate) fn now_ms() -> i64 {
@@ -16,27 +22,46 @@ pub(crate) fn now_ms() -> i64 {
 /// An atomic temporal fact: value V is true over [start, end).
 #[derive(Debug, Clone)]
 pub struct Tau<V> {
-    pub start: Timestamp,
-    pub end: Timestamp,
+    pub coords: Arc<[Bound]>,
     pub value: V,
 }
 
 impl<V> Tau<V> {
     pub fn new(start: Timestamp, end: Timestamp, value: V) -> Self {
-        assert!(start < end, "Tau: start must be less than end");
-        Self { start, end, value }
+        assert!(
+            start < end,
+            "Tau: start must be less than end (got start={}, end={})",
+            start,
+            end
+        );
+        assert!(
+            start >= Timestamp::MIN && end <= Timestamp::MAX,
+            "Tau: start and end must be within valid timestamp range"
+        );
+        Self {
+            coords: Arc::from([Bound { hi: end, lo: start }]),
+            value,
+        }
     }
 
     /// Fallible constructor for untrusted input (decoding a persisted file or
     /// WAL entry that may be corrupted). Returns `None` for a degenerate or
     /// inverted interval instead of panicking like [`Tau::new`].
     pub fn try_new(start: Timestamp, end: Timestamp, value: V) -> Option<Self> {
-        (start < end).then_some(Self { start, end, value })
+        if start < end && start >= Timestamp::MIN && end <= Timestamp::MAX {
+            Some(Self {
+                coords: Arc::from([Bound { hi: end, lo: start }]),
+                value,
+            })
+        } else {
+            None
+        }
     }
 
     #[inline]
     pub fn contains(&self, t: Timestamp) -> bool {
-        self.start <= t && t < self.end
+        let bound = &self.coords[0];
+        bound.lo <= t && t < bound.hi
     }
 }
 
@@ -52,43 +77,42 @@ pub struct Layer<V> {
     /// contain a tau covering `t`.
     pub max_end: Timestamp,
     pub taus: Arc<[Tau<V>]>,
-    /// Wall-clock time (milliseconds since Unix epoch) when this layer was
-    /// first written.  Restored verbatim on WAL/disk replay.
-    pub written_at: i64,
 }
 
 impl<V> Layer<V> {
     /// Create a new layer, recording the current wall-clock time as the write
     /// timestamp.  Taus are sorted by `start`; overlapping taus panic.
     pub fn new(id: LayerId, taus: Vec<Tau<V>>) -> Self {
-        Self::new_at(id, taus, now_ms())
+        Self::new_at(id, taus)
     }
 
     /// Create a layer with an explicit write timestamp.  Used during WAL
     /// replay to restore the original timestamp rather than the replay time.
     /// Panics if the taus overlap; use [`Layer::try_new_at`] for untrusted input.
-    pub fn new_at(id: LayerId, taus: Vec<Tau<V>>, written_at: i64) -> Self {
-        Self::try_new_at(id, taus, written_at).expect("Layer: taus must not overlap")
+    pub fn new_at(id: LayerId, taus: Vec<Tau<V>>) -> Self {
+        Self::try_new_at(id, taus).expect("Layer: taus must not overlap")
     }
 
     /// Fallible counterpart to [`Layer::new_at`] for untrusted input (decoding a
     /// persisted file that may be corrupted). Returns `None` if any two taus
     /// overlap instead of panicking.
-    pub fn try_new_at(id: LayerId, mut taus: Vec<Tau<V>>, written_at: i64) -> Option<Self> {
-        taus.sort_by_key(|t| t.start);
-        if !taus.windows(2).all(|w| w[0].end <= w[1].start) {
+    pub fn try_new_at(id: LayerId, mut taus: Vec<Tau<V>>) -> Option<Self> {
+        taus.sort_unstable_by_key(|tau| tau.coords[0].lo);
+        if taus
+            .windows(2)
+            .any(|w| w[0].coords[0].hi > w[1].coords[0].lo)
+        {
             return None;
         }
         // Because taus are sorted by start (and non-overlapping, so end is also
         // monotone), first.start is the minimum and last.end is the maximum.
-        let min_start = taus.first().map_or(Timestamp::MAX, |t| t.start);
-        let max_end = taus.last().map_or(Timestamp::MIN, |t| t.end);
+        let min_start = taus.first().map_or(Timestamp::MAX, |t| t.coords[0].lo);
+        let max_end = taus.last().map_or(Timestamp::MIN, |t| t.coords[0].hi);
         Some(Self {
             id,
             min_start,
             max_end,
             taus: taus.into(),
-            written_at,
         })
     }
 
@@ -100,29 +124,31 @@ impl<V> Layer<V> {
     /// # Panics (debug only)
     /// In debug builds a `debug_assert` verifies the invariant so tests catch
     /// misuse.
-    pub fn new_sorted_unchecked(id: LayerId, taus: Vec<Tau<V>>, written_at: i64) -> Self {
+    pub fn new_sorted_unchecked(id: LayerId, taus: Vec<Tau<V>>) -> Self {
         debug_assert!(
             taus.windows(2)
-                .all(|w| w[0].start <= w[1].start && w[0].end <= w[1].start),
+                .all(|w| w[0].coords[0].hi <= w[1].coords[0].lo),
             "new_sorted_unchecked: taus must be sorted and non-overlapping"
         );
-        let min_start = taus.first().map_or(Timestamp::MAX, |t| t.start);
-        let max_end = taus.last().map_or(Timestamp::MIN, |t| t.end);
+        let min_start = taus.first().map_or(Timestamp::MAX, |t| t.coords[0].lo);
+        let max_end = taus.last().map_or(Timestamp::MIN, |t| t.coords[0].hi);
         Self {
             id,
             min_start,
             max_end,
             taus: taus.into(),
-            written_at,
         }
     }
 
     /// O(log n) point lookup via binary search.
     pub fn at(&self, t: Timestamp) -> Option<&V> {
-        let i = self.taus.partition_point(|tau| tau.end <= t);
+        let i = self
+            .taus
+            .binary_search_by_key(&t, |tau| tau.coords[0].lo)
+            .unwrap_or_else(|i| i.saturating_sub(1));
         self.taus
             .get(i)
-            .filter(|tau| tau.start <= t)
+            .filter(|tau| tau.coords[0].lo <= t && t < tau.coords[0].hi)
             .map(|tau| &tau.value)
     }
 }
@@ -182,16 +208,16 @@ mod tests {
     #[hegel::test]
     fn pbt_tau_new_preserves_fields_for_any_valid_range(tc: TestCase) {
         let t = tc.draw(tau_gen());
-        assert!(t.start < t.end);
-        assert!(t.contains(t.start));
-        assert!(!t.contains(t.end));
+        assert!(t.coords.len() == 1);
+        let bound = &t.coords[0];
+        assert!(bound.lo < bound.hi);
     }
 
     #[hegel::test]
     fn pbt_tau_contains_iff_in_half_open_range(tc: TestCase) {
         let t = tc.draw(tau_gen());
         let probe = tc.draw(gs::integers::<i64>());
-        let expected = t.start <= probe && probe < t.end;
+        let expected = t.coords[0].lo <= probe && probe < t.coords[0].hi;
         assert_eq!(t.contains(probe), expected);
     }
 
@@ -213,10 +239,10 @@ mod tests {
         // Non-overlapping (even when unsorted) builds; overlapping is rejected
         // cleanly instead of panicking like `new_at`.
         assert!(
-            Layer::try_new_at(1, vec![Tau::new(10, 20, 0i32), Tau::new(0, 10, 1i32)], 0).is_some()
+            Layer::try_new_at(1, vec![Tau::new(10, 20, 0i32), Tau::new(0, 10, 1i32)]).is_some()
         );
         assert!(
-            Layer::try_new_at(1, vec![Tau::new(0, 15, 0i32), Tau::new(10, 20, 1i32)], 0).is_none(),
+            Layer::try_new_at(1, vec![Tau::new(0, 15, 0i32), Tau::new(10, 20, 1i32)]).is_none(),
             "overlapping taus must be rejected"
         );
     }
@@ -228,7 +254,10 @@ mod tests {
         // re-establishes start-order.
         let layer = Layer::new(1, taus);
         for w in layer.taus.windows(2) {
-            assert!(w[0].start <= w[1].start);
+            assert!(
+                w[0].coords[0].lo <= w[1].coords[0].lo,
+                "taus must be sorted by start"
+            );
         }
     }
 
@@ -236,8 +265,13 @@ mod tests {
     fn pbt_layer_bounds_match_first_and_last(tc: TestCase) {
         let taus = tc.draw(non_overlapping_taus().filter(|v| !v.is_empty()));
         let layer = Layer::new(1, taus);
-        assert_eq!(layer.min_start, layer.taus.first().unwrap().start);
-        assert_eq!(layer.max_end, layer.taus.last().unwrap().end);
+        let expected_min_start = layer
+            .taus
+            .first()
+            .map_or(Timestamp::MAX, |t| t.coords[0].lo);
+        let expected_max_end = layer.taus.last().map_or(Timestamp::MIN, |t| t.coords[0].hi);
+        assert_eq!(layer.min_start, expected_min_start);
+        assert_eq!(layer.max_end, expected_max_end);
     }
 
     #[hegel::test]
@@ -257,7 +291,7 @@ mod tests {
 
         let expected = taus
             .iter()
-            .find(|tau| tau.start <= probe && probe < tau.end)
+            .find(|tau| tau.coords[0].lo <= probe && probe < tau.coords[0].hi)
             .map(|tau| tau.value);
         assert_eq!(layer.at(probe).copied(), expected);
     }
