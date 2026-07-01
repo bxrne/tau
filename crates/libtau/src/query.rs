@@ -666,6 +666,7 @@ mod tests {
             derived_ranges: HashMap::default(),
             xderived: HashMap::default(),
             ttl_secs: HashMap::default(),
+            axes: HashMap::default(),
         }
     }
 

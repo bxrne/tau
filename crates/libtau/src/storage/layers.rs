@@ -125,6 +125,17 @@ where
     if layers.len() <= 1 {
         return;
     }
+    // Multi-axis lenses are exempt: the sweep below merges along valid time
+    // only, which is lossy when taus also carry other filter axes. Leaving the
+    // stack untouched is trivially lossless; newest-wins layer order resolves
+    // queries exactly. (An N-D recursive merge is a future optimisation.)
+    if layers
+        .iter()
+        .flat_map(|l| l.taus.iter())
+        .any(|t| t.arity() > 1)
+    {
+        return;
+    }
     let total_taus: usize = layers.iter().map(|l| l.taus.len()).sum();
     if total_taus == 0 {
         layers.clear();

@@ -1914,3 +1914,176 @@ fn disk_backend_drop_lens_survives_restart() {
         Err(ExecError::UnknownLens(_))
     ));
 }
+
+#[test]
+fn nd_create_append_at_newest_wins() {
+    let mut e = setup();
+    run(&mut e, "CREATE LENS grid int AXES (valid, region)").unwrap();
+    run(
+        &mut e,
+        "APPEND LENS grid [0 100] [0 50] 1, [0 100] [50 100] 2",
+    )
+    .unwrap();
+    // Point queries resolve per axis.
+    assert_eq!(
+        run(&mut e, "AT LENS grid 10 25").unwrap(),
+        Output::Value(Some(Value::Int(1)))
+    );
+    assert_eq!(
+        run(&mut e, "AT LENS grid 10 75").unwrap(),
+        Output::Value(Some(Value::Int(2)))
+    );
+    assert_eq!(
+        run(&mut e, "AT LENS grid 10 100").unwrap(),
+        Output::Value(None)
+    );
+    // A newer layer covering the same box wins.
+    run(&mut e, "APPEND LENS grid [0 100] [0 50] 9").unwrap();
+    assert_eq!(
+        run(&mut e, "AT LENS grid 10 25").unwrap(),
+        Output::Value(Some(Value::Int(9)))
+    );
+    assert_eq!(
+        run(&mut e, "AT LENS grid 10 75").unwrap(),
+        Output::Value(Some(Value::Int(2))),
+        "untouched box must keep its value"
+    );
+}
+
+#[test]
+fn nd_range_sweeps_valid_axis_with_fixed_points() {
+    let mut e = setup();
+    run(&mut e, "CREATE LENS grid int AXES (valid, region)").unwrap();
+    run(
+        &mut e,
+        "APPEND LENS grid [0 50] [0 100] 1, [50 100] [0 100] 2",
+    )
+    .unwrap();
+    run(&mut e, "APPEND LENS grid [25 75] [0 100] 3").unwrap();
+    assert_eq!(
+        run(&mut e, "RANGE LENS grid 0 100 AT (10)").unwrap(),
+        Output::Range(vec![
+            (0, 25, Value::Int(1)),
+            (25, 75, Value::Int(3)),
+            (75, 100, Value::Int(2)),
+        ])
+    );
+    // A fixed point outside every box yields no segments.
+    assert_eq!(
+        run(&mut e, "RANGE LENS grid 0 100 AT (500)").unwrap(),
+        Output::Range(vec![])
+    );
+}
+
+#[test]
+fn nd_as_of_scopes_layers() {
+    let mut e = setup();
+    run(&mut e, "CREATE LENS grid int AXES (valid, region)").unwrap();
+    run(&mut e, "APPEND LENS grid [0 10] [0 10] 1").unwrap();
+    // Far-future as-of sees everything; zero as-of predates every write.
+    let (_, future) = parse("AT LENS grid 5 5 AS OF 9999999999999").unwrap();
+    assert_eq!(
+        e.exec_read(&future).unwrap(),
+        Output::Value(Some(Value::Int(1)))
+    );
+    let (_, past) = parse("AT LENS grid 5 5 AS OF 0").unwrap();
+    assert_eq!(e.exec_read(&past).unwrap(), Output::Value(None));
+}
+
+#[test]
+fn nd_arity_mismatches_are_rejected() {
+    let mut e = setup();
+    run(&mut e, "CREATE LENS grid int AXES (valid, region)").unwrap();
+    run(&mut e, "CREATE LENS flat int").unwrap();
+    // 1-D statements on a 2-axis lens.
+    assert!(run(&mut e, "APPEND LENS grid 0 10 1").is_err());
+    assert!(run(&mut e, "AT LENS grid 5").is_err());
+    assert!(run(&mut e, "RANGE LENS grid 0 10").is_err());
+    assert!(run(&mut e, "REDUCE LENS grid 0 10 USING sum").is_err());
+    assert!(run(&mut e, "SET TTL LENS grid 60").is_err());
+    assert!(run(&mut e, "DERIVE LENS d AS grid + 1").is_err());
+    // Wrong coordinate counts on the N-D paths.
+    assert!(run(&mut e, "APPEND LENS grid [0 10] 1").is_err());
+    assert!(run(&mut e, "AT LENS grid 1 2 3").is_err());
+    assert!(run(&mut e, "RANGE LENS grid 0 10 AT (1, 2)").is_err());
+    // N-D box on a 1-axis lens still works via the shared 1-D path…
+    run(&mut e, "APPEND LENS flat [0 10] 5").unwrap();
+    assert_eq!(
+        run(&mut e, "AT LENS flat 5").unwrap(),
+        Output::Value(Some(Value::Int(5)))
+    );
+    // …but a 2-axis box on it is an arity error.
+    assert!(run(&mut e, "APPEND LENS flat [0 10] [0 10] 5").is_err());
+}
+
+#[test]
+fn nd_overlapping_boxes_in_one_append_rejected() {
+    let mut e = setup();
+    run(&mut e, "CREATE LENS grid int AXES (valid, region)").unwrap();
+    assert!(
+        run(&mut e, "APPEND LENS grid [0 10] [0 50] 1, [5 15] [25 75] 2").is_err(),
+        "boxes intersecting on every axis are ambiguous within one layer"
+    );
+    // Degenerate interval on any axis is rejected.
+    assert!(run(&mut e, "APPEND LENS grid [0 10] [5 5] 1").is_err());
+}
+
+#[test]
+fn nd_duplicate_axis_names_rejected() {
+    let mut e = setup();
+    assert!(run(&mut e, "CREATE LENS grid int AXES (a, a)").is_err());
+}
+
+#[test]
+fn nd_layers_survive_compaction_threshold() {
+    // Multi-axis lenses skip compaction: every append stays its own layer, so
+    // HISTORY still shows one generation per append past the threshold.
+    let mut e = setup();
+    run(&mut e, "CREATE LENS grid int AXES (valid, region)").unwrap();
+    for i in 0..12i64 {
+        run(
+            &mut e,
+            &format!("APPEND LENS grid [{} {}] [0 10] {i}", i * 10, i * 10 + 10),
+        )
+        .unwrap();
+    }
+    let (_, hist) = parse("HISTORY LENS grid").unwrap();
+    let layers = match e.exec_read(&hist).unwrap() {
+        Output::LayerHistory(l) => l,
+        other => panic!("expected LayerHistory, got {other:?}"),
+    };
+    assert_eq!(layers.len(), 12, "N-D layers must not be compacted away");
+    // Every value is still resolvable.
+    for i in 0..12i64 {
+        assert_eq!(
+            run(&mut e, &format!("AT LENS grid {} 5", i * 10 + 5)).unwrap(),
+            Output::Value(Some(Value::Int(i)))
+        );
+    }
+}
+
+#[test]
+fn nd_lens_survives_wal_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let wal_path = dir.path().join("nd.wal");
+    {
+        let mut e = Executor::with_wal(&wal_path, None).unwrap();
+        run(&mut e, "CREATE LENS grid int AXES (valid, region)").unwrap();
+        run(
+            &mut e,
+            "APPEND LENS grid [0 100] [0 50] 1, [0 100] [50 100] 2",
+        )
+        .unwrap();
+    }
+    let mut e2 = Executor::with_wal(&wal_path, None).unwrap();
+    assert_eq!(
+        run(&mut e2, "AT LENS grid 10 25").unwrap(),
+        Output::Value(Some(Value::Int(1)))
+    );
+    assert_eq!(
+        run(&mut e2, "AT LENS grid 10 75").unwrap(),
+        Output::Value(Some(Value::Int(2)))
+    );
+    // The arity restriction must survive replay too.
+    assert!(run(&mut e2, "AT LENS grid 5").is_err());
+}

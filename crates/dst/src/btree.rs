@@ -11,7 +11,7 @@ use libtau::AggFunc;
 use rand::Rng;
 use rand::rngs::StdRng;
 
-use crate::op::{self, BOOL, DS, FL, INT, Lens, Op, Payload, SV, XD};
+use crate::op::{self, BOOL, DS, FL, INT, Lens, ND, Op, Payload, SV, XD};
 use crate::oracle::{DeriveSpec, Oracle};
 
 /// Tag bits for the Tau behavior tree.
@@ -194,6 +194,94 @@ fn build_tree() -> Tree<SimCtx, Op> {
             |c: &SimCtx| !c.in_transaction,
             |rng, c| Op::History {
                 lens: op::int_lens_for_db(c.oracle(), rng),
+            },
+        ))
+        // Create the 2-axis (valid, region) lens for the N-dimensional ops.
+        .leaf(Leaf::new(
+            2,
+            0,
+            |c: &SimCtx| {
+                !c.in_transaction && c.oracle().active_db() == "default" && !c.oracle().has_lens(ND)
+            },
+            |_, _| Op::CreateNdLens {
+                name: ND.to_string(),
+                arity: 2,
+            },
+        ))
+        // Append N-D boxes (cursor-walked valid axis, random region interval).
+        .leaf(Leaf::new(
+            10,
+            0,
+            |c: &SimCtx| {
+                !c.in_transaction && c.oracle().active_db() == "default" && c.oracle().has_lens(ND)
+            },
+            |rng, _| {
+                let n = rng.gen_range(1..=4);
+                Op::AppendNd {
+                    lens: ND.to_string(),
+                    taus: op::gen_nd_boxes(rng, n),
+                }
+            },
+        ))
+        // N-D point query, probing well outside the populated region too.
+        .leaf(Leaf::new(
+            6,
+            0,
+            |c: &SimCtx| {
+                !c.in_transaction && c.oracle().active_db() == "default" && c.oracle().has_lens(ND)
+            },
+            |rng, _| Op::AtNd {
+                lens: ND.to_string(),
+                ts: vec![rng.gen_range(-50..3000), rng.gen_range(-50..400)],
+                as_of: None,
+            },
+        ))
+        // N-D point query AS OF a past transaction time (same negative-space
+        // spread as the 1-D AS OF leaf: pre-history, mid, now, future).
+        .leaf(Leaf::new(
+            4,
+            0,
+            |c: &SimCtx| {
+                !c.in_transaction && c.oracle().active_db() == "default" && c.oracle().has_lens(ND)
+            },
+            |rng, c| {
+                let base = crate::oracle::DST_TX_BASE_MS;
+                let step = crate::oracle::DST_TX_STEP_MS;
+                let ticks = ((c.now_ms - base) / step).max(0);
+                let k = rng.gen_range(-2..=ticks + 2);
+                Op::AtNd {
+                    lens: ND.to_string(),
+                    ts: vec![rng.gen_range(-50..3000), rng.gen_range(-50..400)],
+                    as_of: Some(base + k * step),
+                }
+            },
+        ))
+        // N-D range: sweep valid time with the region axis fixed at a point.
+        .leaf(Leaf::new(
+            5,
+            0,
+            |c: &SimCtx| {
+                !c.in_transaction && c.oracle().active_db() == "default" && c.oracle().has_lens(ND)
+            },
+            |rng, _| {
+                let s = rng.gen_range(-50..2500);
+                Op::RangeNd {
+                    lens: ND.to_string(),
+                    start: s,
+                    end: s + rng.gen_range(1..500),
+                    fixed: vec![rng.gen_range(-20..400)],
+                }
+            },
+        ))
+        // Drop the N-D lens occasionally so recreation is exercised.
+        .leaf(Leaf::new(
+            1,
+            0,
+            |c: &SimCtx| {
+                !c.in_transaction && c.oracle().active_db() == "default" && c.oracle().has_lens(ND)
+            },
+            |_, _| Op::DropLens {
+                name: ND.to_string(),
             },
         ))
         .leaf(Leaf::new(

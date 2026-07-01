@@ -28,7 +28,13 @@ use crc32fast::Hasher;
 const MAGIC: &[u8] = b"TAUZ";
 /// On-disk format version. The only supported version; bump on any layout
 /// change once files exist in the wild.
-const VERSION: u8 = 1;
+const VERSION: u8 = 2;
+/// Oldest on-disk version this build can still read. v1 entries carry a single
+/// valid-time interval per tau; v2 adds a per-tau axis count for N-dimensional
+/// lenses.
+const MIN_VERSION: u8 = 1;
+/// Upper bound on per-tau arity accepted from a (possibly corrupted) file.
+const MAX_AXES: usize = 64;
 const FLAG_ENCRYPTED: u8 = 0x01;
 const HEADER_LEN: usize = 4 + 1 + 1 + 4; // magic + version + flags + crc32
 /// Upper bound on how many elements a length-prefixed read pre-allocates. A
@@ -154,15 +160,19 @@ fn write_entry<V: Codec, W: Write>(
     write_str(writer, lens)?;
     writer.write_all(&(taus.len() as u32).to_le_bytes())?;
     for tau in taus {
-        writer.write_all(&tau.start().to_le_bytes())?;
-        writer.write_all(&tau.end().to_le_bytes())?;
+        // v2 tau: axis count then one (lo, hi) pair per axis.
+        writer.write_all(&[tau.arity() as u8])?;
+        for b in tau.coords.iter() {
+            writer.write_all(&b.lo.to_le_bytes())?;
+            writer.write_all(&b.hi.to_le_bytes())?;
+        }
         tau.value.write_encoded(writer)?;
     }
     Ok(())
 }
 
 impl<V: Codec> DiskEntry<V> {
-    fn read(reader: &mut impl Read) -> io::Result<Self> {
+    fn read(reader: &mut impl Read, version: u8) -> io::Result<Self> {
         let layer_id = read_i64(reader)? as u64;
         let written_at = read_i64(reader)?;
         let lens = read_str(reader)?;
@@ -176,15 +186,33 @@ impl<V: Codec> DiskEntry<V> {
         // process on an oversized allocation. Genuine layers just grow the vec.
         let mut taus = Vec::with_capacity(count.min(MAX_PREALLOC_TAUS));
         for _ in 0..count {
-            let start = read_i64(reader)?;
-            let end = read_i64(reader)?;
+            // v1 taus are a bare (start, end) pair; v2 prefixes an axis count.
+            let arity = if version >= 2 {
+                let mut b = [0u8; 1];
+                reader.read_exact(&mut b)?;
+                b[0] as usize
+            } else {
+                1
+            };
+            if arity == 0 || arity > MAX_AXES {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("invalid tau arity on read: {arity}"),
+                ));
+            }
+            let mut coords = Vec::with_capacity(arity);
+            for _ in 0..arity {
+                let lo = read_i64(reader)?;
+                let hi = read_i64(reader)?;
+                coords.push((lo, hi));
+            }
             let value = V::read_encoded(reader)?;
             // Corruption can decode into a degenerate/inverted interval; reject
-            // it cleanly instead of panicking in `Tau::new`.
-            let tau = Tau::try_new(start, end, value).ok_or_else(|| {
+            // it cleanly instead of panicking in a constructor.
+            let tau = Tau::try_new_nd(&coords, value).ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("invalid tau interval on read: start {start} >= end {end}"),
+                    "invalid tau interval on read".to_string(),
                 )
             })?;
             taus.push(tau);
@@ -261,10 +289,10 @@ impl<V: Clone + Codec> Disk<V> {
             ));
         }
         let version = header[4];
-        if version != VERSION {
+        if !(MIN_VERSION..=VERSION).contains(&version) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("unsupported version: expected {VERSION}, got {version}"),
+                format!("unsupported version: expected {MIN_VERSION}..={VERSION}, got {version}"),
             ));
         }
         let flags = header[5];
@@ -298,7 +326,7 @@ impl<V: Clone + Codec> Disk<V> {
 
         let payload_bytes = zstd::decode_all(compressed.as_slice())?;
         let mut cursor = Cursor::new(payload_bytes);
-        Self::decode_payload(&mut cursor)
+        Self::decode_payload(&mut cursor, version)
     }
 
     /// Decode the *decompressed* payload — the schema section followed by the
@@ -306,15 +334,15 @@ impl<V: Clone + Codec> Disk<V> {
     /// the vulnerable byte-parsing logic (`read_schema`, `DiskEntry::read`,
     /// `read_str`) can be fuzzed directly, without a blind fuzzer first having to
     /// satisfy the CRC header and produce valid zstd.
-    fn decode_payload<R: Read>(reader: &mut R) -> io::Result<DecodedImage<V>> {
+    fn decode_payload<R: Read>(reader: &mut R, version: u8) -> io::Result<DecodedImage<V>> {
         let schema = read_schema(reader)?;
         let mut lenses: HashMap<String, Vec<Layer<V>>> = HashMap::new();
         loop {
-            match DiskEntry::read(reader) {
+            match DiskEntry::read(reader, version) {
                 Ok(entry) => {
                     // Corruption can decode overlapping taus; reject the layer
-                    // cleanly rather than panicking in `Layer::new_at`.
-                    let layer = Layer::try_new_at(entry.layer_id, entry.taus, entry.written_at)
+                    // cleanly rather than panicking in a layer constructor.
+                    let layer = Layer::try_new_nd_at(entry.layer_id, entry.taus, entry.written_at)
                         .ok_or_else(|| {
                             io::Error::new(
                                 io::ErrorKind::InvalidData,
@@ -345,7 +373,7 @@ impl<V: Clone + Codec> Disk<V> {
     /// blind fuzzer would otherwise be stuck on. Must never panic.
     pub fn decode_payload_bytes(bytes: &[u8]) -> io::Result<()> {
         let mut cursor = Cursor::new(bytes);
-        Self::decode_payload(&mut cursor).map(|_| ())
+        Self::decode_payload(&mut cursor, VERSION).map(|_| ())
     }
 
     /// Create a new store at `path`. Pass `Some(key)` to encrypt at rest.
@@ -503,10 +531,12 @@ mod tests {
     }
 
     #[test]
-    fn disk_entry_read_round_trips_valid_interval() {
+    fn disk_entry_read_round_trips_valid_interval_v1() {
+        // `encode_entry` emits the v1 layout (no per-tau arity byte); reading it
+        // with version 1 proves the migration read path.
         let bytes = encode_entry("temp", 0, 10, 42);
         let mut cur = Cursor::new(bytes);
-        let entry = DiskEntry::<i64>::read(&mut cur).expect("valid entry");
+        let entry = DiskEntry::<i64>::read(&mut cur, 1).expect("valid entry");
         assert_eq!(entry.taus.len(), 1);
         assert_eq!((entry.taus[0].start(), entry.taus[0].end()), (0, 10));
     }
@@ -517,8 +547,25 @@ mod tests {
         // clean InvalidData error rather than panicking in `Tau::new`.
         let bytes = encode_entry("temp", 10, 5, 42);
         let mut cur = Cursor::new(bytes);
-        let err = DiskEntry::<i64>::read(&mut cur).expect_err("inverted interval");
+        let err = DiskEntry::<i64>::read(&mut cur, 1).expect_err("inverted interval");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn disk_entry_v2_round_trips_multi_axis_taus() {
+        let taus = vec![
+            Tau::try_new_nd(&[(0, 10), (100, 200)], 7i64).expect("valid nd tau"),
+            Tau::try_new_nd(&[(0, 10), (200, 300)], 9i64).expect("valid nd tau"),
+        ];
+        let mut buf = Vec::new();
+        write_entry(&mut buf, 3, 1_700_000_000_000, "grid", &taus).expect("encode");
+        let mut cur = Cursor::new(buf);
+        let entry = DiskEntry::<i64>::read(&mut cur, VERSION).expect("valid v2 entry");
+        assert_eq!(entry.layer_id, 3);
+        assert_eq!(entry.taus.len(), 2);
+        assert_eq!(entry.taus[0].arity(), 2);
+        assert!(entry.taus[0].contains_point(&[5, 150]));
+        assert!(entry.taus[1].contains_point(&[5, 250]));
     }
 
     #[test]
