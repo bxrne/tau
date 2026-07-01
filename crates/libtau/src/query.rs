@@ -359,15 +359,15 @@ pub fn collect_bounds_from_layers(
 ) {
     for layer in layers {
         let taus = &layer.taus;
-        let s_lo = taus.partition_point(|t| t.start <= start);
-        let s_hi = taus.partition_point(|t| t.start < end);
+        let s_lo = taus.partition_point(|t| t.start() <= start);
+        let s_hi = taus.partition_point(|t| t.start() < end);
         for tau in &taus[s_lo..s_hi] {
-            out.push(tau.start);
+            out.push(tau.start());
         }
-        let e_lo = taus.partition_point(|t| t.end <= start);
-        let e_hi = taus.partition_point(|t| t.end < end);
+        let e_lo = taus.partition_point(|t| t.end() <= start);
+        let e_hi = taus.partition_point(|t| t.end() < end);
         for tau in &taus[e_lo..e_hi] {
-            out.push(tau.end);
+            out.push(tau.end());
         }
     }
 }

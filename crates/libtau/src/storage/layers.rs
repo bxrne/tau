@@ -11,8 +11,8 @@ fn build_sweep_events<V>(layers: &[Layer<V>]) -> Vec<(Timestamp, bool, usize, us
     let mut events: Vec<(Timestamp, bool, usize, usize)> = Vec::with_capacity(total * 2);
     for (layer_idx, layer) in layers.iter().enumerate() {
         for (tau_idx, tau) in layer.taus.iter().enumerate() {
-            events.push((tau.start, false, layer_idx, tau_idx));
-            events.push((tau.end, true, layer_idx, tau_idx));
+            events.push((tau.start(), false, layer_idx, tau_idx));
+            events.push((tau.end(), true, layer_idx, tau_idx));
         }
     }
     events.sort_unstable_by_key(|e| (e.0, e.1));
@@ -47,8 +47,13 @@ fn maybe_emit_segment<V>(
         drain_stale(active, closed);
         if let Some(&(layer_idx, tau_idx)) = active.peek() {
             let v = layers[layer_idx].taus[tau_idx].value.clone();
-            match merged.last_mut() {
-                Some(last) if last.end == c && last.value == v => last.end = t,
+            match merged.last() {
+                Some(last) if last.end() == c && last.value == v => {
+                    // Extend the previous segment to `t` by replacing it; coords
+                    // are shared behind an `Arc`, so `end` cannot be set in place.
+                    let start = last.start();
+                    *merged.last_mut().unwrap() = Tau::new(start, t, v);
+                }
                 _ => merged.push(Tau::new(c, t, v)),
             }
         }
@@ -140,12 +145,12 @@ fn build_sweep_events_in_range<V>(
             continue;
         }
         let taus = &layer.taus;
-        let lo = taus.partition_point(|t| t.end <= range_start);
-        let hi = taus.partition_point(|t| t.start < range_end);
+        let lo = taus.partition_point(|t| t.end() <= range_start);
+        let hi = taus.partition_point(|t| t.start() < range_end);
         for tau_idx in lo..hi {
             let tau = &taus[tau_idx];
-            let eff_start = tau.start.max(range_start);
-            let eff_end = tau.end.min(range_end);
+            let eff_start = tau.start().max(range_start);
+            let eff_end = tau.end().min(range_end);
             if eff_start < eff_end {
                 events.push((eff_start, false, layer_idx, tau_idx));
                 events.push((eff_end, true, layer_idx, tau_idx));

@@ -30,13 +30,7 @@ impl<V> Tau<V> {
     pub fn new(start: Timestamp, end: Timestamp, value: V) -> Self {
         assert!(
             start < end,
-            "Tau: start must be less than end (got start={}, end={})",
-            start,
-            end
-        );
-        assert!(
-            start >= Timestamp::MIN && end <= Timestamp::MAX,
-            "Tau: start and end must be within valid timestamp range"
+            "Tau: start must be less than end (got start={start}, end={end})"
         );
         Self {
             coords: Arc::from([Bound { hi: end, lo: start }]),
@@ -48,14 +42,22 @@ impl<V> Tau<V> {
     /// WAL entry that may be corrupted). Returns `None` for a degenerate or
     /// inverted interval instead of panicking like [`Tau::new`].
     pub fn try_new(start: Timestamp, end: Timestamp, value: V) -> Option<Self> {
-        if start < end && start >= Timestamp::MIN && end <= Timestamp::MAX {
-            Some(Self {
-                coords: Arc::from([Bound { hi: end, lo: start }]),
-                value,
-            })
-        } else {
-            None
-        }
+        (start < end).then(|| Self {
+            coords: Arc::from([Bound { hi: end, lo: start }]),
+            value,
+        })
+    }
+
+    /// Start of the valid-time interval (`coords[0].lo`).
+    #[inline]
+    pub fn start(&self) -> Timestamp {
+        self.coords[0].lo
+    }
+
+    /// End of the valid-time interval (`coords[0].hi`).
+    #[inline]
+    pub fn end(&self) -> Timestamp {
+        self.coords[0].hi
     }
 
     #[inline]
@@ -77,26 +79,29 @@ pub struct Layer<V> {
     /// contain a tau covering `t`.
     pub max_end: Timestamp,
     pub taus: Arc<[Tau<V>]>,
+    /// Wall-clock time (milliseconds since Unix epoch) when this layer was
+    /// first written.  Restored verbatim on WAL/disk replay.
+    pub written_at: i64,
 }
 
 impl<V> Layer<V> {
     /// Create a new layer, recording the current wall-clock time as the write
     /// timestamp.  Taus are sorted by `start`; overlapping taus panic.
     pub fn new(id: LayerId, taus: Vec<Tau<V>>) -> Self {
-        Self::new_at(id, taus)
+        Self::new_at(id, taus, now_ms())
     }
 
     /// Create a layer with an explicit write timestamp.  Used during WAL
     /// replay to restore the original timestamp rather than the replay time.
     /// Panics if the taus overlap; use [`Layer::try_new_at`] for untrusted input.
-    pub fn new_at(id: LayerId, taus: Vec<Tau<V>>) -> Self {
-        Self::try_new_at(id, taus).expect("Layer: taus must not overlap")
+    pub fn new_at(id: LayerId, taus: Vec<Tau<V>>, written_at: i64) -> Self {
+        Self::try_new_at(id, taus, written_at).expect("Layer: taus must not overlap")
     }
 
     /// Fallible counterpart to [`Layer::new_at`] for untrusted input (decoding a
     /// persisted file that may be corrupted). Returns `None` if any two taus
     /// overlap instead of panicking.
-    pub fn try_new_at(id: LayerId, mut taus: Vec<Tau<V>>) -> Option<Self> {
+    pub fn try_new_at(id: LayerId, mut taus: Vec<Tau<V>>, written_at: i64) -> Option<Self> {
         taus.sort_unstable_by_key(|tau| tau.coords[0].lo);
         if taus
             .windows(2)
@@ -113,6 +118,7 @@ impl<V> Layer<V> {
             min_start,
             max_end,
             taus: taus.into(),
+            written_at,
         })
     }
 
@@ -124,7 +130,7 @@ impl<V> Layer<V> {
     /// # Panics (debug only)
     /// In debug builds a `debug_assert` verifies the invariant so tests catch
     /// misuse.
-    pub fn new_sorted_unchecked(id: LayerId, taus: Vec<Tau<V>>) -> Self {
+    pub fn new_sorted_unchecked(id: LayerId, taus: Vec<Tau<V>>, written_at: i64) -> Self {
         debug_assert!(
             taus.windows(2)
                 .all(|w| w[0].coords[0].hi <= w[1].coords[0].lo),
@@ -137,6 +143,7 @@ impl<V> Layer<V> {
             min_start,
             max_end,
             taus: taus.into(),
+            written_at,
         }
     }
 
@@ -239,10 +246,10 @@ mod tests {
         // Non-overlapping (even when unsorted) builds; overlapping is rejected
         // cleanly instead of panicking like `new_at`.
         assert!(
-            Layer::try_new_at(1, vec![Tau::new(10, 20, 0i32), Tau::new(0, 10, 1i32)]).is_some()
+            Layer::try_new_at(1, vec![Tau::new(10, 20, 0i32), Tau::new(0, 10, 1i32)], 0).is_some()
         );
         assert!(
-            Layer::try_new_at(1, vec![Tau::new(0, 15, 0i32), Tau::new(10, 20, 1i32)]).is_none(),
+            Layer::try_new_at(1, vec![Tau::new(0, 15, 0i32), Tau::new(10, 20, 1i32)], 0).is_none(),
             "overlapping taus must be rejected"
         );
     }

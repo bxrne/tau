@@ -116,7 +116,7 @@ impl<V: Clone> WalEntry<V> {
             taus: layer
                 .taus
                 .iter()
-                .map(|t| (t.start, t.end, t.value.clone()))
+                .map(|t| (t.start(), t.end(), t.value.clone()))
                 .collect(),
         }
     }
@@ -363,7 +363,7 @@ impl Wal {
             layer.id, layer.written_at, lens
         );
         for tau in layer.taus.iter() {
-            _ = write!(&mut self.scratch, " {}:{}:", tau.start, tau.end);
+            _ = write!(&mut self.scratch, " {}:{}:", tau.start(), tau.end());
             tau.value.encode_into(&mut self.scratch);
         }
         let checksum = crc32(&self.scratch);
