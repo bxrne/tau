@@ -62,6 +62,14 @@ pub enum Op {
         lens: String,
         t: Ts,
     },
+    AtAsOf {
+        lens: String,
+        t: Ts,
+        as_of: i64,
+    },
+    History {
+        lens: String,
+    },
     Range {
         lens: String,
         start: Ts,
@@ -106,6 +114,8 @@ impl Op {
         match self {
             Op::Append { lens, data } => data.batch_sql(lens),
             Op::At { lens, t } => format!("AT LENS {lens} {t}"),
+            Op::AtAsOf { lens, t, as_of } => format!("AT LENS {lens} {t} AS OF {as_of}"),
+            Op::History { lens } => format!("HISTORY LENS {lens}"),
             Op::Range { lens, start, end } => format!("RANGE LENS {lens} {start} {end}"),
             Op::Reduce {
                 lens,

@@ -57,6 +57,26 @@ pub fn apply_dual(
             let expected = model.at(lens, *t);
             check_at(step, &format!("AT {lens} {t}"), &got, expected, &mut divs);
         }
+        Op::AtAsOf { lens, t, as_of } => {
+            let Some(got) = exec_output(target, &op.to_sql(), step, &mut divs) else {
+                return divs;
+            };
+            let expected = model.at_as_of(lens, *t, *as_of);
+            check_at(
+                step,
+                &format!("AT {lens} {t} AS OF {as_of}"),
+                &got,
+                expected,
+                &mut divs,
+            );
+        }
+        Op::History { lens } => {
+            let Some(got) = exec_output(target, &op.to_sql(), step, &mut divs) else {
+                return divs;
+            };
+            let expected = model.history_generations(lens);
+            check_history(step, &format!("HISTORY {lens}"), &got, expected, &mut divs);
+        }
         Op::Range { lens, start, end } => {
             if start >= end {
                 return divs;
@@ -185,6 +205,41 @@ fn check_range(
     }
 }
 
+/// Compare the transaction-time generations reported by `HISTORY` against the
+/// oracle. Layer ids and per-layer fragment counts are engine-internal and may
+/// differ, but the multiset of surviving `written_at` generations must match
+/// exactly — that is the property that proves compaction preserved the
+/// transaction axis.
+fn check_history(
+    step: usize,
+    label: &str,
+    got: &Output,
+    expected: Option<Vec<i64>>,
+    divs: &mut Vec<Divergence>,
+) {
+    let got_gens = match got {
+        Output::LayerHistory(layers) => {
+            let mut g: Vec<i64> = layers.iter().map(|l| l.written_at).collect();
+            g.sort_unstable();
+            g.dedup();
+            g
+        }
+        _ => panic!("expected Output::LayerHistory for HISTORY"),
+    };
+    let expected = expected.unwrap_or_default();
+    if got_gens != expected {
+        warn!(step, label, ?got_gens, ?expected, "MISMATCH HISTORY");
+        divs.push(Divergence::new(
+            step,
+            label,
+            format!("{expected:?}"),
+            format!("{got_gens:?}"),
+        ));
+    } else {
+        debug!(step, label, gens = got_gens.len(), "HISTORY OK");
+    }
+}
+
 fn check_reduce(
     step: usize,
     label: &str,
@@ -225,7 +280,13 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(42);
         let mut ops = Vec::new();
         for _ in 0..30 {
-            ops.push(btree::pick(&mut rng, &o1, false, false));
+            ops.push(btree::pick(
+                &mut rng,
+                &o1,
+                false,
+                false,
+                crate::oracle::DST_TX_BASE_MS,
+            ));
         }
         for op in &ops {
             apply_oracle_only(op, &mut o1);
