@@ -235,7 +235,7 @@ Auth is a transport concern. A Tau binary embedded in another process, reading s
 
 ### Arc-backed layers
 
-Layer data is immutable once created. Sharing it across the read path without copying is safe. A compacted layer replaces the old stack atomically; concurrent readers holding references to old layers read consistent data until they finish.
+Layer data is immutable once created. Each lens's stack is held as an `Arc<[Layer]>`, so a read snapshots it with a single pointer bump — no vector clone on the range/reduce path. Appends are copy-on-write (RCU): the writer copies the stack, mutates the copy, then swaps the `Arc` in under the write lock, so a reader holding an earlier snapshot keeps a consistent view until it finishes. Layer clones within the copy are themselves pointer bumps because tau slices are `Arc`-backed.
 
 ### WAL-first ordering
 
