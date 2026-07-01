@@ -1177,13 +1177,7 @@ impl Executor {
         }
         let (bounds, layers_snap) =
             collect_range_bounds(&state, name, effective_start, end, filter)?;
-        let out = build_range_segments(
-            &state,
-            name,
-            &bounds,
-            layers_snap.as_ref().map(|v| v.as_slice()),
-            filter,
-        )?;
+        let out = build_range_segments(&state, name, &bounds, layers_snap.as_deref(), filter)?;
         Ok(Output::Range(apply_offset_limit(out, offset, limit)))
     }
 

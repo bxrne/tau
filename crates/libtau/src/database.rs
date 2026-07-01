@@ -313,7 +313,7 @@ where
             .lens_names()
             .iter()
             .filter_map(|name| store.layers(name))
-            .flat_map(|layers| layers.iter().map(|l| l.id))
+            .filter_map(|layers| layers.iter().map(|l| l.id).max())
             .max()
             .unwrap_or(0)
     }
@@ -348,12 +348,17 @@ where
             let entries = store
                 .lens_names()
                 .into_iter()
-                .filter_map(|name| {
+                .flat_map(|name| {
                     store
                         .layers(&name)
-                        .map(|layers| layers.iter().map(move |l| WalEntry::from_layer(&name, l)))
+                        .map(|layers| {
+                            layers
+                                .iter()
+                                .map(|l| WalEntry::from_layer(&name, l))
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default()
                 })
-                .flatten()
                 .collect();
             let flushed = store.checkpoint_flush()?;
             (entries, flushed)
@@ -400,16 +405,13 @@ where
         self.store.read().expect("store lock poisoned").at(name, t)
     }
 
-    /// Snapshot of the layer stack for `lens` wrapped in `Arc` so all query
-    /// phases (bounds collection, segment building, etc.) share one allocation.
-    /// Layer clones are pointer bumps; the Vec wrap is one extra Arc for the
-    /// batch.  Returns `None` if the lens has never been appended to.
-    pub fn layers(&self, lens: &str) -> Option<Arc<Vec<Layer<V>>>> {
-        self.store
-            .read()
-            .expect("store lock poisoned")
-            .layers(lens)
-            .map(|v| Arc::new(v.clone()))
+    /// Snapshot of the layer stack for `lens` as a shared `Arc<[Layer]>` so all
+    /// query phases (bounds collection, segment building, etc.) share one
+    /// allocation. The snapshot is a single pointer bump — no vector clone — and
+    /// the RCU append path leaves it valid for its whole lifetime. Returns
+    /// `None` if the lens has never been appended to.
+    pub fn layers(&self, lens: &str) -> Option<Arc<[Layer<V>]>> {
+        self.store.read().expect("store lock poisoned").layers(lens)
     }
 
     /// Export all layers for every lens as owned data.
@@ -425,7 +427,7 @@ where
         store
             .lens_names()
             .into_iter()
-            .filter_map(|name| store.layers(&name).map(|layers| (name, layers.clone())))
+            .filter_map(|name| store.layers(&name).map(|layers| (name, layers.to_vec())))
             .collect()
     }
 }
@@ -446,9 +448,13 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     fn layer(id: u64, items: &[(i64, i64, i64)]) -> Layer<i64> {
-        Layer::new(
+        // Pin `written_at` so every layer shares one transaction-time generation:
+        // compaction then collapses them to a single canonical layer
+        // deterministically, independent of wall-clock timing during the test.
+        Layer::new_at(
             id,
             items.iter().map(|&(s, e, v)| Tau::new(s, e, v)).collect(),
+            0,
         )
     }
 
