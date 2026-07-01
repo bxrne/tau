@@ -998,8 +998,8 @@ impl Executor {
             }
             tau_vec.push(Tau::new(start, end, value));
         }
-        tau_vec.sort_by_key(|t| t.start);
-        if tau_vec.windows(2).any(|w| w[0].end > w[1].start) {
+        tau_vec.sort_by_key(|t| t.start());
+        if tau_vec.windows(2).any(|w| w[0].end() > w[1].start()) {
             return Err(ExecError::InvalidRange);
         }
         let id = state.next_layer_id;
@@ -1166,8 +1166,10 @@ impl Executor {
             let mut out: Vec<(Timestamp, Timestamp, Value)> = Vec::with_capacity(raw.len());
             for tau in raw {
                 match out.last_mut() {
-                    Some(last) if last.1 == tau.start && last.2 == tau.value => last.1 = tau.end,
-                    _ => out.push((tau.start, tau.end, tau.value)),
+                    Some(last) if last.1 == tau.start() && last.2 == tau.value => {
+                        last.1 = tau.end()
+                    }
+                    _ => out.push((tau.start(), tau.end(), tau.value)),
                 }
             }
             let out = apply_offset_limit(out, offset, limit);
@@ -1498,7 +1500,7 @@ fn append_materialised_layer(
         .into_iter()
         .map(|(s, e, v)| Tau::new(s, e, v))
         .collect();
-    tau_vec.sort_by_key(|t| t.start);
+    tau_vec.sort_by_key(|t| t.start());
     let id = state.next_layer_id;
     state.next_layer_id += 1;
     let layer = Layer::new_sorted_unchecked(id, tau_vec, crate::model::now_ms());

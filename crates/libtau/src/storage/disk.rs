@@ -153,8 +153,8 @@ fn write_entry<V: Codec, W: Write>(
     write_str(writer, lens)?;
     writer.write_all(&(taus.len() as u32).to_le_bytes())?;
     for tau in taus {
-        writer.write_all(&tau.start.to_le_bytes())?;
-        writer.write_all(&tau.end.to_le_bytes())?;
+        writer.write_all(&tau.start().to_le_bytes())?;
+        writer.write_all(&tau.end().to_le_bytes())?;
         tau.value.write_encoded(writer)?;
     }
     Ok(())
@@ -496,7 +496,7 @@ mod tests {
         let mut cur = Cursor::new(bytes);
         let entry = DiskEntry::<i64>::read(&mut cur).expect("valid entry");
         assert_eq!(entry.taus.len(), 1);
-        assert_eq!((entry.taus[0].start, entry.taus[0].end), (0, 10));
+        assert_eq!((entry.taus[0].start(), entry.taus[0].end()), (0, 10));
     }
 
     #[test]

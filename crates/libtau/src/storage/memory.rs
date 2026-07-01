@@ -196,7 +196,7 @@ mod tests {
         compact_layers(&mut compacted);
         for layer in &compacted {
             for window in layer.taus.windows(2) {
-                assert!(window[0].end <= window[1].start, "overlap detected");
+                assert!(window[0].end() <= window[1].start(), "overlap detected");
             }
         }
     }
@@ -208,7 +208,7 @@ mod tests {
         compact_layers(&mut compacted);
         for layer in &compacted {
             for window in layer.taus.windows(2) {
-                if window[0].end == window[1].start {
+                if window[0].end() == window[1].start() {
                     assert_ne!(window[0].value, window[1].value);
                 }
             }
