@@ -47,12 +47,11 @@ fn maybe_emit_segment<V>(
         drain_stale(active, closed);
         if let Some(&(layer_idx, tau_idx)) = active.peek() {
             let v = layers[layer_idx].taus[tau_idx].value.clone();
-            match merged.last() {
+            match merged.last_mut() {
                 Some(last) if last.end() == c && last.value == v => {
                     // Extend the previous segment to `t` by replacing it; coords
                     // are shared behind an `Arc`, so `end` cannot be set in place.
-                    let start = last.start();
-                    *merged.last_mut().unwrap() = Tau::new(start, t, v);
+                    *last = Tau::new(last.start(), t, v);
                 }
                 _ => merged.push(Tau::new(c, t, v)),
             }

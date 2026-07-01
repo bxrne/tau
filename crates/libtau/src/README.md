@@ -10,7 +10,7 @@ The core engine library. All binaries depend only on this crate.
 | `value` | `Value` enum (Int/Float/Str/Bool/Null) + tagged wire encoding |
 | `ql/ast` | TauQL AST (`Stmt`, `Expr`, `Literal`, `Type`, `BinOp` …) |
 | `ql/parser` | `nom`-based parser; entry point `parse()`, scalar helper `parse_literal()` |
-| `storage/store` | `Store<V>` trait; sweep-line compaction (`compact_layers`) |
+| `storage/store` | `Store<V>` trait; per-generation sweep-line compaction (`compact_layers`) — compacts within each `written_at` transaction-time generation so `AS OF`/`HISTORY` survive |
 | `storage/memory` | `InMemory<V>` — `FxHashMap`-backed, zero I/O |
 | `storage/disk` | `Disk<V>` — compressed binary file persisting layer data **and** schema DDL; optional AES-256-GCM encryption |
 | `storage/wal` | `Wal` — write-ahead log with schema DDL replay |

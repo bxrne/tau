@@ -121,7 +121,7 @@ SE:<base64>                                             # encrypted schema DDL
 
 Schema entries carry the raw TauQL text of the DDL that defines a lens (`CREATE LENS`, `DERIVE LENS`, `SET TTL`, `UNSET TTL`, `DROP LENS`). On replay, these are re-parsed and executed with `in_replay = true`, which suppresses re-appending them to the WAL.
 
-The WAL is checkpointed when `[wal] max_size_mb` is reached, or every `CHECKPOINT_COMPACTION_INTERVAL` (8) compactions, whichever comes first: for the in-memory backend, a fresh snapshot of in-memory state is written to a new WAL file and swapped in, bounding disk usage. For the disk backend, the checkpoint instead rewrites the `.dat` file with the current live layers and truncates the WAL to just its schema lines — the `.dat` file and WAL together always hold exactly the live state, with the WAL covering everything appended since the last `.dat` rewrite. Compactions between checkpoints still shrink each lens to one layer in memory and in the WAL's logical replay (replaying an already-compacted layer plus its predecessors reproduces the same compacted result); they just don't each force a full `.dat` rewrite.
+The WAL is checkpointed when `[wal] max_size_mb` is reached, or every `CHECKPOINT_COMPACTION_INTERVAL` (8) compactions, whichever comes first: for the in-memory backend, a fresh snapshot of in-memory state is written to a new WAL file and swapped in, bounding disk usage. For the disk backend, the checkpoint instead rewrites the `.dat` file with the current live layers and truncates the WAL to just its schema lines — the `.dat` file and WAL together always hold exactly the live state, with the WAL covering everything appended since the last `.dat` rewrite. Compactions between checkpoints still shrink each lens to one layer per transaction-time generation in memory and in the WAL's logical replay (replaying an already-compacted layer plus its predecessors reproduces the same compacted result); they just don't each force a full `.dat` rewrite.
 
 ### Disk backend + WAL
 
@@ -131,14 +131,14 @@ The `disk` backend pairs every `<name>.dat` file with a `<name>.wal` file in the
 
 Each base lens accumulates layers over time. A point query must walk layers newest-first until it finds a covering tau. With many layers this is linear in the layer count.
 
-Auto-compaction fires when a lens exceeds a threshold (default: 8 layers, configurable via `--compact-threshold`). It runs a sweep-line algorithm over all layers:
+Auto-compaction fires when a lens exceeds a threshold (default: 8 layers, configurable via `--compact-threshold`). It compacts **within each transaction-time generation** — a maximal run of layers sharing a `written_at` stamp — and never across generations, so distinct write timestamps survive. Within a generation it runs a sweep-line algorithm:
 
-1. Build a list of start/end events, one pair per tau across all layers.
+1. Build a list of start/end events, one pair per tau across the generation's layers.
 2. Sort events by timestamp; ends before starts at ties.
 3. Walk events. A max-heap keyed by `(layer_idx, tau_idx)` tracks which layers are active at each point. The layer with the highest index (newest) wins.
 4. Emit a merged segment whenever the winning value changes.
 
-This is O(E log E) where E is the total number of taus. After compaction, the lens has exactly one layer.
+This is O(E log E) where E is the total number of taus. After compaction a lens holds one layer per surviving generation. Preserving generations is what keeps `AT … AS OF <t>` and `HISTORY` exact after compaction: the earlier collapse-to-one-layer form stamped the merged layer with `max(written_at)` and silently erased older beliefs. When all appends share a generation (the common burst-of-writes case) compaction still collapses to a single layer.
 
 `Store::append` returns a `bool` indicating whether compaction fired. The `Database` layer counts these and triggers a WAL-checkpoint every `CHECKPOINT_COMPACTION_INTERVAL` (8) compactions (or sooner, if `[wal] max_size_mb` is reached first) rather than on every single one, which keeps the per-append cost of the disk backend close to the in-memory backend.
 

@@ -328,7 +328,7 @@ Requires `R` permission.
 
 ### `AT LENS <name> <timestamp> AS OF <written_at>`
 
-Temporal point query scoped to layers that were written at or before `written_at` (milliseconds since Unix epoch). Useful for auditing what a lens looked like at a specific wall-clock time.
+Temporal point query scoped to layers that were written at or before `written_at` (milliseconds since Unix epoch). Useful for auditing what a lens looked like at a specific wall-clock time. Compaction preserves each transaction-time generation, so this stays exact no matter how many times the lens has been compacted.
 
 ```
 AT LENS temperature 1800 AS OF 1717000000000

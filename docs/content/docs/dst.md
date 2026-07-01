@@ -47,11 +47,15 @@ checkpoint(step, n, log, rng) -> CheckpointAction
 
 ### Independent oracle
 
-The reference oracle (`crates/dst/src/oracle.rs`) shares **no code with `libtau`**. It stores `Vec<TauInterval>` per layer and runs its own sweep-line compaction at the same threshold as the SUT. Divergences in libtau's sweep-line or query paths are caught because the oracle computes the same results independently.
+The reference oracle (`crates/dst/src/oracle.rs`) shares **no code with `libtau`**. It stores `Vec<TauInterval>` per layer, stamps each layer's `written_at` from the same virtual clock as the SUT, and runs its own per-transaction-time-generation sweep-line compaction at the same threshold. It models `AT … AS OF` (newest-wins filtered by `written_at`) and the `HISTORY` generation set independently, so a bug in libtau's sweep-line, compaction, or as-of paths diverges and is caught.
+
+### Transaction-time virtualization
+
+The write clock is virtualized: each applied op advances a replay-safe tick that pins `written_at`, and ops are clustered into shared generations. So `AT … AS OF` and `HISTORY` are exercised across real generation boundaries — before the first write, mid-history, and at `now` — and the tick is reset and re-advanced identically on checkpoint replay, reproducing every `written_at` bit-for-bit.
 
 ### Behavior tree
 
-A static `LazyLock<Tree<SimCtx, Op>>` of 20 closure-based leaves. Guards and builders are `Arc<dyn Fn>` — no fn-pointer constraints. Tag bits suppress WAL-excluded ops at runtime (`excluded_tags` parameter to `Tree::pick`).
+A static `LazyLock<Tree<SimCtx, Op>>` of 28 closure-based leaves, including `AT … AS OF` and `HISTORY`. Guards and builders are `Arc<dyn Fn>` — no fn-pointer constraints. Tag bits suppress WAL-excluded ops at runtime (`excluded_tags` parameter to `Tree::pick`).
 
 ### Deterministic scheduler
 
