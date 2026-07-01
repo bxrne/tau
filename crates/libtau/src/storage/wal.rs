@@ -103,7 +103,9 @@ pub struct WalEntry<V> {
     /// Wall-clock milliseconds since Unix epoch when this layer was written.
     pub written_at: i64,
     pub lens: String,
-    pub taus: Vec<(Timestamp, Timestamp, V)>,
+    /// One entry per tau: the per-axis `(lo, hi)` coordinates (axis 0 is valid
+    /// time; single-element for classic 1-D taus) and the value.
+    pub taus: Vec<(Vec<(Timestamp, Timestamp)>, V)>,
 }
 
 impl<V: Clone> WalEntry<V> {
@@ -116,10 +118,58 @@ impl<V: Clone> WalEntry<V> {
             taus: layer
                 .taus
                 .iter()
-                .map(|t| (t.start(), t.end(), t.value.clone()))
+                .map(|t| {
+                    (
+                        t.coords.iter().map(|b| (b.lo, b.hi)).collect(),
+                        t.value.clone(),
+                    )
+                })
                 .collect(),
         }
     }
+}
+
+/// Encode one tau token. 1-D keeps the legacy `lo:hi:value` form so existing
+/// WALs stay byte-identical; N-D writes `N<k>:lo:hi:…:value`. A legacy token's
+/// first field is a timestamp, which never starts with `N`, so the two forms
+/// cannot be confused.
+fn encode_tau_token<V: Codec>(coords: &[(Timestamp, Timestamp)], v: &V) -> String {
+    use std::fmt::Write as _;
+    if let [(s, e)] = coords {
+        return format!("{}:{}:{}", s, e, v.encode());
+    }
+    let mut tok = format!("N{}", coords.len());
+    for (lo, hi) in coords {
+        _ = write!(&mut tok, ":{lo}:{hi}");
+    }
+    tok.push(':');
+    tok.push_str(&v.encode());
+    tok
+}
+
+/// Decode one tau token (both forms of [`encode_tau_token`]).
+fn decode_tau_token<V: Codec>(tok: &str) -> Option<(Vec<(Timestamp, Timestamp)>, V)> {
+    if let Some(rest) = tok.strip_prefix('N') {
+        let (k_str, rest) = rest.split_once(':')?;
+        let k: usize = k_str.parse().ok()?;
+        if k < 2 {
+            return None;
+        }
+        let mut parts = rest.splitn(2 * k + 1, ':');
+        let mut coords = Vec::with_capacity(k);
+        for _ in 0..k {
+            let lo: Timestamp = parts.next()?.parse().ok()?;
+            let hi: Timestamp = parts.next()?.parse().ok()?;
+            coords.push((lo, hi));
+        }
+        let v = V::decode(parts.next()?)?;
+        return Some((coords, v));
+    }
+    let mut parts = tok.splitn(3, ':');
+    let s: Timestamp = parts.next()?.parse().ok()?;
+    let e: Timestamp = parts.next()?.parse().ok()?;
+    let v = V::decode(parts.next()?)?;
+    Some((vec![(s, e)], v))
 }
 
 impl<V: Codec> WalEntry<V> {
@@ -129,7 +179,7 @@ impl<V: Codec> WalEntry<V> {
         let taus_str = self
             .taus
             .iter()
-            .map(|(s, e, v)| format!("{}:{}:{}", s, e, v.encode()))
+            .map(|(coords, v)| encode_tau_token(coords, v))
             .collect::<Vec<_>>()
             .join(" ");
         let payload = if self.taus.is_empty() {
@@ -176,13 +226,7 @@ impl<V: Codec> WalEntry<V> {
         } else {
             rest_str
                 .split(' ')
-                .map(|tok| {
-                    let mut parts = tok.splitn(3, ':');
-                    let s: Timestamp = parts.next()?.parse().ok()?;
-                    let e: Timestamp = parts.next()?.parse().ok()?;
-                    let v = V::decode(parts.next()?)?;
-                    Some((s, e, v))
-                })
+                .map(decode_tau_token)
                 .collect::<Option<Vec<_>>>()?
         };
 
@@ -363,7 +407,15 @@ impl Wal {
             layer.id, layer.written_at, lens
         );
         for tau in layer.taus.iter() {
-            _ = write!(&mut self.scratch, " {}:{}:", tau.start(), tau.end());
+            if let [b] = &*tau.coords {
+                _ = write!(&mut self.scratch, " {}:{}:", b.lo, b.hi);
+            } else {
+                _ = write!(&mut self.scratch, " N{}", tau.coords.len());
+                for b in tau.coords.iter() {
+                    _ = write!(&mut self.scratch, ":{}:{}", b.lo, b.hi);
+                }
+                self.scratch.push(':');
+            }
             tau.value.encode_into(&mut self.scratch);
         }
         let checksum = crc32(&self.scratch);
@@ -419,23 +471,33 @@ impl Wal {
                     "replaying WAL entry"
                 );
 
-                let taus: Vec<Tau<V>> = entry
+                // Rebuild through the fallible constructors: an entry with a
+                // valid CRC can still carry degenerate intervals or overlapping
+                // orthotopes after in-place file damage — skip it like any other
+                // corrupt line rather than panicking mid-replay.
+                let taus: Option<Vec<Tau<V>>> = entry
                     .taus
                     .into_iter()
-                    .map(|(s, e, v)| Tau::new(s, e, v))
+                    .map(|(coords, v)| Tau::try_new_nd(&coords, v))
                     .collect();
+                let layer =
+                    taus.and_then(|t| Layer::try_new_nd_at(entry.layer_id, t, entry.written_at));
+                let Some(layer) = layer else {
+                    warn!(
+                        lens = %entry.lens,
+                        layer_id = entry.layer_id,
+                        "WAL entry decodes but violates layer invariants, discarding"
+                    );
+                    skipped += 1;
+                    continue;
+                };
 
-                store
-                    .append(
-                        &entry.lens,
-                        Layer::new_at(entry.layer_id, taus, entry.written_at),
-                    )
-                    .map_err(|e| {
-                        io::Error::other(format!(
-                            "WAL replay: failed to apply layer {} for lens {:?}: {e}",
-                            entry.layer_id, entry.lens
-                        ))
-                    })?;
+                store.append(&entry.lens, layer).map_err(|e| {
+                    io::Error::other(format!(
+                        "WAL replay: failed to apply layer {} for lens {:?}: {e}",
+                        entry.layer_id, entry.lens
+                    ))
+                })?;
                 count += 1;
             } else {
                 skipped += 1;
@@ -629,7 +691,7 @@ mod tests {
                         for (width, gap, v) in specs {
                             let s = cursor + gap;
                             let e = s + width;
-                            taus.push((s, e, v));
+                            taus.push((vec![(s, e)], v));
                             cursor = e;
                         }
                         WalEntry::<i64> {
@@ -784,7 +846,7 @@ mod tests {
                 e.layer_id,
                 e.taus
                     .iter()
-                    .map(|(s, e, v)| Tau::new(*s, *e, *v))
+                    .map(|(c, v)| Tau::new(c[0].0, c[0].1, *v))
                     .collect(),
             );
             reference.append(&e.lens, layer).unwrap();
@@ -824,7 +886,7 @@ mod tests {
                 layer_id: 7,
                 written_at: 0,
                 lens: "myLens".to_string(),
-                taus: vec![(0, 10, 1)],
+                taus: vec![(vec![(0, 10)], 1)],
             };
             wal.append(&entry).unwrap();
         }
@@ -878,7 +940,7 @@ mod tests {
             .replay(&mut store)
             .unwrap();
         // The lens may not even exist after a no-key replay.
-        let probe = entry.taus.first().map(|(s, _, _)| *s).unwrap_or(0);
+        let probe = entry.taus.first().map(|(c, _)| c[0].0).unwrap_or(0);
         assert_eq!(store.at(&entry.lens, probe), None);
     }
 
@@ -929,14 +991,15 @@ mod tests {
                 e.layer_id,
                 e.taus
                     .iter()
-                    .map(|(s, ee, v)| Tau::new(*s, *ee, *v))
+                    .map(|(c, v)| Tau::new(c[0].0, c[0].1, *v))
                     .collect(),
             );
             reference.append(&e.lens, layer).unwrap();
         }
         for e in [&good_a, &good_b] {
-            if let Some((s, _, _)) = e.taus.first() {
-                assert_eq!(store.at(&e.lens, *s), reference.at(&e.lens, *s));
+            if let Some((c, _)) = e.taus.first() {
+                let s = c[0].0;
+                assert_eq!(store.at(&e.lens, s), reference.at(&e.lens, s));
             }
         }
         // The corrupt line claims lens "corrupt" - it must not appear.
@@ -1039,17 +1102,18 @@ mod tests {
                 e.layer_id,
                 e.taus
                     .iter()
-                    .map(|(s, end, v)| Tau::new(*s, *end, *v))
+                    .map(|(c, v)| Tau::new(c[0].0, c[0].1, *v))
                     .collect(),
             );
             reference.append(&e.lens, layer).unwrap();
         }
 
         for e in &initial {
-            if let Some((s, _, _)) = e.taus.first() {
+            if let Some((c, _)) = e.taus.first() {
+                let s = c[0].0;
                 assert_eq!(
-                    archived_store.at(&e.lens, *s),
-                    reference.at(&e.lens, *s),
+                    archived_store.at(&e.lens, s),
+                    reference.at(&e.lens, s),
                     "archive must replay to pre-rotation state"
                 );
             }

@@ -186,6 +186,9 @@ pub(crate) struct DbState {
     /// Per-lens TTL in seconds.  A lens with an entry here hides data whose
     /// temporal interval ends before `(now - ttl_secs)` seconds ago.
     pub(crate) ttl_secs: HashMap<String, i64>,
+    /// Axis names for multi-dimensional lenses (axis 0 is valid time).  A lens
+    /// absent from this map has the default single valid-time axis.
+    pub(crate) axes: HashMap<String, Vec<String>>,
 }
 
 impl DbState {
@@ -201,6 +204,7 @@ impl DbState {
             derived_ranges: HashMap::default(),
             xderived: HashMap::default(),
             ttl_secs: HashMap::default(),
+            axes: HashMap::default(),
         }
     }
 
@@ -337,6 +341,18 @@ fn ensure_base_lens(state: &DbState, name: &str, stmt_kind: &str) -> Result<(), 
     }
 }
 
+/// Single-axis statements (`AT t`, `RANGE`, `REDUCE`, TTL, derivation) cannot
+/// address a multi-axis lens — its taus need one coordinate per axis.
+fn ensure_single_axis(state: &DbState, name: &str, stmt_kind: &str) -> Result<(), ExecError> {
+    match state.axes.get(name) {
+        Some(axes) => Err(ExecError::InvalidExpr(format!(
+            "{stmt_kind}: lens '{name}' has {} axes; supply one coordinate per axis",
+            axes.len()
+        ))),
+        None => Ok(()),
+    }
+}
+
 fn record_metrics(metrics: &Metrics, active: Option<&str>, stmt: &Stmt, ns: u64) {
     let op = stmt_to_op(stmt);
     metrics.record_op(op, ns);
@@ -347,10 +363,10 @@ fn record_metrics(metrics: &Metrics, active: Option<&str>, stmt: &Stmt, ns: u64)
 
 fn stmt_to_op(stmt: &Stmt) -> Op {
     match stmt {
-        Stmt::Append { .. } | Stmt::BatchAppend { .. } => Op::Append,
+        Stmt::Append { .. } | Stmt::BatchAppend { .. } | Stmt::AppendNd { .. } => Op::Append,
         Stmt::Copy { .. } => Op::Copy,
-        Stmt::At { .. } | Stmt::AtAsOf { .. } | Stmt::AtLayer { .. } => Op::At,
-        Stmt::Range { .. } => Op::Range,
+        Stmt::At { .. } | Stmt::AtNd { .. } | Stmt::AtAsOf { .. } | Stmt::AtLayer { .. } => Op::At,
+        Stmt::Range { .. } | Stmt::RangeNd { .. } => Op::Range,
         Stmt::Reduce { .. } => Op::Reduce,
         Stmt::HistoryLens { .. } => Op::History,
         Stmt::Create { .. } | Stmt::Derive { .. } | Stmt::Xderive { .. } => Op::CreateLens,
@@ -496,6 +512,7 @@ impl Executor {
         let t0 = Instant::now();
         let result = match stmt {
             Stmt::At { name, t } => self.at_lens(name, *t),
+            Stmt::AtNd { name, ts, as_of } => self.at_nd_lens(name, ts, *as_of),
             Stmt::AtAsOf { name, t, as_of } => self.at_as_of_lens(name, *t, *as_of),
             Stmt::AtLayer { name, t, layer_id } => self.at_layer_lens(name, *t, *layer_id),
             Stmt::HistoryLens { name, range } => self.history_lens(name, *range),
@@ -507,6 +524,12 @@ impl Executor {
                 limit,
                 offset,
             } => self.range_lens(name, *start, *end, filter.as_ref(), *limit, *offset),
+            Stmt::RangeNd {
+                name,
+                start,
+                end,
+                fixed,
+            } => self.range_nd_lens(name, *start, *end, fixed),
             Stmt::Reduce {
                 name,
                 start,
@@ -551,12 +574,14 @@ impl Executor {
             Stmt::CreateDatabase { name } => self.create_database(name),
             Stmt::DropDatabase { name } => self.drop_database(name),
             Stmt::UseDatabase { name } => self.use_database(name),
-            Stmt::Create { name, ty } => self.create_lens(name, ty.clone()),
+            Stmt::Create { name, ty, axes } => self.create_lens(name, ty.clone(), axes),
             Stmt::Append { name, taus } => self.write_layer(name, literal_taus(taus)),
+            Stmt::AppendNd { name, taus } => self.append_nd_lens(name, taus),
             Stmt::Copy { name, path } => self.copy_lens(name, path),
             Stmt::Derive { name, expr, range } => self.derive_lens(name, expr.clone(), *range),
             Stmt::Xderive { name, expr, range } => self.xderive_lens(name, expr.clone(), *range),
             Stmt::At { name, t } => self.at_lens(name, *t),
+            Stmt::AtNd { name, ts, as_of } => self.at_nd_lens(name, ts, *as_of),
             Stmt::Range {
                 name,
                 start,
@@ -565,6 +590,12 @@ impl Executor {
                 limit,
                 offset,
             } => self.range_lens(name, *start, *end, filter.as_ref(), *limit, *offset),
+            Stmt::RangeNd {
+                name,
+                start,
+                end,
+                fixed,
+            } => self.range_nd_lens(name, *start, *end, fixed),
             Stmt::Drop { name } => self.drop_lens(name),
             Stmt::ShowDatabases => self.show_databases(),
             Stmt::ShowLenses => self.show_lenses(),
@@ -656,10 +687,11 @@ impl Executor {
     pub fn exec_db_write(&self, stmt: &Stmt) -> Result<Output, ExecError> {
         let t0 = Instant::now();
         let result = match stmt {
-            Stmt::Create { name, ty } => self.create_lens(name, ty.clone()),
+            Stmt::Create { name, ty, axes } => self.create_lens(name, ty.clone(), axes),
             Stmt::Append { name, taus } | Stmt::BatchAppend { name, taus } => {
                 self.write_layer(name, literal_taus(taus))
             }
+            Stmt::AppendNd { name, taus } => self.append_nd_lens(name, taus),
             Stmt::Copy { name, path } => self.copy_lens(name, path),
             Stmt::Derive { name, expr, range } => self.derive_lens(name, expr.clone(), *range),
             Stmt::Xderive { name, expr, range } => self.xderive_lens(name, expr.clone(), *range),
@@ -741,11 +773,15 @@ impl Executor {
             Stmt::DropDatabase { name } => require_admin_or_a_on(name),
             Stmt::UseDatabase { name } => require_any_grant(name),
             Stmt::Create { .. } => require(require_active()?, Perm::C),
-            Stmt::Append { .. } | Stmt::Copy { .. } => require(require_active()?, Perm::U),
-            Stmt::Derive { .. } | Stmt::Xderive { .. } => require(require_active()?, Perm::C),
-            Stmt::At { .. } | Stmt::Range { .. } | Stmt::Reduce { .. } => {
-                require(require_active()?, Perm::R)
+            Stmt::Append { .. } | Stmt::AppendNd { .. } | Stmt::Copy { .. } => {
+                require(require_active()?, Perm::U)
             }
+            Stmt::Derive { .. } | Stmt::Xderive { .. } => require(require_active()?, Perm::C),
+            Stmt::At { .. }
+            | Stmt::AtNd { .. }
+            | Stmt::Range { .. }
+            | Stmt::RangeNd { .. }
+            | Stmt::Reduce { .. } => require(require_active()?, Perm::R),
             Stmt::Drop { .. } => require(require_active()?, Perm::D),
             Stmt::ShowDatabases => Ok(()),
             Stmt::ShowLenses => require(require_active()?, Perm::R),
@@ -942,21 +978,43 @@ impl Executor {
         Ok(Output::Empty)
     }
 
-    fn create_lens(&self, name: &str, ty: Type) -> Result<Output, ExecError> {
+    fn create_lens(&self, name: &str, ty: Type, axes: &[String]) -> Result<Output, ExecError> {
         let in_replay = self.in_replay;
         let db_arc = self.active_db_arc()?;
         let mut state = db_arc.write().expect("db lock poisoned");
         if state.base_types.contains_key(name) || state.derived.contains_key(name) {
             return Err(ExecError::DuplicateLens(name.into()));
         }
-        // WAL-first: persist before updating in-memory state.
+        {
+            let mut seen = HashSet::default();
+            if axes.iter().any(|a| !seen.insert(a.as_str())) {
+                return Err(ExecError::InvalidExpr("AXES names must be distinct".into()));
+            }
+        }
+        // WAL-first: persist before updating in-memory state. The Stmt Display
+        // includes the AXES clause, so arity survives schema replay.
         if !in_replay {
-            state
-                .db
-                .append_schema(&format!("CREATE LENS {name} {ty}"))?;
+            let ddl = Stmt::Create {
+                name: name.into(),
+                ty: ty.clone(),
+                axes: axes.to_vec(),
+            };
+            state.db.append_schema(&ddl.to_string())?;
         }
         state.base_types.insert(name.into(), ty);
+        // A single named axis is the default valid-time axis; only true
+        // multi-axis lenses need an entry.
+        if axes.len() > 1 {
+            state.axes.insert(name.into(), axes.to_vec());
+        }
         Ok(Output::Empty)
+    }
+
+    /// Arity-mismatch error shared by the N-D read/write paths.
+    fn arity_error(name: &str, declared: usize, supplied: usize) -> ExecError {
+        ExecError::InvalidExpr(format!(
+            "lens '{name}' has {declared} axes but the statement supplies {supplied}"
+        ))
     }
 
     /// Shared write path for `APPEND`, `BATCH APPEND`, and `COPY`: type-check
@@ -982,6 +1040,9 @@ impl Executor {
             .get(name)
             .cloned()
             .ok_or_else(|| ExecError::UnknownLens(name.into()))?;
+        if let Some(axes) = state.axes.get(name) {
+            return Err(Self::arity_error(name, axes.len(), 1));
+        }
         let mut tau_vec: Vec<Tau<Value>> = Vec::with_capacity(taus.len());
         for (start, end, value) in taus {
             if start >= end {
@@ -1013,6 +1074,138 @@ impl Executor {
             rematerialise_dependents(&mut state, name, &mut visited)?;
         }
         Ok(Output::Empty)
+    }
+
+    /// N-dimensional write path: one orthotope per tau, arity checked against
+    /// the lens's declared axes. A single-axis lens routes through
+    /// [`Executor::write_layer`] so it shares the 1-D invariants and the
+    /// materialised-view refresh.
+    fn append_nd_lens(
+        &self,
+        name: &str,
+        taus: &[(Vec<(i64, i64)>, crate::ql::ast::Literal)],
+    ) -> Result<Output, ExecError> {
+        if taus.is_empty() {
+            return Ok(Output::Empty);
+        }
+        let db_arc = self.active_db_arc()?;
+        let arity = {
+            let state = db_arc.read().expect("db lock poisoned");
+            state.axes.get(name).map_or(1, Vec::len)
+        };
+        if arity == 1 {
+            let flat: Result<Vec<_>, ExecError> = taus
+                .iter()
+                .map(|(coords, lit)| match coords.as_slice() {
+                    [(s, e)] => Ok((*s, *e, Value::from(lit))),
+                    _ => Err(Self::arity_error(name, 1, coords.len())),
+                })
+                .collect();
+            return self.write_layer(name, flat?);
+        }
+        let mut state = db_arc.write().expect("db lock poisoned");
+        if state.xderived.contains_key(name) {
+            return Err(ExecError::MaterialisedLens(name.into()));
+        }
+        let ty = state
+            .base_types
+            .get(name)
+            .cloned()
+            .ok_or_else(|| ExecError::UnknownLens(name.into()))?;
+        let mut tau_vec: Vec<Tau<Value>> = Vec::with_capacity(taus.len());
+        for (coords, lit) in taus {
+            if coords.len() != arity {
+                return Err(Self::arity_error(name, arity, coords.len()));
+            }
+            let value = Value::from(lit);
+            if let Some(got) = value.ty()
+                && got != ty
+            {
+                return Err(ExecError::TypeMismatch {
+                    lens: name.into(),
+                    expected: ty.clone(),
+                    got: value.type_name().into(),
+                });
+            }
+            tau_vec.push(Tau::try_new_nd(coords, value).ok_or(ExecError::InvalidRange)?);
+        }
+        let id = state.next_layer_id;
+        state.next_layer_id += 1;
+        let layer = Layer::try_new_nd_at(id, tau_vec, crate::model::now_ms())
+            .ok_or(ExecError::InvalidRange)?;
+        state.db.append(name, layer)?;
+        Ok(Output::Empty)
+    }
+
+    /// N-dimensional point lookup: newest layer wins, optionally scoped to
+    /// layers written at or before `as_of`.
+    fn at_nd_lens(&self, name: &str, ts: &[i64], as_of: Option<i64>) -> Result<Output, ExecError> {
+        let db_arc = self.active_db_arc()?;
+        let state = db_arc.read().expect("db lock poisoned");
+        ensure_base_lens(&state, name, "AT")?;
+        let arity = state.axes.get(name).map_or(1, Vec::len);
+        if ts.len() != arity {
+            return Err(Self::arity_error(name, arity, ts.len()));
+        }
+        let val = state
+            .db
+            .layers(name)
+            .unwrap_or_default()
+            .iter()
+            .rev()
+            .filter(|l| as_of.is_none_or(|a| l.written_at <= a))
+            .find_map(|l| l.at_nd(ts))
+            .cloned();
+        Ok(Output::Value(val))
+    }
+
+    /// N-dimensional range scan: sweep valid time over `[start, end)` with the
+    /// remaining axes fixed at `fixed`. Taus whose non-valid axes contain the
+    /// fixed points form a 1-D non-overlapping view per layer (two taus that
+    /// both cover the fixed points and overlap on valid time would be a full
+    /// orthotope overlap, which the append path rejects), so the standard
+    /// newest-wins sweep applies unchanged.
+    fn range_nd_lens(
+        &self,
+        name: &str,
+        start: Timestamp,
+        end: Timestamp,
+        fixed: &[i64],
+    ) -> Result<Output, ExecError> {
+        if start >= end {
+            return Err(ExecError::InvalidRange);
+        }
+        let db_arc = self.active_db_arc()?;
+        let state = db_arc.read().expect("db lock poisoned");
+        ensure_base_lens(&state, name, "RANGE")?;
+        let arity = state.axes.get(name).map_or(1, Vec::len);
+        if fixed.len() + 1 != arity {
+            return Err(Self::arity_error(name, arity, fixed.len() + 1));
+        }
+        let layers = state.db.layers(name).unwrap_or_default();
+        let filtered: Vec<Layer<Value>> = layers
+            .iter()
+            .map(|l| {
+                let taus: Vec<Tau<Value>> = l
+                    .taus
+                    .iter()
+                    .filter(|t| {
+                        t.coords.len() == arity
+                            && t.coords[1..]
+                                .iter()
+                                .zip(fixed)
+                                .all(|(b, &p)| b.lo <= p && p < b.hi)
+                    })
+                    .cloned()
+                    .collect();
+                Layer::new_sorted_unchecked(l.id, taus, l.written_at)
+            })
+            .collect();
+        let segs = sweep_range(&filtered, start, end)
+            .into_iter()
+            .map(|t| (t.start(), t.end(), t.value))
+            .collect();
+        Ok(Output::Range(segs))
     }
 
     fn copy_lens(&self, name: &str, path: &str) -> Result<Output, ExecError> {
@@ -1056,6 +1249,9 @@ impl Executor {
         let mut visited = HashSet::default();
         if would_cycle(&state.derived, name, &expr, &mut visited) {
             return Err(ExecError::CycleDetected(name.into()));
+        }
+        for dep in collect_deps(&state, &expr) {
+            ensure_single_axis(&state, &dep, "DERIVE")?;
         }
         if !in_replay {
             let stmt = Stmt::Derive {
@@ -1106,6 +1302,9 @@ impl Executor {
         if would_cycle(&state.derived, name, &expr, &mut visited) {
             return Err(ExecError::CycleDetected(name.into()));
         }
+        for dep in collect_deps(&state, &expr) {
+            ensure_single_axis(&state, &dep, "XDERIVE")?;
+        }
 
         let taus = crate::query::materialise_expr(&state, &expr, range)?;
         let ty = infer_type(&taus).unwrap_or(Type::Int);
@@ -1134,6 +1333,7 @@ impl Executor {
     fn at_lens(&self, name: &str, t: Timestamp) -> Result<Output, ExecError> {
         let db_arc = self.active_db_arc()?;
         let state = db_arc.read().expect("db lock poisoned");
+        ensure_single_axis(&state, name, "AT")?;
         if ttl_cutoff(&state, name).is_some_and(|c| t < c) {
             return Ok(Output::Value(None));
         }
@@ -1155,6 +1355,7 @@ impl Executor {
         let db_arc = self.active_db_arc()?;
         let state = db_arc.read().expect("db lock poisoned");
         ensure_lens_exists(&state, name)?;
+        ensure_single_axis(&state, name, "RANGE")?;
         let effective_start = ttl_cutoff(&state, name).map_or(start, |c| start.max(c));
         if effective_start >= end {
             return Ok(Output::Range(vec![]));
@@ -1194,6 +1395,7 @@ impl Executor {
         let db_arc = self.active_db_arc()?;
         let state = db_arc.read().expect("db lock poisoned");
         ensure_lens_exists(&state, name)?;
+        ensure_single_axis(&state, name, "REDUCE")?;
         let effective_start = ttl_cutoff(&state, name).map_or(start, |c| start.max(c));
         if effective_start >= end {
             return Ok(Output::Value(None));
@@ -1207,6 +1409,7 @@ impl Executor {
         let db_arc = self.active_db_arc()?;
         let mut state = db_arc.write().expect("db lock poisoned");
         ensure_lens_exists(&state, name)?;
+        ensure_single_axis(&state, name, "TTL")?;
         let stmt_text = match secs {
             Some(s) => {
                 state.ttl_secs.insert(name.into(), s);
@@ -1267,6 +1470,7 @@ impl Executor {
         let in_types = state.base_types.remove(name).is_some();
         let in_derived = state.derived.remove(name).is_some();
         state.derived_ranges.remove(name);
+        state.axes.remove(name);
         let in_xderived = state.xderived.remove(name).is_some();
         if in_types || in_derived || in_xderived {
             state.db.drop_lens(name);
@@ -1283,6 +1487,7 @@ impl Executor {
         let db_arc = self.active_db_arc()?;
         let state = db_arc.read().expect("db lock poisoned");
         ensure_base_lens(&state, name, "AT AS OF")?;
+        ensure_single_axis(&state, name, "AT AS OF")?;
         let filtered: Vec<Layer<Value>> = state
             .db
             .layers(name)
@@ -1300,6 +1505,7 @@ impl Executor {
         let db_arc = self.active_db_arc()?;
         let state = db_arc.read().expect("db lock poisoned");
         ensure_base_lens(&state, name, "AT LAYER")?;
+        ensure_single_axis(&state, name, "AT LAYER")?;
         let result = state
             .db
             .layers(name)
@@ -1536,6 +1742,7 @@ fn is_transactable(stmt: &Stmt) -> bool {
         stmt,
         Stmt::Create { .. }
             | Stmt::Append { .. }
+            | Stmt::AppendNd { .. }
             | Stmt::BatchAppend { .. }
             | Stmt::Copy { .. }
             | Stmt::Derive { .. }

@@ -58,11 +58,42 @@ struct NaiveLayer {
     intervals: Vec<TauInterval>,
 }
 
+/// One N-dimensional fact: one `(lo, hi)` interval per axis plus the value.
+#[derive(Clone, Debug)]
+struct NdBox {
+    coords: Vec<(Ts, Ts)>,
+    value: Value,
+}
+
+impl NdBox {
+    fn contains(&self, ts: &[Ts]) -> bool {
+        ts.len() == self.coords.len()
+            && self
+                .coords
+                .iter()
+                .zip(ts)
+                .all(|(&(lo, hi), &t)| lo <= t && t < hi)
+    }
+}
+
+/// One append layer of an N-dimensional lens (higher index = newer, wins).
+#[derive(Clone, Debug)]
+struct NdLayer {
+    written_at: i64,
+    boxes: Vec<NdBox>,
+}
+
 /// Per-lens data.
 enum LensData {
     Base {
         layers: Vec<NaiveLayer>,
         ttl_secs: Option<i64>,
+    },
+    /// Multi-axis lens: no compaction (mirroring the engine's N-D exemption),
+    /// newest-wins across layers, at most one box per layer covers a point.
+    NdBase {
+        arity: usize,
+        layers: Vec<NdLayer>,
     },
     Derived(DeriveSpec),
     /// Materialised (`XDERIVE`) lens.  The SUT stores the result as layers and
@@ -136,7 +167,113 @@ impl OracleDb {
                 gens.dedup();
                 Some(gens)
             }
+            LensData::NdBase { layers, .. } => {
+                let mut gens: Vec<i64> = layers.iter().map(|l| l.written_at).collect();
+                gens.sort_unstable();
+                gens.dedup();
+                Some(gens)
+            }
             _ => Some(vec![]),
+        }
+    }
+
+    /// N-dimensional point lookup: newest layer first (optionally scoped to
+    /// layers written at or before `as_of`), first box containing every
+    /// coordinate wins. Boxes within one layer never fully overlap, so the
+    /// match is unique.
+    fn at_nd(&self, name: &str, ts: &[Ts], as_of: Option<i64>) -> Option<Value> {
+        match self.lenses.get(name)? {
+            LensData::NdBase { arity, layers } if *arity == ts.len() => layers
+                .iter()
+                .rev()
+                .filter(|l| as_of.is_none_or(|a| l.written_at <= a))
+                .find_map(|l| l.boxes.iter().find(|b| b.contains(ts)))
+                .map(|b| b.value.clone()),
+            _ => None,
+        }
+    }
+
+    /// N-dimensional range: boundary decomposition on the valid axis restricted
+    /// to boxes whose non-valid axes contain `fixed`, then per-segment `at_nd`
+    /// with same-value merging — deliberately a different formulation from the
+    /// engine's filtered sweep.
+    fn range_nd(&self, name: &str, qs: Ts, qe: Ts, fixed: &[Ts]) -> Vec<(Ts, Ts, Value)> {
+        let Some(LensData::NdBase { arity, layers }) = self.lenses.get(name) else {
+            return vec![];
+        };
+        if qs >= qe || fixed.len() + 1 != *arity {
+            return vec![];
+        }
+        let mut pts: BTreeSet<Ts> = BTreeSet::new();
+        pts.insert(qs);
+        pts.insert(qe);
+        for layer in layers {
+            for b in &layer.boxes {
+                let on_fixed = b.coords[1..]
+                    .iter()
+                    .zip(fixed)
+                    .all(|(&(lo, hi), &p)| lo <= p && p < hi);
+                if !on_fixed {
+                    continue;
+                }
+                let (s, e) = b.coords[0];
+                if s < qe && e > qs {
+                    if s > qs {
+                        pts.insert(s);
+                    }
+                    if e < qe {
+                        pts.insert(e);
+                    }
+                }
+            }
+        }
+        let pts: Vec<Ts> = pts.into_iter().collect();
+        let mut out: Vec<(Ts, Ts, Value)> = Vec::new();
+        let mut probe = Vec::with_capacity(fixed.len() + 1);
+        for w in pts.windows(2) {
+            let (s, e) = (w[0], w[1]);
+            probe.clear();
+            probe.push(s);
+            probe.extend_from_slice(fixed);
+            let Some(v) = self.at_nd(name, &probe, None) else {
+                continue;
+            };
+            match out.last_mut() {
+                Some(last) if last.2 == v && last.1 == s => last.1 = e,
+                _ => out.push((s, e, v)),
+            }
+        }
+        out
+    }
+
+    fn create_nd_lens(&mut self, name: &str, arity: usize) {
+        self.lenses
+            .entry(name.to_string())
+            .or_insert_with(|| LensData::NdBase {
+                arity,
+                layers: vec![],
+            });
+    }
+
+    /// Append one N-D layer, stamped from the virtual clock like the engine.
+    /// No compaction — the engine exempts multi-axis lenses.
+    fn append_nd(&mut self, name: &str, taus: &[(Vec<(Ts, Ts)>, Value)]) {
+        let written_at = libtau::wall_clock::now_ms();
+        if let Some(LensData::NdBase { arity, layers }) = self.lenses.get_mut(name) {
+            let boxes: Vec<NdBox> = taus
+                .iter()
+                .filter(|(coords, _)| {
+                    coords.len() == *arity && coords.iter().all(|&(lo, hi)| lo < hi)
+                })
+                .map(|(coords, value)| NdBox {
+                    coords: coords.clone(),
+                    value: value.clone(),
+                })
+                .collect();
+            if boxes.is_empty() {
+                return;
+            }
+            layers.push(NdLayer { written_at, boxes });
         }
     }
 
@@ -156,6 +293,7 @@ impl OracleDb {
                 }
                 None
             }
+            LensData::NdBase { .. } => None,
             LensData::Derived(spec) => {
                 let va = Self::at_in(&spec.a, t, now_secs, lenses)?;
                 let vb = Self::at_in(&spec.b, t, now_secs, lenses)?;
@@ -246,6 +384,8 @@ impl OracleDb {
                     }
                 }
             }
+            // N-D lenses have their own boundary decomposition in `range_nd`.
+            Some(LensData::NdBase { .. }) => {}
             Some(LensData::Derived(spec)) => {
                 Self::collect_boundaries(&spec.a, qs, qe, now_secs, lenses, pts);
                 Self::collect_boundaries(&spec.b, qs, qe, now_secs, lenses, pts);
@@ -502,6 +642,14 @@ enum PendingMutation {
     UnsetTtl {
         lens: String,
     },
+    CreateNdLens {
+        name: String,
+        arity: usize,
+    },
+    AppendNd {
+        lens: String,
+        taus: Vec<(Vec<(Ts, Ts)>, Value)>,
+    },
 }
 
 /// Independent reference model for Tau DST.
@@ -641,6 +789,12 @@ impl Oracle {
             PendingMutation::Xderive { name, spec, range } => self.xderive_lens(&name, spec, range),
             PendingMutation::SetTtl { lens, secs } => self.set_ttl(&lens, secs),
             PendingMutation::UnsetTtl { lens } => self.unset_ttl(&lens),
+            PendingMutation::CreateNdLens { name, arity } => {
+                self.db_mut().create_nd_lens(&name, arity);
+            }
+            PendingMutation::AppendNd { lens, taus } => {
+                self.db_mut().append_nd(&lens, &taus);
+            }
         }
     }
 
@@ -658,6 +812,14 @@ impl Oracle {
 
     pub fn at_as_of(&self, lens: &str, t: Ts, as_of: i64) -> Option<Value> {
         self.db().at_as_of(lens, t, as_of)
+    }
+
+    pub fn at_nd(&self, lens: &str, ts: &[Ts], as_of: Option<i64>) -> Option<Value> {
+        self.db().at_nd(lens, ts, as_of)
+    }
+
+    pub fn range_nd(&self, lens: &str, qs: Ts, qe: Ts, fixed: &[Ts]) -> Vec<(Ts, Ts, Value)> {
+        self.db().range_nd(lens, qs, qe, fixed)
     }
 
     /// Sorted, de-duplicated `written_at` generations for `lens` (the model of
@@ -694,6 +856,32 @@ impl Oracle {
             }
             Op::At { lens, t } => {
                 let _ = self.at(lens, *t);
+            }
+            Op::CreateNdLens { name, arity } => {
+                self.buffer_mutation(PendingMutation::CreateNdLens {
+                    name: name.clone(),
+                    arity: *arity,
+                });
+            }
+            Op::AppendNd { lens, taus } => {
+                self.buffer_mutation(PendingMutation::AppendNd {
+                    lens: lens.clone(),
+                    taus: taus
+                        .iter()
+                        .map(|(c, v)| (c.clone(), Value::Int(*v)))
+                        .collect(),
+                });
+            }
+            Op::AtNd { lens, ts, as_of } => {
+                let _ = self.at_nd(lens, ts, *as_of);
+            }
+            Op::RangeNd {
+                lens,
+                start,
+                end,
+                fixed,
+            } => {
+                let _ = self.range_nd(lens, *start, *end, fixed);
             }
             Op::AtAsOf { lens, t, as_of } => {
                 let _ = self.at_as_of(lens, *t, *as_of);

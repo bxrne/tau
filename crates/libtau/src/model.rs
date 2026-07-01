@@ -46,6 +46,47 @@ impl<V> Tau<V> {
         })
     }
 
+    /// Fallible N-dimensional constructor: one half-open `[lo, hi)` interval
+    /// per axis, axis 0 being valid time. Returns `None` when `coords` is empty
+    /// or any interval is degenerate or inverted.
+    pub fn try_new_nd(coords: &[(Timestamp, Timestamp)], value: V) -> Option<Self> {
+        if coords.is_empty() || coords.iter().any(|&(lo, hi)| lo >= hi) {
+            return None;
+        }
+        Some(Self {
+            coords: coords.iter().map(|&(lo, hi)| Bound { lo, hi }).collect(),
+            value,
+        })
+    }
+
+    /// Number of axes this tau spans.
+    #[inline]
+    pub fn arity(&self) -> usize {
+        self.coords.len()
+    }
+
+    /// `true` when `ts` names one point per axis and every axis interval
+    /// contains its point. `false` on arity mismatch.
+    pub fn contains_point(&self, ts: &[Timestamp]) -> bool {
+        ts.len() == self.coords.len()
+            && self
+                .coords
+                .iter()
+                .zip(ts)
+                .all(|(b, &t)| b.lo <= t && t < b.hi)
+    }
+
+    /// `true` when the two orthotopes intersect on **every** axis — i.e. some
+    /// point is covered by both. `false` on arity mismatch.
+    pub fn box_overlaps(&self, other: &Self) -> bool {
+        self.coords.len() == other.coords.len()
+            && self
+                .coords
+                .iter()
+                .zip(other.coords.iter())
+                .all(|(a, b)| a.lo < b.hi && b.lo < a.hi)
+    }
+
     /// Start of the valid-time interval (`coords[0].lo`).
     #[inline]
     pub fn start(&self) -> Timestamp {
@@ -145,6 +186,41 @@ impl<V> Layer<V> {
         }
     }
 
+    /// Fallible N-dimensional layer constructor. Taus are sorted by their
+    /// valid-time start; returns `None` when arities differ across taus or two
+    /// taus' orthotopes fully overlap (intersect on every axis — an ambiguous
+    /// duplicate within one append batch). Unlike the 1-axis invariant, taus
+    /// **may** overlap on valid time as long as they differ somewhere else.
+    pub fn try_new_nd_at(id: LayerId, mut taus: Vec<Tau<V>>, written_at: i64) -> Option<Self> {
+        if let Some(first) = taus.first() {
+            let arity = first.arity();
+            if taus.iter().any(|t| t.arity() != arity) {
+                return None;
+            }
+        }
+        for (i, a) in taus.iter().enumerate() {
+            if taus[i + 1..].iter().any(|b| a.box_overlaps(b)) {
+                return None;
+            }
+        }
+        taus.sort_unstable_by_key(|tau| tau.coords[0].lo);
+        // Valid-time overlap is allowed here, so `end` is not monotone with
+        // `start`: scan for the true maximum rather than taking the last.
+        let min_start = taus.first().map_or(Timestamp::MAX, |t| t.coords[0].lo);
+        let max_end = taus
+            .iter()
+            .map(|t| t.coords[0].hi)
+            .max()
+            .unwrap_or(Timestamp::MIN);
+        Some(Self {
+            id,
+            min_start,
+            max_end,
+            taus: taus.into(),
+            written_at,
+        })
+    }
+
     /// O(log n) point lookup via binary search.
     pub fn at(&self, t: Timestamp) -> Option<&V> {
         let i = self
@@ -154,6 +230,16 @@ impl<V> Layer<V> {
         self.taus
             .get(i)
             .filter(|tau| tau.coords[0].lo <= t && t < tau.coords[0].hi)
+            .map(|tau| &tau.value)
+    }
+
+    /// N-dimensional point lookup: linear scan for the tau whose orthotope
+    /// contains `ts`. The no-full-box-overlap invariant of
+    /// [`Layer::try_new_nd_at`] guarantees at most one match.
+    pub fn at_nd(&self, ts: &[Timestamp]) -> Option<&V> {
+        self.taus
+            .iter()
+            .find(|tau| tau.contains_point(ts))
             .map(|tau| &tau.value)
     }
 }
@@ -312,5 +398,80 @@ mod tests {
         let layer = Layer::new(1, vec![Tau::new(0, 10, 42i32)]);
         let clone = layer.clone();
         assert!(Arc::ptr_eq(&layer.taus, &clone.taus));
+    }
+
+    fn nd(coords: &[(i64, i64)], v: i32) -> Tau<i32> {
+        Tau::try_new_nd(coords, v).expect("valid nd tau")
+    }
+
+    #[test]
+    fn tau_try_new_nd_rejects_empty_and_inverted() {
+        assert!(Tau::try_new_nd(&[], 0i32).is_none(), "no axes");
+        assert!(Tau::try_new_nd(&[(0, 10), (5, 5)], 0i32).is_none(), "empty");
+        assert!(
+            Tau::try_new_nd(&[(0, 10), (7, 3)], 0i32).is_none(),
+            "inverted"
+        );
+        assert_eq!(nd(&[(0, 10), (0, 100)], 1).arity(), 2);
+    }
+
+    #[test]
+    fn tau_contains_point_requires_every_axis() {
+        let t = nd(&[(0, 10), (50, 60)], 7);
+        assert!(t.contains_point(&[5, 55]));
+        assert!(!t.contains_point(&[5, 60]), "axis 1 at hi is outside");
+        assert!(!t.contains_point(&[10, 55]), "axis 0 at hi is outside");
+        assert!(!t.contains_point(&[5]), "arity mismatch");
+    }
+
+    #[test]
+    fn tau_box_overlaps_needs_intersection_on_all_axes() {
+        let a = nd(&[(0, 10), (0, 10)], 1);
+        assert!(a.box_overlaps(&nd(&[(5, 15), (5, 15)], 2)));
+        assert!(
+            !a.box_overlaps(&nd(&[(5, 15), (10, 20)], 2)),
+            "disjoint on axis 1"
+        );
+        assert!(!a.box_overlaps(&Tau::new(0, 10, 2)), "arity mismatch");
+    }
+
+    #[test]
+    fn layer_nd_allows_valid_time_overlap_rejects_box_overlap() {
+        // Same valid window, disjoint on axis 1: allowed.
+        let ok = Layer::try_new_nd_at(
+            1,
+            vec![nd(&[(0, 10), (0, 50)], 1), nd(&[(0, 10), (50, 100)], 2)],
+            0,
+        );
+        let layer = ok.expect("disjoint boxes must build");
+        assert_eq!(layer.at_nd(&[5, 25]), Some(&1));
+        assert_eq!(layer.at_nd(&[5, 75]), Some(&2));
+        assert_eq!(layer.at_nd(&[5, 100]), None);
+        // Intersecting on every axis: rejected.
+        assert!(
+            Layer::try_new_nd_at(
+                1,
+                vec![nd(&[(0, 10), (0, 50)], 1), nd(&[(5, 15), (25, 75)], 2)],
+                0,
+            )
+            .is_none()
+        );
+        // Mixed arity: rejected.
+        assert!(
+            Layer::try_new_nd_at(1, vec![nd(&[(0, 10), (0, 50)], 1), Tau::new(20, 30, 2)], 0)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn layer_nd_bounds_span_valid_axis() {
+        let layer = Layer::try_new_nd_at(
+            1,
+            vec![nd(&[(5, 40), (0, 10)], 1), nd(&[(0, 20), (10, 20)], 2)],
+            0,
+        )
+        .expect("boxes disjoint on axis 1");
+        assert_eq!(layer.min_start, 0);
+        assert_eq!(layer.max_end, 40, "max end is not the last tau's end");
     }
 }

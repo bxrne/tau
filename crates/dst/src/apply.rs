@@ -77,6 +77,40 @@ pub fn apply_dual(
             let expected = model.history_generations(lens);
             check_history(step, &format!("HISTORY {lens}"), &got, expected, &mut divs);
         }
+        Op::AtNd { lens, ts, as_of } => {
+            let Some(got) = exec_output(target, &op.to_sql(), step, &mut divs) else {
+                return divs;
+            };
+            let expected = model.at_nd(lens, ts, *as_of);
+            check_at(
+                step,
+                &format!("AT ND {lens} {ts:?} as_of={as_of:?}"),
+                &got,
+                expected,
+                &mut divs,
+            );
+        }
+        Op::RangeNd {
+            lens,
+            start,
+            end,
+            fixed,
+        } => {
+            if start >= end {
+                return divs;
+            }
+            let Some(got) = exec_output(target, &op.to_sql(), step, &mut divs) else {
+                return divs;
+            };
+            let expected = model.range_nd(lens, *start, *end, fixed);
+            check_range(
+                step,
+                &format!("RANGE ND {lens} {start} {end} at {fixed:?}"),
+                &got,
+                expected,
+                &mut divs,
+            );
+        }
         Op::Range { lens, start, end } => {
             if start >= end {
                 return divs;

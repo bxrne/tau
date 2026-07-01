@@ -12,6 +12,8 @@ pub const BOOL: &str = "bl";
 pub const SV: &str = "sv";
 pub const DS: &str = "ds";
 pub const XD: &str = "xd";
+/// The 2-axis (valid, region) lens exercised by the N-dimensional ops.
+pub const ND: &str = "nd";
 
 /// Named lenses used by the DST workload (aux + dynamic create/drop targets).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,6 +72,25 @@ pub enum Op {
     History {
         lens: String,
     },
+    CreateNdLens {
+        name: String,
+        arity: usize,
+    },
+    AppendNd {
+        lens: String,
+        taus: Vec<(Vec<(Ts, Ts)>, i64)>,
+    },
+    AtNd {
+        lens: String,
+        ts: Vec<Ts>,
+        as_of: Option<i64>,
+    },
+    RangeNd {
+        lens: String,
+        start: Ts,
+        end: Ts,
+        fixed: Vec<Ts>,
+    },
     Range {
         lens: String,
         start: Ts,
@@ -116,6 +137,45 @@ impl Op {
             Op::At { lens, t } => format!("AT LENS {lens} {t}"),
             Op::AtAsOf { lens, t, as_of } => format!("AT LENS {lens} {t} AS OF {as_of}"),
             Op::History { lens } => format!("HISTORY LENS {lens}"),
+            Op::CreateNdLens { name, arity } => {
+                let axes: Vec<String> = (0..*arity).map(|i| format!("ax{i}")).collect();
+                format!("CREATE LENS {name} int AXES ({})", axes.join(", "))
+            }
+            Op::AppendNd { lens, taus } => {
+                let body = taus
+                    .iter()
+                    .map(|(coords, v)| {
+                        let boxes = coords
+                            .iter()
+                            .map(|(lo, hi)| format!("[{lo} {hi}]"))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        format!("{boxes} {v}")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("APPEND LENS {lens} {body}")
+            }
+            Op::AtNd { lens, ts, as_of } => {
+                let coords = ts.iter().map(i64::to_string).collect::<Vec<_>>().join(" ");
+                match as_of {
+                    Some(a) => format!("AT LENS {lens} {coords} AS OF {a}"),
+                    None => format!("AT LENS {lens} {coords}"),
+                }
+            }
+            Op::RangeNd {
+                lens,
+                start,
+                end,
+                fixed,
+            } => {
+                let pts = fixed
+                    .iter()
+                    .map(i64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("RANGE LENS {lens} {start} {end} AT ({pts})")
+            }
             Op::Range { lens, start, end } => format!("RANGE LENS {lens} {start} {end}"),
             Op::Reduce {
                 lens,
@@ -190,6 +250,24 @@ fn gen_taus<T>(
             let v = value(rng);
             cur = e;
             (s, e, v)
+        })
+        .collect()
+}
+
+/// N-dimensional boxes for the 2-axis `nd` lens: cursor-walked on the valid
+/// axis (so no two boxes in a batch fully overlap) with a random interval on
+/// the region axis.
+pub fn gen_nd_boxes(rng: &mut StdRng, count: usize) -> Vec<(Vec<(Ts, Ts)>, i64)> {
+    let mut cur: Ts = rng.gen_range(0..2000);
+    (0..count)
+        .map(|_| {
+            let s = cur + rng.gen_range(0..50);
+            let e = s + rng.gen_range(1..100);
+            cur = e;
+            let r0 = rng.gen_range(0..250);
+            let r1 = r0 + rng.gen_range(1..100);
+            let v = rng.gen_range(-1000i64..=1000);
+            (vec![(s, e), (r0, r1)], v)
         })
         .collect()
 }

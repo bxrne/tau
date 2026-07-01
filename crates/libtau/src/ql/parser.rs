@@ -19,7 +19,7 @@ use nom::{
     bytes::complete::{is_not, tag, take_while1},
     character::complete::{alpha1, alphanumeric1, char, digit1, multispace0, multispace1},
     combinator::{map, map_res, opt, recognize, value},
-    multi::{many0, separated_list0},
+    multi::{many0, separated_list0, separated_list1},
     sequence::{delimited, pair, preceded},
 };
 
@@ -101,7 +101,29 @@ fn stmt_create_lens(i: &str) -> IResult<&str, Stmt> {
     let (i, name) = ident(i)?;
     let (i, _) = multispace1(i)?;
     let (i, ty) = type_name(i)?;
-    Ok((i, Stmt::Create { name, ty }))
+    // Optional `AXES (<axis>, …)` — declares the lens arity; axis 0 is valid time.
+    let (i, axes) = opt(preceded(
+        (
+            multispace1,
+            tag("AXES"),
+            multispace0,
+            char('('),
+            multispace0,
+        ),
+        (
+            separated_list1(delimited(multispace0, char(','), multispace0), ident),
+            preceded(multispace0, char(')')),
+        ),
+    ))
+    .parse(i)?;
+    Ok((
+        i,
+        Stmt::Create {
+            name,
+            ty,
+            axes: axes.map(|(names, _)| names).unwrap_or_default(),
+        },
+    ))
 }
 
 fn stmt_create_database(i: &str) -> IResult<&str, Stmt> {
@@ -136,11 +158,40 @@ fn tau_triple(i: &str) -> IResult<&str, (i64, i64, Literal)> {
     Ok((i, (start, end, value)))
 }
 
+/// One bracketed axis interval: `[lo hi]` (half-open at query time).
+fn axis_interval(i: &str) -> IResult<&str, (i64, i64)> {
+    let (i, _) = char('[')(i)?;
+    let (i, _) = multispace0(i)?;
+    let (i, lo) = integer(i)?;
+    let (i, _) = multispace1(i)?;
+    let (i, hi) = integer(i)?;
+    let (i, _) = multispace0(i)?;
+    let (i, _) = char(']')(i)?;
+    Ok((i, (lo, hi)))
+}
+
+/// Per-axis `(lo, hi)` coordinates plus the value — one parsed N-D tau.
+type NdBoxLit = (Vec<(i64, i64)>, Literal);
+
+/// One N-dimensional box: `[lo hi] [lo hi] … value`.
+fn nd_box(i: &str) -> IResult<&str, NdBoxLit> {
+    let (i, coords) = separated_list1(multispace1, axis_interval).parse(i)?;
+    let (i, _) = multispace1(i)?;
+    let (i, value) = literal(i)?;
+    Ok((i, (coords, value)))
+}
+
 fn stmt_append(i: &str) -> IResult<&str, Stmt> {
     let (i, _) = kw("APPEND").parse(i)?;
     let (i, _) = kw("LENS").parse(i)?;
     let (i, name) = ident(i)?;
     let (i, _) = multispace1(i)?;
+    // N-dimensional form: bracketed boxes, `[0 10] [5 15] 42 [, …]`.
+    if i.starts_with('[') {
+        let (i, taus) =
+            separated_list1(delimited(multispace0, char(','), multispace0), nd_box).parse(i)?;
+        return Ok((i, Stmt::AppendNd { name, taus }));
+    }
     let (i, first) = tau_triple(i)?;
     // Optional additional taus: ", start end value"
     let (i, rest) = many0(preceded(
@@ -243,6 +294,21 @@ fn stmt_at(i: &str) -> IResult<&str, Stmt> {
     let (i, _) = multispace1(i)?;
     let (i, t) = integer(i)?;
 
+    // Further integers make this an N-dimensional point query: one coordinate
+    // per declared axis. Keywords (`AS`, `LAYER`) are not integers, so the
+    // single-axis forms below are untouched.
+    let (i, more) = many0(preceded(multispace1, integer)).parse(i)?;
+    if !more.is_empty() {
+        let mut ts = vec![t];
+        ts.extend(more);
+        let (i, as_of) = opt(preceded(
+            (multispace1, tag("AS"), multispace1, tag("OF"), multispace1),
+            integer,
+        ))
+        .parse(i)?;
+        return Ok((i, Stmt::AtNd { name, ts, as_of }));
+    }
+
     // Try "AS OF <timestamp>".
     let (i, as_of) = opt(preceded(
         (multispace1, tag("AS"), multispace1, tag("OF"), multispace1),
@@ -281,6 +347,27 @@ fn stmt_range(i: &str) -> IResult<&str, Stmt> {
     let (i, start) = integer(i)?;
     let (i, _) = multispace1(i)?;
     let (i, end) = integer(i)?;
+    // N-dimensional form: `AT (<t1>, …)` fixes every non-valid axis at a point
+    // while valid time sweeps `[start, end)`.
+    let (i, fixed) = opt(preceded(
+        (multispace1, tag("AT"), multispace0, char('('), multispace0),
+        (
+            separated_list1(delimited(multispace0, char(','), multispace0), integer),
+            preceded(multispace0, char(')')),
+        ),
+    ))
+    .parse(i)?;
+    if let Some((fixed, _)) = fixed {
+        return Ok((
+            i,
+            Stmt::RangeNd {
+                name,
+                start,
+                end,
+                fixed,
+            },
+        ));
+    }
     let (i, filter) = opt(preceded((multispace1, tag("WHERE"), multispace1), expr)).parse(i)?;
     let (i, limit) = opt(map(
         preceded((multispace1, tag("LIMIT"), multispace1), unsigned_integer),
@@ -855,7 +942,11 @@ mod tests {
         let (kw, ty) = tc.draw(type_keyword_gen());
         assert_eq!(
             parsed(&format!("CREATE LENS {name} {kw}")),
-            Stmt::Create { name, ty }
+            Stmt::Create {
+                name,
+                ty,
+                axes: vec![]
+            }
         );
     }
 
@@ -977,6 +1068,7 @@ mod tests {
             Stmt::Create {
                 name: name.clone(),
                 ty: Type::Int,
+                axes: vec![],
             }
         );
         let lower = upper.to_lowercase();
@@ -997,7 +1089,8 @@ mod tests {
             parsed(&q),
             Stmt::Create {
                 name: "x".into(),
-                ty: Type::Int
+                ty: Type::Int,
+                axes: vec![],
             }
         );
     }
@@ -1076,6 +1169,85 @@ mod tests {
                     (5, 10, Literal::Int(2)),
                     (10, 15, Literal::Int(3)),
                 ],
+            }
+        );
+    }
+
+    #[test]
+    fn create_lens_axes_clause() {
+        assert_eq!(
+            parsed("CREATE LENS grid int AXES (valid, region)"),
+            Stmt::Create {
+                name: "grid".into(),
+                ty: Type::Int,
+                axes: vec!["valid".into(), "region".into()],
+            }
+        );
+        // Display of the parsed statement must re-parse identically (WAL replay).
+        let stmt = parsed("CREATE LENS grid int AXES (valid, region)");
+        assert_eq!(parsed(&stmt.to_string()), stmt);
+    }
+
+    #[test]
+    fn append_lens_nd_boxes() {
+        assert_eq!(
+            parsed("APPEND LENS grid [0 10] [100 200] 42, [0 10] [200 300] 7"),
+            Stmt::AppendNd {
+                name: "grid".into(),
+                taus: vec![
+                    (vec![(0, 10), (100, 200)], Literal::Int(42)),
+                    (vec![(0, 10), (200, 300)], Literal::Int(7)),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn at_lens_nd_coords_with_optional_as_of() {
+        assert_eq!(
+            parsed("AT LENS grid 5 150"),
+            Stmt::AtNd {
+                name: "grid".into(),
+                ts: vec![5, 150],
+                as_of: None,
+            }
+        );
+        assert_eq!(
+            parsed("AT LENS grid 5 150 AS OF 1700000000000"),
+            Stmt::AtNd {
+                name: "grid".into(),
+                ts: vec![5, 150],
+                as_of: Some(1_700_000_000_000),
+            }
+        );
+        // A single coordinate stays the classic 1-D statement.
+        assert_eq!(
+            parsed("AT LENS grid 5"),
+            Stmt::At {
+                name: "grid".into(),
+                t: 5,
+            }
+        );
+    }
+
+    #[test]
+    fn range_lens_nd_fixed_points() {
+        assert_eq!(
+            parsed("RANGE LENS grid 0 100 AT (150)"),
+            Stmt::RangeNd {
+                name: "grid".into(),
+                start: 0,
+                end: 100,
+                fixed: vec![150],
+            }
+        );
+        assert_eq!(
+            parsed("RANGE LENS cube -5 50 AT (1, -2)"),
+            Stmt::RangeNd {
+                name: "cube".into(),
+                start: -5,
+                end: 50,
+                fixed: vec![1, -2],
             }
         );
     }

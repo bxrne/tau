@@ -164,15 +164,26 @@ pub enum Stmt {
     UseDatabase {
         name: String,
     },
+    /// `CREATE LENS <name> <type> [AXES (<axis>, …)]` - declare a base lens.
+    /// `axes` is empty for the default single valid-time axis; a non-empty list
+    /// fixes the lens's arity and names each axis (axis 0 is valid time).
     Create {
         name: String,
         ty: Type,
+        axes: Vec<String>,
     },
     /// `APPEND LENS <name> <s0> <e0> <v0> [, <s1> <e1> <v1> …]` - write one
     /// or more taus into a single layer.  Bulk form reduces per-write overhead.
     Append {
         name: String,
         taus: Vec<(i64, i64, Literal)>,
+    },
+    /// `APPEND LENS <name> [<lo> <hi>] [<lo> <hi>] … <v> [, …]` - N-dimensional
+    /// append: one bracketed `[lo hi)` interval per declared axis, then the
+    /// value. Each comma-separated box becomes one tau; the batch is one layer.
+    AppendNd {
+        name: String,
+        taus: Vec<(Vec<(i64, i64)>, Literal)>,
     },
     /// `BATCH APPEND LENS <name> { <s> <e> <v> ; … }` - block-syntax bulk
     /// ingest.  Semantically identical to `Append` but the brace-delimited
@@ -211,6 +222,14 @@ pub enum Stmt {
         name: String,
         t: i64,
     },
+    /// `AT LENS <name> <t0> <t1> … [AS OF <timestamp>]` - N-dimensional point
+    /// query: one coordinate per declared axis. The optional `AS OF` scopes the
+    /// lookup to layers written at or before the given transaction time.
+    AtNd {
+        name: String,
+        ts: Vec<i64>,
+        as_of: Option<i64>,
+    },
     /// `AT LENS <name> <t> AS OF <timestamp>` - point query against the state of
     /// the data as it existed at the given wall-clock time (milliseconds since
     /// Unix epoch).  Uses `written_at` timestamps recorded in the WAL.
@@ -234,6 +253,15 @@ pub enum Stmt {
         filter: Option<Expr>,
         limit: Option<usize>,
         offset: Option<usize>,
+    },
+    /// `RANGE LENS <name> <start> <end> AT (<t1>, …)` - N-dimensional range
+    /// scan: sweep valid time over `[start, end)` with every other axis fixed
+    /// at the given point (one coordinate per non-valid axis, in axis order).
+    RangeNd {
+        name: String,
+        start: i64,
+        end: i64,
+        fixed: Vec<i64>,
     },
     Drop {
         name: String,
@@ -332,10 +360,12 @@ impl Stmt {
         matches!(
             self,
             Stmt::At { .. }
+                | Stmt::AtNd { .. }
                 | Stmt::AtAsOf { .. }
                 | Stmt::AtLayer { .. }
                 | Stmt::HistoryLens { .. }
                 | Stmt::Range { .. }
+                | Stmt::RangeNd { .. }
                 | Stmt::Reduce { .. }
                 | Stmt::ShowDatabases
                 | Stmt::ShowLenses
@@ -461,7 +491,13 @@ pub fn needs_registry_lock(stmt: &Stmt) -> bool {
 impl std::fmt::Display for Stmt {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Stmt::Create { name, ty } => write!(f, "CREATE LENS {name} {ty}"),
+            Stmt::Create { name, ty, axes } => {
+                write!(f, "CREATE LENS {name} {ty}")?;
+                if !axes.is_empty() {
+                    write!(f, " AXES ({})", axes.join(", "))?;
+                }
+                Ok(())
+            }
             Stmt::Derive { name, expr, range } => {
                 write!(f, "DERIVE LENS {name} AS {expr}")?;
                 if let Some((s, e)) = range {
@@ -510,6 +546,7 @@ mod tests {
         let stmt = Stmt::Create {
             name: name.clone(),
             ty: ty.clone(),
+            axes: vec![],
         };
         let line = stmt.to_string();
         let (rest, parsed) = parse(&line).expect("Display output must re-parse");
