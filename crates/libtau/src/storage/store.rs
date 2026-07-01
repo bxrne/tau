@@ -1,5 +1,6 @@
 use crate::model::{Layer, Timestamp};
 use std::io;
+use std::sync::Arc;
 
 /// Number of layers per lens that triggers an automatic compaction.
 pub const COMPACT_THRESHOLD: usize = 8;
@@ -28,8 +29,13 @@ where
             .cloned()
     }
 
-    /// Expose the raw layer stack (e.g. for inspection / snapshotting).
-    fn layers(&self, lens: &str) -> Option<&Vec<Layer<V>>>;
+    /// Snapshot the layer stack for `lens` as a shared `Arc<[Layer]>`.
+    ///
+    /// The per-lens stack is stored behind an `Arc`, so a snapshot is a single
+    /// pointer bump — no vector clone. Appends replace the stack wholesale
+    /// (copy-on-write / RCU), so a snapshot taken before an append stays valid
+    /// and consistent for its whole lifetime.
+    fn layers(&self, lens: &str) -> Option<Arc<[Layer<V>]>>;
 
     /// Remove all layers for `lens`, as if the lens never existed.
     ///

@@ -21,6 +21,7 @@ use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, BufReader, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crc32fast::Hasher;
 
@@ -205,7 +206,7 @@ impl<V: Codec> DiskEntry<V> {
 /// `TAUZ` magic; the FLAGS byte indicates whether encryption is active.
 pub struct Disk<V> {
     path: PathBuf,
-    lenses: HashMap<String, Vec<Layer<V>>>,
+    lenses: HashMap<String, Arc<[Layer<V>]>>,
     /// Persisted schema DDL statements in write order. Replayed by the executor
     /// on restart so `CREATE LENS` / `DERIVE LENS` / `SET TTL` survive.
     schema: Vec<String>,
@@ -218,13 +219,18 @@ impl<V: Clone + Codec> Disk<V> {
     /// Open existing store or create new one at `path`.
     pub fn open(path: impl AsRef<Path>, key: Option<[u8; 32]>) -> io::Result<Self> {
         let path = path.as_ref().to_path_buf();
-        let (schema, lenses) = if path.exists() {
+        let (schema, decoded) = if path.exists() {
             let file = File::open(&path)?;
             let mut reader = BufReader::new(file);
             Self::decode_image(&mut reader, key)?
         } else {
             (Vec::new(), HashMap::new())
         };
+        // Freeze each decoded stack into a shared `Arc<[Layer]>` for O(1) reads.
+        let lenses: HashMap<String, Arc<[Layer<V>]>> = decoded
+            .into_iter()
+            .map(|(name, layers)| (name, Arc::from(layers)))
+            .collect();
 
         Ok(Self {
             path,
@@ -376,7 +382,7 @@ impl<V: Clone + Codec> Disk<V> {
         let mut entries = Vec::new();
         write_schema(&mut entries, &self.schema)?;
         for (lens_name, layers) in &self.lenses {
-            for layer in layers {
+            for layer in layers.iter() {
                 write_entry(
                     &mut entries,
                     layer.id,
@@ -422,14 +428,20 @@ impl<V: Clone + Codec> Disk<V> {
 
 impl<V: Clone + PartialEq + Codec + Send + Sync + 'static> Store<V> for Disk<V> {
     fn append(&mut self, lens: &str, layer: Layer<V>) -> io::Result<bool> {
-        let layers = self.lenses.entry(lens.to_string()).or_default();
+        // RCU: copy the stack, mutate, swap the Arc in (see `InMemory::append`).
+        let mut layers: Vec<Layer<V>> = self
+            .lenses
+            .get(lens)
+            .map(|a| a.to_vec())
+            .unwrap_or_default();
         let before = layers.len();
         layers.push(layer);
         let mut did_compact = false;
         if layers.len() > self.compact_threshold {
-            compact_layers(layers);
+            compact_layers(&mut layers);
             did_compact = layers.len() < before + 1;
         }
+        self.lenses.insert(lens.to_string(), Arc::from(layers));
         // Durability for the new layer comes from the WAL that `Database`
         // pairs with every disk-backed store; the full-file rewrite here is
         // reserved for `checkpoint_flush`, called on compaction/checkpoint.
@@ -440,8 +452,8 @@ impl<V: Clone + PartialEq + Codec + Send + Sync + 'static> Store<V> for Disk<V> 
         self.lenses.remove(lens);
     }
 
-    fn layers(&self, lens: &str) -> Option<&Vec<Layer<V>>> {
-        self.lenses.get(lens)
+    fn layers(&self, lens: &str) -> Option<Arc<[Layer<V>]>> {
+        self.lenses.get(lens).cloned()
     }
 
     fn lens_names(&self) -> Vec<String> {

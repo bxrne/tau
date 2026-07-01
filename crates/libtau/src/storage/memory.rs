@@ -3,11 +3,16 @@ use crate::storage::layers::compact_layers;
 use crate::storage::store::{COMPACT_THRESHOLD, Store};
 use rustc_hash::FxHashMap as HashMap;
 use std::io;
+use std::sync::Arc;
 
 /// Reference in-memory store. Zero dependencies, suitable for tests and
 /// small embedded workloads.
+///
+/// Each lens's stack is an `Arc<[Layer<V>]>`: reads snapshot it with a pointer
+/// bump, and appends rebuild it copy-on-write (RCU) so in-flight readers keep a
+/// consistent view.
 pub struct InMemory<V> {
-    lenses: HashMap<String, Vec<Layer<V>>>,
+    lenses: HashMap<String, Arc<[Layer<V>]>>,
     compact_threshold: usize,
 }
 
@@ -35,19 +40,22 @@ where
     V: Clone + PartialEq + Send + Sync + 'static,
 {
     fn append(&mut self, lens: &str, layer: Layer<V>) -> io::Result<bool> {
-        // Hot path: lens already known - borrow without allocating a String.
-        let layers = if let Some(l) = self.lenses.get_mut(lens) {
-            l
-        } else {
-            self.lenses.entry(lens.to_string()).or_default()
-        };
+        // RCU: copy the current stack, mutate the copy, then swap the Arc in.
+        // Readers holding an earlier snapshot are unaffected. Layer clones are
+        // pointer bumps (tau slices are Arc-backed), so the copy is cheap.
+        let mut layers: Vec<Layer<V>> = self
+            .lenses
+            .get(lens)
+            .map(|a| a.to_vec())
+            .unwrap_or_default();
         let before = layers.len();
         layers.push(layer);
         let mut did_compact = false;
         if layers.len() > self.compact_threshold {
-            compact_layers(layers);
+            compact_layers(&mut layers);
             did_compact = layers.len() < before + 1;
         }
+        self.lenses.insert(lens.to_string(), Arc::from(layers));
         Ok(did_compact)
     }
 
@@ -55,8 +63,8 @@ where
         self.lenses.remove(lens);
     }
 
-    fn layers(&self, lens: &str) -> Option<&Vec<Layer<V>>> {
-        self.lenses.get(lens)
+    fn layers(&self, lens: &str) -> Option<Arc<[Layer<V>]>> {
+        self.lenses.get(lens).cloned()
     }
 
     fn lens_names(&self) -> Vec<String> {

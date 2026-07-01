@@ -810,7 +810,7 @@ mod tests {
             Err(io::Error::other("forced failure"))
         }
 
-        fn layers(&self, _lens: &str) -> Option<&Vec<Layer<V>>> {
+        fn layers(&self, _lens: &str) -> Option<std::sync::Arc<[Layer<V>]>> {
             None
         }
     }

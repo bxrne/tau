@@ -242,7 +242,7 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> Result<bool, ExecError> {
     }
 }
 
-type RangeBoundsResult = Result<(Vec<Timestamp>, Option<Arc<Vec<Layer<Value>>>>), ExecError>;
+type RangeBoundsResult = Result<(Vec<Timestamp>, Option<Arc<[Layer<Value>]>>), ExecError>;
 
 /// Collect boundary timestamps and a layer snapshot for `name` over `[start, end)`.
 /// Returns `(bounds, snap)` where `snap` is `Some` for base lenses and `None` for derived.
@@ -572,7 +572,7 @@ pub(crate) fn collect_agg_segments(
     for w in bounds.windows(2) {
         let (s, e) = (w[0], w[1]);
         let v = if let Some(ref ls) = layers_snap {
-            at_layers(ls.as_slice(), s)
+            at_layers(ls, s)
         } else {
             eval_lens(state, lens, s)?
         };
