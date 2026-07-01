@@ -35,6 +35,11 @@ pub struct TauSimulation {
     target: RefCell<RunTarget>,
     model: RefCell<Oracle>,
     in_transaction: RefCell<bool>,
+    /// Virtual transaction-time counter: advanced once per applied op so each op
+    /// (and therefore each append's `written_at`) observes a distinct `now`.
+    /// Reset to `0` whenever state is rebuilt from the op log, so live execution
+    /// and checkpoint replay stamp identical transaction times.
+    tx_tick: RefCell<i64>,
 }
 
 impl TauSimulation {
@@ -54,7 +59,22 @@ impl TauSimulation {
             target: RefCell::new(target),
             model: RefCell::new(model),
             in_transaction: RefCell::new(false),
+            tx_tick: RefCell::new(0),
         }
+    }
+
+    /// Current virtual transaction time (ms) for the next op. Ops are grouped
+    /// into clusters that share a generation (see [`crate::oracle::DST_TX_CLUSTER`]).
+    fn virtual_now_ms(&self) -> i64 {
+        let generation = *self.tx_tick.borrow() / crate::oracle::DST_TX_CLUSTER;
+        crate::oracle::DST_TX_BASE_MS + generation * crate::oracle::DST_TX_STEP_MS
+    }
+
+    /// Pin the engine + oracle wall clock to the current virtual transaction
+    /// time, so an append stamps a deterministic `written_at` and reads observe
+    /// a consistent `now`.
+    fn stamp_clock(&self) {
+        wall_clock::set_fixed_now_ms(self.virtual_now_ms());
     }
 
     pub fn run(&mut self, n_ops: usize, rng: &mut StdRng) -> RunResult {
@@ -187,6 +207,9 @@ impl TauSimulation {
     fn reset_after_wal_fault(&self) {
         *self.target.borrow_mut() = RunTarget::Direct(self.rebuild_direct_target());
         *self.model.borrow_mut() = self.rebuild_model();
+        // The op log is reset alongside this rebuild, so restart the virtual
+        // write-clock too, keeping subsequent stamps deterministic.
+        *self.tx_tick.borrow_mut() = 0;
         self.finish_replay_state(&mut self.target.borrow_mut());
     }
 
@@ -301,16 +324,27 @@ impl TauSimulation {
     fn dual_replay(&self, log: &[Op], label: &str) -> CheckpointAction {
         let mut model = self.rebuild_model();
         let mut divergences: Vec<Divergence> = Vec::new();
+        // Replay stamps the virtual write-clock exactly as live execution did:
+        // reset the tick to 0 and advance once per op, so every layer's
+        // `written_at` — and hence `AS OF` / `HISTORY` — is reproduced bit-for-bit
+        // from the authoritative op log.
+        *self.tx_tick.borrow_mut() = 0;
         if self.profile.is_wire() {
             self.set_target(self.rebuild_wire_target());
             let mut target = self.target.borrow_mut();
             if let RunTarget::Wire { client, .. } = &mut *target {
-                replay_log_wire(client, &mut model, log, &mut divergences);
+                for (i, op) in log.iter().enumerate() {
+                    self.stamp_clock();
+                    divergences.extend(apply_dual(i, op, client, &mut model));
+                    *self.tx_tick.borrow_mut() += 1;
+                }
             }
         } else {
             let mut direct = self.rebuild_direct_target();
             for (i, op) in log.iter().enumerate() {
+                self.stamp_clock();
                 divergences.extend(apply_dual_executor(i, op, &mut direct, &mut model));
+                *self.tx_tick.borrow_mut() += 1;
             }
             self.set_target(RunTarget::Direct(direct));
         }
@@ -338,17 +372,6 @@ fn sync_transactions_on_target(target: &mut RunTarget, model: &mut Oracle) {
     }
 }
 
-fn replay_log_wire(
-    client: &mut WireClient,
-    model: &mut Oracle,
-    log: &[Op],
-    divergences: &mut Vec<Divergence>,
-) {
-    for (i, op) in log.iter().enumerate() {
-        divergences.extend(apply_dual(i, op, client, model));
-    }
-}
-
 impl DualSimulation for TauSimulation {
     type Op = Op;
 
@@ -358,10 +381,12 @@ impl DualSimulation for TauSimulation {
             &self.model.borrow(),
             self.profile.wal_workload(),
             self.in_transaction_flag(),
+            self.virtual_now_ms(),
         )
     }
 
     fn apply(&mut self, step: usize, op: &Op) -> Vec<Divergence> {
+        self.stamp_clock();
         let divs = {
             let mut model = self.model.borrow_mut();
             match &mut *self.target.borrow_mut() {
@@ -369,6 +394,7 @@ impl DualSimulation for TauSimulation {
                 RunTarget::Wire { client, .. } => apply_dual(step, op, client, &mut model),
             }
         };
+        *self.tx_tick.borrow_mut() += 1;
         *self.in_transaction.borrow_mut() = self.in_transaction_flag();
         divs
     }

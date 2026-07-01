@@ -16,6 +16,22 @@ pub type Ts = i64;
 /// Fixed "now" for DST — must stay in sync with [`libtau::wall_clock::set_fixed_now_secs`].
 pub const DST_NOW_SECS: i64 = 1_700_000_000;
 
+/// Base transaction timestamp (ms) for the virtual write-clock: the value the
+/// first op observes. Equals [`DST_NOW_SECS`] in milliseconds.
+pub const DST_TX_BASE_MS: i64 = DST_NOW_SECS * 1000;
+
+/// Milliseconds the virtual write-clock advances per transaction-time
+/// generation. Consecutive generations land `AT ... AS OF` on distinct beliefs
+/// and force tx-generation-preserving compaction under simulation.
+pub const DST_TX_STEP_MS: i64 = 1000;
+
+/// Number of consecutive applied ops that share one transaction-time
+/// generation. Clustering (> 1) means several appends land in the *same*
+/// generation — exercising the within-generation multi-layer sweep — while
+/// later clusters form distinct generations that compaction must preserve for
+/// `AS OF` / `HISTORY`. Both halves of the compaction path are covered.
+pub const DST_TX_CLUSTER: i64 = 4;
+
 /// Specification for a derived lens (`DERIVE LENS name AS a + b`).
 #[derive(Clone, Debug)]
 pub struct DeriveSpec {
@@ -31,11 +47,14 @@ struct TauInterval {
     value: Value,
 }
 
-/// One append layer (higher `id` = newer, wins on overlap).
+/// One append layer (higher `id` = newer, wins on overlap). `written_at` is the
+/// transaction timestamp shared by every interval in the layer — the ordering
+/// coordinate that `AS OF` filters on and that compaction must preserve.
 #[derive(Clone, Debug)]
 struct NaiveLayer {
     #[allow(dead_code)]
     id: u64,
+    written_at: i64,
     intervals: Vec<TauInterval>,
 }
 
@@ -80,6 +99,45 @@ impl OracleDb {
     /// Point lookup: newest layer first, linear scan.
     fn at(&self, name: &str, t: Ts, now_secs: Ts) -> Option<Value> {
         Self::at_in(name, t, now_secs, &self.lenses)
+    }
+
+    /// Point lookup restricted to layers written at or before `as_of` — the
+    /// model of `AT LENS x t AS OF as_of`. Defined only on base lenses (the
+    /// engine rejects `AS OF` on derived lenses) and, like the engine, it does
+    /// **not** apply TTL — `AS OF` reads raw transaction history.
+    fn at_as_of(&self, name: &str, t: Ts, as_of: i64) -> Option<Value> {
+        match self.lenses.get(name)? {
+            LensData::Base { layers, .. } => {
+                for layer in layers.iter().rev() {
+                    if layer.written_at > as_of {
+                        continue;
+                    }
+                    for tau in &layer.intervals {
+                        if tau.start <= t && t < tau.end {
+                            return Some(tau.value.clone());
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Sorted, de-duplicated transaction-time generations for a lens — the model
+    /// of the `written_at` set reported by `HISTORY LENS x`. Base lenses report
+    /// their surviving generations; derived/materialised lenses store no layers
+    /// and report an empty set (matching the engine).
+    fn history_generations(&self, name: &str) -> Option<Vec<i64>> {
+        match self.lenses.get(name)? {
+            LensData::Base { layers, .. } => {
+                let mut gens: Vec<i64> = layers.iter().map(|l| l.written_at).collect();
+                gens.sort_unstable();
+                gens.dedup();
+                Some(gens)
+            }
+            _ => Some(vec![]),
+        }
     }
 
     fn at_in(name: &str, t: Ts, now_secs: Ts, lenses: &HashMap<String, LensData>) -> Option<Value> {
@@ -310,6 +368,9 @@ impl OracleDb {
     }
 
     fn append(&mut self, name: &str, taus: Vec<(Ts, Ts, Value)>) {
+        // Stamp the transaction time from the same virtual clock the engine
+        // reads when it builds the layer, so both models agree on `written_at`.
+        let written_at = libtau::wall_clock::now_ms();
         if let Some(LensData::Base { layers, .. }) = self.lenses.get_mut(name) {
             let valid: Vec<TauInterval> = taus
                 .into_iter()
@@ -323,6 +384,7 @@ impl OracleDb {
             self.next_layer_id += 1;
             layers.push(NaiveLayer {
                 id,
+                written_at,
                 intervals: valid,
             });
             if layers.len() > self.compact_threshold {
@@ -331,57 +393,73 @@ impl OracleDb {
         }
     }
 
-    /// Sweep-line compaction: merge all NaiveLayers into one, newest-wins, adjacent same-value merged.
+    /// Per-generation sweep compaction mirroring `libtau::storage::layers`:
+    /// layers are compacted **within** each transaction-time generation (a
+    /// contiguous run sharing `written_at`) newest-wins with adjacent same-value
+    /// merging, but generations are never merged with one another — so distinct
+    /// `written_at` stamps survive and `AS OF` / `HISTORY` stay exact.
     fn compact_layers(layers: &mut Vec<NaiveLayer>, id_counter: &mut u64) {
         if layers.len() <= 1 {
             return;
         }
-        let mut pts: BTreeSet<Ts> = BTreeSet::new();
-        for layer in layers.iter() {
-            for tau in &layer.intervals {
-                pts.insert(tau.start);
-                pts.insert(tau.end);
+        let mut result: Vec<NaiveLayer> = Vec::new();
+        let mut i = 0;
+        while i < layers.len() {
+            let generation = layers[i].written_at;
+            let mut j = i + 1;
+            while j < layers.len() && layers[j].written_at == generation {
+                j += 1;
             }
-        }
-        let pts: Vec<Ts> = pts.into_iter().collect();
+            let group = &layers[i..j];
 
-        let mut merged: Vec<TauInterval> = Vec::new();
-        for w in pts.windows(2) {
-            let (s, e) = (w[0], w[1]);
-            let mut found: Option<Value> = None;
-            for layer in layers.iter().rev() {
+            let mut pts: BTreeSet<Ts> = BTreeSet::new();
+            for layer in group {
                 for tau in &layer.intervals {
-                    if tau.start <= s && s < tau.end {
-                        found = Some(tau.value.clone());
+                    pts.insert(tau.start);
+                    pts.insert(tau.end);
+                }
+            }
+            let pts: Vec<Ts> = pts.into_iter().collect();
+
+            let mut merged: Vec<TauInterval> = Vec::new();
+            for w in pts.windows(2) {
+                let (s, e) = (w[0], w[1]);
+                let mut found: Option<Value> = None;
+                for layer in group.iter().rev() {
+                    for tau in &layer.intervals {
+                        if tau.start <= s && s < tau.end {
+                            found = Some(tau.value.clone());
+                            break;
+                        }
+                    }
+                    if found.is_some() {
                         break;
                     }
                 }
-                if found.is_some() {
-                    break;
+                if let Some(v) = found {
+                    match merged.last_mut() {
+                        Some(last) if last.end == s && last.value == v => last.end = e,
+                        _ => merged.push(TauInterval {
+                            start: s,
+                            end: e,
+                            value: v,
+                        }),
+                    }
                 }
             }
-            if let Some(v) = found {
-                match merged.last_mut() {
-                    Some(last) if last.end == s && last.value == v => last.end = e,
-                    _ => merged.push(TauInterval {
-                        start: s,
-                        end: e,
-                        value: v,
-                    }),
-                }
-            }
-        }
 
-        let new_id = *id_counter;
-        *id_counter += 1;
-        *layers = if merged.is_empty() {
-            vec![]
-        } else {
-            vec![NaiveLayer {
-                id: new_id,
-                intervals: merged,
-            }]
-        };
+            if !merged.is_empty() {
+                let new_id = *id_counter;
+                *id_counter += 1;
+                result.push(NaiveLayer {
+                    id: new_id,
+                    written_at: generation,
+                    intervals: merged,
+                });
+            }
+            i = j;
+        }
+        *layers = result;
     }
 }
 
@@ -578,6 +656,16 @@ impl Oracle {
         self.db().at(lens, t, Self::now_secs())
     }
 
+    pub fn at_as_of(&self, lens: &str, t: Ts, as_of: i64) -> Option<Value> {
+        self.db().at_as_of(lens, t, as_of)
+    }
+
+    /// Sorted, de-duplicated `written_at` generations for `lens` (the model of
+    /// the transaction-time set that `HISTORY LENS` reports).
+    pub fn history_generations(&self, lens: &str) -> Option<Vec<i64>> {
+        self.db().history_generations(lens)
+    }
+
     pub fn range(&self, lens: &str, qs: Ts, qe: Ts) -> Vec<(Ts, Ts, Value)> {
         self.db().range(lens, qs, qe, Self::now_secs())
     }
@@ -606,6 +694,12 @@ impl Oracle {
             }
             Op::At { lens, t } => {
                 let _ = self.at(lens, *t);
+            }
+            Op::AtAsOf { lens, t, as_of } => {
+                let _ = self.at_as_of(lens, *t, *as_of);
+            }
+            Op::History { lens } => {
+                let _ = self.history_generations(lens);
             }
             Op::Range { lens, start, end } => {
                 if start < end {

@@ -28,6 +28,10 @@ pub mod tags {
 pub struct SimCtx {
     oracle_ptr: *const Oracle,
     pub in_transaction: bool,
+    /// Current virtual transaction time (ms) — the `now` an `AS OF` op should
+    /// aim near so it lands on real generation boundaries rather than always in
+    /// the future.
+    pub now_ms: i64,
 }
 
 // SAFETY: SimCtx is a stack-local value created and destroyed within a single `pick` call.
@@ -36,10 +40,11 @@ unsafe impl Send for SimCtx {}
 unsafe impl Sync for SimCtx {}
 
 impl SimCtx {
-    pub fn new(oracle: &Oracle, in_transaction: bool) -> Self {
+    pub fn new(oracle: &Oracle, in_transaction: bool, now_ms: i64) -> Self {
         Self {
             oracle_ptr: oracle as *const Oracle,
             in_transaction,
+            now_ms,
         }
     }
 
@@ -157,6 +162,38 @@ fn build_tree() -> Tree<SimCtx, Op> {
             |rng, c| Op::At {
                 lens: op::int_lens_for_db(c.oracle(), rng),
                 t: rng.gen_range(-50..3000),
+            },
+        ))
+        // AT ... AS OF <tx>: read the value believed at a past transaction time.
+        // `as_of` spans the negative space deliberately — before the first write
+        // (empty), each intermediate generation boundary, the current instant,
+        // and slightly into the future (equivalent to the current view) — so the
+        // tx-generation-preserving compaction path is exercised on both sides of
+        // every checkpoint/compaction.
+        .leaf(Leaf::new(
+            8,
+            0,
+            |c: &SimCtx| !c.in_transaction,
+            |rng, c| {
+                let base = crate::oracle::DST_TX_BASE_MS;
+                let step = crate::oracle::DST_TX_STEP_MS;
+                let ticks = ((c.now_ms - base) / step).max(0);
+                let k = rng.gen_range(-2..=ticks + 2);
+                Op::AtAsOf {
+                    lens: op::int_lens_for_db(c.oracle(), rng),
+                    t: rng.gen_range(-50..3000),
+                    as_of: base + k * step,
+                }
+            },
+        ))
+        // HISTORY: the surviving transaction-time generations of a base lens.
+        // Fires on lenses that may still be empty, covering that boundary too.
+        .leaf(Leaf::new(
+            4,
+            0,
+            |c: &SimCtx| !c.in_transaction,
+            |rng, c| Op::History {
+                lens: op::int_lens_for_db(c.oracle(), rng),
             },
         ))
         .leaf(Leaf::new(
@@ -389,8 +426,8 @@ fn build_tree() -> Tree<SimCtx, Op> {
 }
 
 /// Pick the next Tau operation using the weighted behavior tree.
-pub fn pick(rng: &mut StdRng, oracle: &Oracle, wal: bool, in_transaction: bool) -> Op {
-    let ctx = SimCtx::new(oracle, in_transaction);
+pub fn pick(rng: &mut StdRng, oracle: &Oracle, wal: bool, in_transaction: bool, now_ms: i64) -> Op {
+    let ctx = SimCtx::new(oracle, in_transaction, now_ms);
     let excluded = if wal { tags::WAL_EXCLUDED } else { 0 };
     TAU_TREE.pick(rng, &ctx, excluded)
 }
@@ -408,7 +445,7 @@ mod tests {
         let o = MEMORY_MULTI.bootstrap_oracle(&paths);
         let mut rng = StdRng::seed_from_u64(1);
         for _ in 0..50 {
-            let _ = pick(&mut rng, &o, false, false);
+            let _ = pick(&mut rng, &o, false, false, crate::oracle::DST_TX_BASE_MS);
         }
     }
 
@@ -429,7 +466,7 @@ mod tests {
         }
         let mut rng = StdRng::seed_from_u64(tc.draw(gs::integers::<u64>()));
         for _ in 0..20 {
-            let op = pick(&mut rng, &o, false, false);
+            let op = pick(&mut rng, &o, false, false, crate::oracle::DST_TX_BASE_MS);
             match (&op, has_ds) {
                 (Op::Derive { name, .. }, false) => assert_eq!(name, DS),
                 (Op::DropLens { name }, true) if name == DS => {}
@@ -447,7 +484,7 @@ mod tests {
         let o = MEMORY_MULTI.bootstrap_oracle(&paths);
         let mut rng = StdRng::seed_from_u64(7);
         let saw_xderive = (0..3000).any(
-            |_| matches!(pick(&mut rng, &o, false, false), Op::Xderive { name, .. } if name == XD),
+            |_| matches!(pick(&mut rng, &o, false, false, crate::oracle::DST_TX_BASE_MS), Op::Xderive { name, .. } if name == XD),
         );
         assert!(saw_xderive, "behavior tree never generated an XDERIVE op");
     }
@@ -460,7 +497,7 @@ mod tests {
         o.start_transaction();
         let mut rng = StdRng::seed_from_u64(99);
         for _ in 0..200 {
-            let op = pick(&mut rng, &o, false, true);
+            let op = pick(&mut rng, &o, false, true, crate::oracle::DST_TX_BASE_MS);
             assert!(
                 !matches!(
                     op,
@@ -481,7 +518,7 @@ mod tests {
         o.use_db("aux");
         let mut rng = StdRng::seed_from_u64(99);
         for _ in 0..100 {
-            match pick(&mut rng, &o, true, false) {
+            match pick(&mut rng, &o, true, false, crate::oracle::DST_TX_BASE_MS) {
                 Op::UseDb(db) => assert_ne!(db, "aux"),
                 Op::Append { lens, .. } => assert_ne!(lens, Lens::Aux.as_str()),
                 _ => {}
