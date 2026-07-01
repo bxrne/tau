@@ -98,14 +98,27 @@ where
     merged
 }
 
-/// Compact `layers` down to a single layer representing the same newest-wins
-/// truth.  Every unique tau boundary becomes a potential split point; the
-/// effective value at each sub-interval is the one from the most-recently
-/// appended layer that covers it.  Adjacent sub-intervals with equal values
-/// are merged.  No-ops when there is already ≤ 1 layer.
+/// Compact `layers` **within each transaction-time generation**, preserving the
+/// same query results — including `AT AS OF` and `HISTORY` — exactly.
 ///
-/// Implementation: sweep-line over `(time, start/end, layer_idx)` events.
-/// O(E log E) where E = 2 × total tau count.
+/// A *generation* is a maximal run of layers that share a `written_at`
+/// transaction timestamp. Within a generation the sweep-line collapses the
+/// layers to one canonical layer (every unique tau boundary is a potential
+/// split point; the effective value at each sub-interval comes from the
+/// most-recently appended layer of that generation; adjacent equal values are
+/// merged). Generations are **never** merged with one another: distinct
+/// `written_at` stamps must survive so a lookup `AS OF` a past transaction time
+/// still sees the belief that was current then. This is the lossless-compaction
+/// invariant — replacing the previous behaviour that collapsed every layer into
+/// one stamped `max(written_at)` and silently destroyed the transaction-time
+/// axis.
+///
+/// Layers are stored in append order and `written_at` is monotonic
+/// non-decreasing with append order, so equal-`written_at` layers form
+/// contiguous runs and can be grouped in a single linear pass.
+///
+/// Implementation: per generation, a sweep-line over `(time, start/end,
+/// layer_idx)` events — O(E log E) where E = 2 × total tau count.
 pub fn compact_layers<V>(layers: &mut Vec<Layer<V>>)
 where
     V: Clone + PartialEq,
@@ -118,15 +131,24 @@ where
         layers.clear();
         return;
     }
-    let max_id = layers.iter().map(|l| l.id).max().unwrap_or(0);
-    let max_written_at = layers.iter().map(|l| l.written_at).max().unwrap_or(0);
-    let events = build_sweep_events(layers);
-    let merged = run_sweep(&events, layers);
-    *layers = if merged.is_empty() {
-        Vec::new()
-    } else {
-        vec![Layer::new_at(max_id, merged, max_written_at)]
-    };
+    let mut result: Vec<Layer<V>> = Vec::new();
+    let mut i = 0;
+    while i < layers.len() {
+        let generation = layers[i].written_at;
+        let mut j = i + 1;
+        while j < layers.len() && layers[j].written_at == generation {
+            j += 1;
+        }
+        let group = &layers[i..j];
+        let max_id = group.iter().map(|l| l.id).max().unwrap_or(0);
+        let events = build_sweep_events(group);
+        let merged = run_sweep(&events, group);
+        if !merged.is_empty() {
+            result.push(Layer::new_at(max_id, merged, generation));
+        }
+        i = j;
+    }
+    *layers = result;
 }
 
 /// Build sweep-line events restricted to the half-open interval `[range_start, range_end)`.

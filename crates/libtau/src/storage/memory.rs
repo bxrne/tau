@@ -110,6 +110,12 @@ mod tests {
     /// Generator over a layer stack: a vector of layers, each of which is a
     /// sorted non-overlapping batch.  Layers may overlap each other - that is
     /// exactly the situation that compaction has to flatten.
+    ///
+    /// All layers share `written_at = 0` (one transaction-time generation) so
+    /// per-generation compaction collapses them to a single canonical layer,
+    /// which is what the classic compaction invariants below assert. Pinning
+    /// the stamp also keeps the tests deterministic (as opposed to `Layer::new`,
+    /// which reads the wall clock).
     fn layer_stack_gen() -> impl Generator<Vec<Layer<i8>>> {
         gs::vecs(taus_gen().filter(|v| !v.is_empty()))
             .max_size(8)
@@ -117,9 +123,20 @@ mod tests {
                 taus_vec
                     .into_iter()
                     .enumerate()
-                    .map(|(i, t)| Layer::new(i as u64 + 1, t))
+                    .map(|(i, t)| Layer::new_at(i as u64 + 1, t, 0))
                     .collect()
             })
+    }
+
+    /// Newest-wins point lookup restricted to layers written at or before
+    /// `as_of` — the storage-level analogue of `AT LENS x t AS OF as_of`.
+    fn at_as_of_brute(layers: &[Layer<i8>], t: Timestamp, as_of: i64) -> Option<i8> {
+        layers
+            .iter()
+            .rev()
+            .filter(|l| l.written_at <= as_of)
+            .find_map(|l| l.at(t))
+            .copied()
     }
 
     fn at_brute(layers: &[Layer<i8>], t: Timestamp) -> Option<i8> {
@@ -190,6 +207,52 @@ mod tests {
     }
 
     #[hegel::test]
+    fn pbt_compaction_preserves_distinct_generations(tc: TestCase) {
+        // Re-stamp each layer with its own distinct transaction-time generation.
+        // Per-generation compaction must NOT merge across `written_at`, so every
+        // generation with data survives — the property that makes `AS OF` exact
+        // after compaction.
+        let stack = tc.draw(layer_stack_gen().filter(|v| !v.is_empty()));
+        let stack: Vec<Layer<i8>> = stack
+            .into_iter()
+            .enumerate()
+            .map(|(g, l)| Layer::new_at(l.id, l.taus.to_vec(), g as i64 + 1))
+            .collect();
+        let distinct: std::collections::BTreeSet<i64> =
+            stack.iter().map(|l| l.written_at).collect();
+        let mut compacted = stack.clone();
+        compact_layers(&mut compacted);
+        let compacted_gens: std::collections::BTreeSet<i64> =
+            compacted.iter().map(|l| l.written_at).collect();
+        assert_eq!(
+            compacted_gens, distinct,
+            "every transaction-time generation must survive compaction"
+        );
+    }
+
+    #[hegel::test]
+    fn pbt_compaction_preserves_as_of_across_generations(tc: TestCase) {
+        // The headline invariant: for any probe point and any as-of transaction
+        // time, the newest-wins-as-of value is identical before and after
+        // compaction. This is what the old collapse-to-`max_written_at`
+        // compaction destroyed.
+        let stack = tc.draw(layer_stack_gen().filter(|v| !v.is_empty()));
+        let stack: Vec<Layer<i8>> = stack
+            .into_iter()
+            .enumerate()
+            .map(|(g, l)| Layer::new_at(l.id, l.taus.to_vec(), g as i64 + 1))
+            .collect();
+        let probe = tc.draw(gs::integers::<i64>().min_value(-10).max_value(500));
+        let as_of = tc.draw(gs::integers::<i64>().min_value(0).max_value(12));
+
+        let before = at_as_of_brute(&stack, probe, as_of);
+        let mut compacted = stack;
+        compact_layers(&mut compacted);
+        let after = at_as_of_brute(&compacted, probe, as_of);
+        assert_eq!(before, after, "AS OF diverged across compaction");
+    }
+
+    #[hegel::test]
     fn pbt_compaction_layer_has_non_overlapping_taus(tc: TestCase) {
         let stack = tc.draw(layer_stack_gen());
         let mut compacted = stack;
@@ -223,7 +286,11 @@ mod tests {
         let n = k + 1;
         let mut store: InMemory<i32> = InMemory::with_threshold(k);
         for i in 0..n as i64 {
-            let layer = Layer::new(i as u64 + 1, vec![Tau::new(i * 10, i * 10 + 10, i as i32)]);
+            let layer = Layer::new_at(
+                i as u64 + 1,
+                vec![Tau::new(i * 10, i * 10 + 10, i as i32)],
+                0,
+            );
             store.append("s", layer).unwrap();
         }
         assert_eq!(store.layers("s").unwrap().len(), 1);
@@ -253,7 +320,7 @@ mod tests {
         let mut store: InMemory<i32> = InMemory::with_threshold(k);
         let mut last_did_compact = false;
         for i in 0..n as i64 {
-            let layer = Layer::new(i as u64 + 1, vec![Tau::new(i * 10, i * 10 + 10, 0)]);
+            let layer = Layer::new_at(i as u64 + 1, vec![Tau::new(i * 10, i * 10 + 10, 0)], 0);
             last_did_compact = store.append("s", layer).unwrap();
         }
         if n > k {

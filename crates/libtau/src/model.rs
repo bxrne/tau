@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 pub type Timestamp = i64;
 pub type LayerId = u64;
@@ -10,13 +9,12 @@ pub struct Bound {
     pub lo: Timestamp,
 }
 
-/// Wall-clock milliseconds since the Unix epoch.
+/// Wall-clock milliseconds since the Unix epoch, honouring the [virtual clock
+/// override](crate::wall_clock) so transaction stamps are deterministic under
+/// simulation.
 #[inline]
 pub(crate) fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+    crate::wall_clock::now_ms()
 }
 
 /// An atomic temporal fact: value V is true over [start, end).
