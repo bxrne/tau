@@ -233,11 +233,21 @@ impl<V> Layer<V> {
             .map(|tau| &tau.value)
     }
 
-    /// N-dimensional point lookup: linear scan for the tau whose orthotope
-    /// contains `ts`. The no-full-box-overlap invariant of
-    /// [`Layer::try_new_nd_at`] guarantees at most one match.
+    /// N-dimensional point lookup for the tau whose orthotope contains `ts`. The
+    /// no-full-box-overlap invariant of [`Layer::try_new_nd_at`] guarantees at
+    /// most one match.
+    ///
+    /// Fast-skips on the valid axis: `min_start`/`max_end` reject the whole
+    /// layer with two comparisons, and since taus are sorted by `coords[0].lo`
+    /// only the prefix with `lo <= ts[0]` can contain the point — the rest is
+    /// pruned with a binary search before the (single) orthotope check.
     pub fn at_nd(&self, ts: &[Timestamp]) -> Option<&V> {
-        self.taus
+        let &t0 = ts.first()?;
+        if t0 < self.min_start || t0 >= self.max_end {
+            return None;
+        }
+        let ub = self.taus.partition_point(|tau| tau.coords[0].lo <= t0);
+        self.taus[..ub]
             .iter()
             .find(|tau| tau.contains_point(ts))
             .map(|tau| &tau.value)
