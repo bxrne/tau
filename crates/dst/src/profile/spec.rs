@@ -14,6 +14,9 @@ pub enum Storage {
     Memory,
     Wal,
     Disk,
+    /// On-disk SSTable + read-time MVCC backend (immutable runs + manifest).
+    /// See `libtau::storage::Sstable`.
+    Sstable,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,7 +79,8 @@ impl ProfileSpec {
     }
 
     pub const fn uses_disk_dir(self) -> bool {
-        matches!(self.storage, Storage::Disk) && matches!(self.transport, Transport::Direct)
+        matches!(self.storage, Storage::Disk | Storage::Sstable)
+            && matches!(self.transport, Transport::Direct)
     }
 
     pub const fn is_wire(self) -> bool {
@@ -92,6 +96,7 @@ impl ProfileSpec {
             Storage::Memory => "memory",
             Storage::Wal => "wal",
             Storage::Disk => "disk",
+            Storage::Sstable => "sstable",
         };
         let compact = match self.compaction {
             Compaction::Default => "default",
@@ -120,14 +125,19 @@ impl ProfileSpec {
         } else {
             match self.storage {
                 Storage::Memory => 2000,
-                Storage::Wal | Storage::Disk => 500,
+                Storage::Wal | Storage::Disk | Storage::Sstable => 500,
             }
         }
     }
 
     pub fn engine_matrix(tier: SuiteTier) -> Vec<ProfileSpec> {
         let mut out = Vec::new();
-        for &storage in &[Storage::Memory, Storage::Wal, Storage::Disk] {
+        for &storage in &[
+            Storage::Memory,
+            Storage::Wal,
+            Storage::Disk,
+            Storage::Sstable,
+        ] {
             for &compaction in &[Compaction::Default, Compaction::Stress] {
                 for &encryption in &[Encryption::Plain, Encryption::Aes256] {
                     if matches!(storage, Storage::Memory)
@@ -235,6 +245,12 @@ impl ProfileSpec {
                 Encryption::Plain,
                 Transport::Direct,
                 Auth::Off,
+            ) | (
+                Storage::Sstable,
+                Compaction::Default,
+                Encryption::Plain,
+                Transport::Direct,
+                Auth::Off,
             )
         )
     }
@@ -245,8 +261,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn smoke_has_five_cells() {
-        assert_eq!(ProfileSpec::engine_matrix(SuiteTier::Smoke).len(), 5);
+    fn smoke_has_six_cells() {
+        assert_eq!(ProfileSpec::engine_matrix(SuiteTier::Smoke).len(), 6);
     }
 
     #[test]
@@ -257,7 +273,7 @@ mod tests {
                 .iter()
                 .any(|p| { p.storage == Storage::Wal && p.encryption == Encryption::Aes256 })
         );
-        assert_eq!(specs.len(), 10);
+        assert_eq!(specs.len(), 14);
     }
 
     #[test]

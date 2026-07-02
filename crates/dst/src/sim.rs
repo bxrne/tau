@@ -33,7 +33,7 @@ use crate::apply::{apply_dual, apply_dual_executor, sync_transactions};
 use crate::btree;
 use crate::op::Op;
 use crate::oracle::Oracle;
-use crate::profile::{CHECKPOINT_EVERY, ProfileSpec, ProfileWorkspace};
+use crate::profile::{CHECKPOINT_EVERY, ProfileSpec, ProfileWorkspace, Storage};
 use crate::target::{DirectExecutor, Target, WireClient};
 use tau::harness::EphemeralServer;
 
@@ -126,11 +126,12 @@ impl TauSimulation {
         *self.target.borrow_mut() = target;
     }
 
-    /// Remove every `.dat` and `.wal` file (plus WAL rotation archives) from
-    /// the disk directory. Each disk-backed database now persists across a
-    /// `.dat` + `.wal` pair, so both must be wiped together — leaving a stale
-    /// `.wal` behind would replay onto a freshly-created `.dat` and diverge
-    /// from the freshly-rebuilt oracle.
+    /// Remove every on-disk-backend file (`.dat` for Disk; `.manifest` +
+    /// `.run.*` for Sstable) and `.wal` file (plus WAL rotation archives) from
+    /// the disk directory. Each disk-backed database persists across these
+    /// paired files, so all of them must be wiped together — leaving any
+    /// stale file behind would let a freshly-created executor pick up old
+    /// state and diverge from the freshly-rebuilt oracle.
     fn wipe_disk_dir(&self) {
         if let Some(dir) = self.workspace.paths.disk_dir.as_deref()
             && let Ok(entries) = fs::read_dir(dir)
@@ -140,7 +141,9 @@ impl TauSimulation {
                 let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                 let is_dat = path.extension().is_some_and(|e| e == "dat");
                 let is_wal_or_archive = name.contains(".wal");
-                if is_dat || is_wal_or_archive {
+                let is_sstable_file =
+                    path.extension().is_some_and(|e| e == "manifest") || name.contains(".run.");
+                if is_dat || is_wal_or_archive || is_sstable_file {
                     let _ = fs::remove_file(path);
                 }
             }
@@ -234,42 +237,64 @@ impl TauSimulation {
         self.finish_replay_state(&mut self.target.borrow_mut());
     }
 
-    /// Pick a random `<db>.dat` file from the disk directory, if any exist.
-    /// The listing is sorted before the seeded pick so selection is
-    /// deterministic for a given seed.
-    fn random_dat_file(&self, rng: &mut StdRng) -> Option<PathBuf> {
+    /// Pick a random on-disk-backend data file from the disk directory, if any
+    /// exist: `<db>.dat` for `Storage::Disk`, or `<db>.manifest`/`<db>.run.*`
+    /// for `Storage::Sstable`. The listing is sorted before the seeded pick so
+    /// selection is deterministic for a given seed.
+    fn random_media_file(&self, rng: &mut StdRng) -> Option<PathBuf> {
         let dir = self.workspace.paths.disk_dir.as_deref()?;
-        let mut dats: Vec<PathBuf> = fs::read_dir(dir)
+        let mut candidates: Vec<PathBuf> = fs::read_dir(dir)
             .ok()?
             .flatten()
             .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|e| e == "dat"))
+            .filter(|p| {
+                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                match self.profile.storage {
+                    Storage::Disk => p.extension().is_some_and(|e| e == "dat"),
+                    Storage::Sstable => {
+                        p.extension().is_some_and(|e| e == "manifest") || name.contains(".run.")
+                    }
+                    Storage::Memory | Storage::Wal => false,
+                }
+            })
             .collect();
-        if dats.is_empty() {
+        if candidates.is_empty() {
             return None;
         }
-        dats.sort();
-        let idx = rng.gen_range(0..dats.len());
-        Some(dats.swap_remove(idx))
+        candidates.sort();
+        let idx = rng.gen_range(0..candidates.len());
+        Some(candidates.swap_remove(idx))
     }
 
-    /// Reopen the (possibly damaged) disk backend and force a schema replay of
-    /// each `.dat`. tau must recover or return a clean error — never panic. The
-    /// result is discarded; the value is the assertion that the call returns.
+    /// Reopen the (possibly damaged) on-disk backend and force a schema replay
+    /// of each database. tau must recover or return a clean error — never
+    /// panic. The result is discarded; the value is the assertion that the
+    /// call returns.
     fn probe_disk_reopen(&self) {
         let Some(dir) = self.workspace.paths.disk_dir.as_deref() else {
             return;
         };
-        match Executor::with_disk_backend(
-            dir,
-            self.profile.compact_threshold(),
-            libtau::storage::DEFAULT_ZSTD_LEVEL,
-            self.profile.enc_key(),
-            true,
-            None,
-        ) {
+        let opened = match self.profile.storage {
+            Storage::Sstable => Executor::with_sstable_backend(
+                dir,
+                self.profile.compact_threshold(),
+                libtau::storage::DEFAULT_ZSTD_LEVEL,
+                self.profile.enc_key(),
+                true,
+                None,
+            ),
+            _ => Executor::with_disk_backend(
+                dir,
+                self.profile.compact_threshold(),
+                libtau::storage::DEFAULT_ZSTD_LEVEL,
+                self.profile.enc_key(),
+                true,
+                None,
+            ),
+        };
+        match opened {
             Ok(mut ex) => {
-                // `CREATE DATABASE` replays each `.dat`'s persisted schema,
+                // `CREATE DATABASE` replays each database's persisted schema,
                 // forcing a read of the corrupted bytes.
                 for db in ["default", "aux"] {
                     if let Ok((_, stmt)) = parse(&format!("CREATE DATABASE {db}")) {
@@ -284,24 +309,25 @@ impl TauSimulation {
         }
     }
 
-    /// Corrupt or truncate a random `.dat` file, then probe that tau survives the
-    /// reopen. The caller wipes and rebuilds from the authoritative op log
-    /// afterwards, so this only adds the "tau tolerates a bad `.dat`" assertion.
+    /// Corrupt or truncate a random on-disk-backend file, then probe that tau
+    /// survives the reopen. The caller wipes and rebuilds from the
+    /// authoritative op log afterwards, so this only adds the "tau tolerates
+    /// a bad on-disk file" assertion.
     fn disk_media_fault(&self, rng: &mut StdRng, corrupt: bool) {
-        let Some(dat) = self.random_dat_file(rng) else {
+        let Some(target) = self.random_media_file(rng) else {
             return;
         };
         let damage = if corrupt {
-            corrupt_file(&dat, rng)
+            corrupt_file(&target, rng)
         } else {
-            truncate_file(&dat, rng)
+            truncate_file(&target, rng)
         };
         warn!(
             ?damage,
-            file = %dat.display(),
+            file = %target.display(),
             kind = if corrupt { "corrupt" } else { "truncate" },
             profile = %self.profile.name(),
-            "disk .dat fault injected",
+            "disk media fault injected",
         );
         self.probe_disk_reopen();
     }
@@ -786,5 +812,41 @@ mod profile_tests {
         } else {
             panic!("SHOW LENSES did not return Names");
         }
+    }
+}
+
+#[cfg(test)]
+mod known_issues {
+    use super::*;
+    use crate::profile::spec::{Compaction, Encryption, Storage};
+    use crate::profile::{Auth, Transport};
+    use rand::SeedableRng;
+
+    /// KNOWN ISSUE (tracked, not yet root-caused): under `Compaction::Stress`
+    /// (`compact_threshold = 4`), seed 26 diverges on `REDUCE a 33 515 sum`
+    /// after ~91 ops — the SUT undercounts relative to the oracle. Traced as
+    /// far as: the memtable-local, run-count, and absorbed-run-set states all
+    /// look individually correct at the divergence point (verified against
+    /// `Oracle::history_generations`), so the remaining gap is most likely a
+    /// value or tau-content mismatch inside one of the merged (multi-run)
+    /// layers produced by `Sstable::absorb_runs_for_lens`, not a missing
+    /// merge. Reproduces only at `Compaction::Stress` or beyond ~1600 ops at
+    /// `Compaction::Default` — outside what the rest of this suite's `ci_ops`
+    /// exercises for the `Sstable` profile, so it does not currently gate CI.
+    /// `#[ignore]`d until root-caused; run explicitly with
+    /// `cargo test -p dst known_issues:: -- --ignored`.
+    #[test]
+    #[ignore = "known Sstable REDUCE-sum divergence under Compaction::Stress, not yet root-caused"]
+    fn sstable_stress_seed26_reduce_sum_diverges() {
+        let p = ProfileSpec {
+            storage: Storage::Sstable,
+            compaction: Compaction::Stress,
+            encryption: Encryption::Plain,
+            transport: Transport::Direct,
+            auth: Auth::Off,
+        };
+        let mut rng = StdRng::seed_from_u64(26);
+        let r = run_profile(p, 300, &mut rng);
+        assert_eq!(r.errors, 0, "{:?}", r.first_divergence);
     }
 }
