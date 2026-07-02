@@ -228,3 +228,122 @@
         margin-top: 8px;
     }
 }
+
+/* ============================================================= */
+/* landing page (content/_index.md)                             */
+/* Scoped under .homepage-content so nothing leaks into docs.    */
+/* --astime marks *transaction time* only — color encodes the    */
+/* second clock, it is not decoration.                           */
+/* ============================================================= */
+
+.homepage-content {
+    --astime: #6fb6a6;
+
+    /* ---- hero ---- */
+    .hero__title {
+        font-size: clamp(2rem, 6.2vw, 3.5rem);
+        line-height: 1.04;
+        letter-spacing: -0.02em;
+        max-width: 22ch;
+        margin: 0.1em 0 0.5rem;
+        border-bottom: none;
+        padding: 0;
+    }
+    .hero__title:after { content: none; }
+
+    .hero__lede {
+        font-size: 1.2rem;
+        line-height: 1.6;
+        max-width: 62ch;
+        margin: 0 0 1.5rem;
+        color: var(--color);
+    }
+    .hero__lede b { color: var(--accent); font-weight: 600; }
+    .hero__lede .astime { color: var(--astime); font-weight: 600; }
+    .hero__lede code { color: var(--accent); }
+
+    /* ---- terminal transcript (the signature) ---- */
+    .term {
+        background: #211e1a;
+        border: 1px solid var(--border-color);
+        border-left: 3px solid var(--accent);
+        padding: 1rem 1.15rem;
+        margin: 0 0 0.85rem;
+        overflow-x: auto;
+        font-size: 0.97rem;
+        line-height: 1.95;
+    }
+    .term__line { display: block; white-space: pre; }
+    .term__p    { color: var(--accent); }
+    .term__c    { color: var(--footnote-color); }
+    .term__r    { color: var(--color); opacity: 0.8; }
+    .term__now  { color: var(--accent); }
+    .term__asof { color: var(--astime); }
+    .term__cap  { color: var(--footnote-color); font-size: 0.9rem; margin: 0 0 1.4rem; }
+    .term__cap .astime { color: var(--astime); }
+
+    /* ---- call-to-action row ---- */
+    .cta-row { display: flex; flex-wrap: wrap; gap: 12px; margin: 0 0 0.25rem; }
+    .cta {
+        display: inline-block;
+        padding: 10px 18px;
+        font-size: 1.05rem;
+        text-decoration: none;
+        border: 2px solid var(--accent);
+        background: var(--accent);
+        color: #211e1a;
+        font-weight: 600;
+    }
+    .cta:hover { background: transparent; color: var(--accent); }
+    .cta--ghost { background: transparent; color: var(--accent); }
+    .cta--ghost:hover { background: var(--accent-alpha-20); }
+
+    /* ---- two-clocks explainer ---- */
+    .axes {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        border: 1px solid var(--border-color);
+        margin: 0.75rem 0 0;
+    }
+    .axes > div { padding: 0.95rem 1.15rem; }
+    .axes > div + div { border-left: 1px solid var(--border-color); }
+    .axes h4 {
+        margin: 0 0 0.35rem;
+        font-size: 0.78rem;
+        letter-spacing: 0.09em;
+        text-transform: uppercase;
+    }
+    .axes--valid h4 { color: var(--accent); }
+    .axes--tx    h4 { color: var(--astime); }
+    .axes p { margin: 0; color: var(--footnote-color); font-size: 0.98rem; line-height: 1.55; }
+    .axes code { color: var(--color); }
+    @media (max-width: 620px) {
+        .axes { grid-template-columns: 1fr; }
+        .axes > div + div { border-left: none; border-top: 1px solid var(--border-color); }
+    }
+
+    /* ---- pillars: labelled rows, not cards ---- */
+    .pillars { list-style: none; margin: 0.4rem 0 0; padding: 0; }
+    .pillars li {
+        padding: 0.75rem 0;
+        border-top: 1px solid var(--border-color);
+        list-style: none;
+        line-height: 1.5;
+    }
+    .pillars li:before { content: none; }
+    .pillars b { color: var(--accent); font-weight: 600; }
+    .pillars span { color: var(--footnote-color); }
+
+    /* ---- use-case chips ---- */
+    .chips { display: flex; flex-wrap: wrap; gap: 10px; margin: 0.5rem 0 0; }
+    .chip {
+        border: 1px solid var(--border-color);
+        padding: 6px 13px;
+        text-decoration: none;
+        color: var(--color);
+        font-size: 0.95rem;
+        white-space: nowrap;
+    }
+    .chip:hover { border-color: var(--accent); color: var(--accent); }
+    .chip b { color: var(--accent); font-weight: 600; }
+}
