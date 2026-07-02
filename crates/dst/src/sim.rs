@@ -11,7 +11,23 @@ use rand::rngs::StdRng;
 use std::cell::RefCell;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::{Mutex, MutexGuard};
 use tracing::{debug, error, warn};
+
+/// Serializes every simulation that drives the **process-global** virtual write
+/// clock (`libtau::wall_clock`). Each `TauSimulation` advances that clock per op;
+/// two simulations running concurrently (e.g. `cargo test`'s threaded profile
+/// tests) would stomp each other's `now`, making the SUT and oracle stamp
+/// mismatched `written_at`. Holding this lock for a simulation's lifetime keeps
+/// the shared clock coherent. Uncontended in the `dst` binary (profiles run
+/// sequentially).
+static SIM_CLOCK_LOCK: Mutex<()> = Mutex::new(());
+
+/// Acquire the shared virtual-clock lock, ignoring poisoning (a panicking test
+/// already fails; we do not want to cascade that into every later test).
+pub(crate) fn lock_clock() -> MutexGuard<'static, ()> {
+    SIM_CLOCK_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 use crate::apply::{apply_dual, apply_dual_executor, sync_transactions};
 use crate::btree;
@@ -40,10 +56,14 @@ pub struct TauSimulation {
     /// Reset to `0` whenever state is rebuilt from the op log, so live execution
     /// and checkpoint replay stamp identical transaction times.
     tx_tick: RefCell<i64>,
+    /// Held for the simulation's lifetime so no other simulation mutates the
+    /// process-global virtual clock concurrently. Dropped when the simulation is.
+    _clock_guard: MutexGuard<'static, ()>,
 }
 
 impl TauSimulation {
     pub fn new(profile: ProfileSpec) -> Self {
+        let clock_guard = lock_clock();
         wall_clock::set_fixed_now_secs(crate::oracle::DST_NOW_SECS);
         let workspace = ProfileWorkspace::new(profile);
         let model = profile.bootstrap_oracle(&workspace.paths);
@@ -60,6 +80,7 @@ impl TauSimulation {
             model: RefCell::new(model),
             in_transaction: RefCell::new(false),
             tx_tick: RefCell::new(0),
+            _clock_guard: clock_guard,
         }
     }
 

@@ -338,6 +338,7 @@ mod tests {
 
     #[test]
     fn ttl_at_matches_oracle_with_fixed_wall_clock() {
+        let _clock_guard = crate::sim::lock_clock();
         libtau::wall_clock::set_fixed_now_secs(crate::oracle::DST_NOW_SECS);
         let paths = crate::profile::ProfileWorkspace::new(MEMORY_MULTI).paths;
         let mut target = MEMORY_MULTI.bootstrap_executor(&paths);
