@@ -1070,6 +1070,7 @@ mod tests {
 
     #[test]
     fn ttl_hides_old_entries() {
+        let _clock_guard = crate::sim::lock_clock();
         libtau::wall_clock::set_fixed_now_secs(DST_NOW_SECS);
         let mut o = Oracle::new();
         o.create_lens("x");

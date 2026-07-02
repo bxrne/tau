@@ -29,6 +29,8 @@ fn exec_read(ex: &Executor, q: &str) -> Result<Output, libtau::ExecError> {
 
 /// Concurrent readers + writer; in-memory target with isolated oracle.
 pub fn run_concurrent(n_writes: usize, n_readers: usize, seed: u64) -> RunResult {
+    // Serialize against other simulations that drive the global virtual clock.
+    let _clock_guard = crate::sim::lock_clock();
     wall_clock::set_fixed_now_secs(crate::oracle::DST_NOW_SECS);
     let ex = {
         let mut e = Executor::new();
