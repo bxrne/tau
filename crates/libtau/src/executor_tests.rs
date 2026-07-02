@@ -2035,9 +2035,9 @@ fn nd_duplicate_axis_names_rejected() {
 }
 
 #[test]
-fn nd_layers_survive_compaction_threshold() {
-    // Multi-axis lenses skip compaction: every append stays its own layer, so
-    // HISTORY still shows one generation per append past the threshold.
+fn nd_layers_compact_losslessly_past_threshold() {
+    // Multi-axis lenses are compacted (not exempted): crossing the threshold
+    // reduces the layer count, but every value stays exactly resolvable.
     let mut e = setup();
     run(&mut e, "CREATE LENS grid int AXES (valid, region)").unwrap();
     for i in 0..12i64 {
@@ -2052,14 +2052,52 @@ fn nd_layers_survive_compaction_threshold() {
         Output::LayerHistory(l) => l,
         other => panic!("expected LayerHistory, got {other:?}"),
     };
-    assert_eq!(layers.len(), 12, "N-D layers must not be compacted away");
-    // Every value is still resolvable.
+    assert!(
+        layers.len() <= 12,
+        "compaction only reduces layer count, got {}",
+        layers.len()
+    );
+    // Every value is still resolvable at its box.
     for i in 0..12i64 {
         assert_eq!(
             run(&mut e, &format!("AT LENS grid {} 5", i * 10 + 5)).unwrap(),
             Output::Value(Some(Value::Int(i)))
         );
     }
+}
+
+#[test]
+fn nd_compaction_preserves_occlusion_and_range() {
+    // Force compaction with overlapping boxes in one generation, then confirm
+    // AT (newest-wins) and RANGE are unchanged by the collapse.
+    let mut e = Executor::with_threshold(2);
+    run(&mut e, "CREATE DATABASE main").unwrap();
+    run(&mut e, "CREATE LENS grid int AXES (valid, region)").unwrap();
+    run(&mut e, "APPEND LENS grid [0 100] [0 100] 1").unwrap();
+    run(&mut e, "APPEND LENS grid [40 60] [40 60] 2").unwrap();
+    run(&mut e, "APPEND LENS grid [0 100] [90 100] 3").unwrap(); // crosses threshold
+    // Newest-wins across the boxes.
+    assert_eq!(
+        run(&mut e, "AT LENS grid 10 10").unwrap(),
+        Output::Value(Some(Value::Int(1)))
+    );
+    assert_eq!(
+        run(&mut e, "AT LENS grid 50 50").unwrap(),
+        Output::Value(Some(Value::Int(2)))
+    );
+    assert_eq!(
+        run(&mut e, "AT LENS grid 50 95").unwrap(),
+        Output::Value(Some(Value::Int(3)))
+    );
+    // Range sweep at a fixed region point crossing the occluded band.
+    assert_eq!(
+        run(&mut e, "RANGE LENS grid 0 100 AT (50)").unwrap(),
+        Output::Range(vec![
+            (0, 40, Value::Int(1)),
+            (40, 60, Value::Int(2)),
+            (60, 100, Value::Int(1)),
+        ])
+    );
 }
 
 #[test]

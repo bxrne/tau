@@ -107,7 +107,7 @@ CREATE LENS grid int AXES (valid, region)
 → OK
 ```
 
-Multi-axis lenses have their own statement forms — bracketed boxes for `APPEND`, one coordinate per axis for `AT`, and `RANGE … AT (…)` (see below). Single-axis statements, `SET TTL`, `DERIVE`, and `XDERIVE` over them are rejected with an arity error. They are never auto-compacted: every append stays its own layer, so `AS OF` and `HISTORY` are exact by construction.
+Multi-axis lenses have their own statement forms — bracketed boxes for `APPEND`, one coordinate per axis for `AT`, and `RANGE … AT (…)` (see below). Single-axis statements, `SET TTL`, `DERIVE`, and `XDERIVE` over them are rejected with an arity error. They compact losslessly by orthotope subtraction (newest-wins within each transaction-time generation), so `AS OF` and `HISTORY` stay exact.
 
 ```
 APPEND LENS grid [0 100] [0 50] 1, [0 100] [50 100] 2
