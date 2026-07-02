@@ -1,9 +1,13 @@
-use crate::model::{Layer, Timestamp};
+use crate::model::{Layer, LayerId, Timestamp};
 use std::io;
 use std::sync::Arc;
 
 /// Number of layers per lens that triggers an automatic compaction.
 pub const COMPACT_THRESHOLD: usize = 8;
+
+/// Per-layer metadata surfaced by [`Store::layer_infos`] for `HISTORY`.
+/// `(id, written_at, min_start, max_end, tau_count)`.
+pub type LayerInfoTuple = (LayerId, i64, Timestamp, Timestamp, usize);
 
 /// Pluggable backing storage for layered temporal data.
 ///
@@ -27,6 +31,90 @@ where
             .rev()
             .find_map(|layer| layer.at(t))
             .cloned()
+    }
+
+    /// N-dimensional point lookup with MVCC: the newest layer (written at or
+    /// before `as_of` when `Some`) whose tau contains every coordinate wins.
+    /// `coords` has one entry per axis (axis 0 is valid time). The default
+    /// implementation resolves over [`Store::layers`]; on-disk backends override
+    /// it to answer without materialising the stack.
+    fn get(&self, lens: &str, coords: &[Timestamp], as_of: Option<i64>) -> Option<V> {
+        let layers = self.layers(lens)?;
+        layers
+            .iter()
+            .rev()
+            .filter(|l| as_of.is_none_or(|a| l.written_at <= a))
+            .find_map(|l| {
+                if coords.len() == 1 {
+                    l.at(coords[0])
+                } else {
+                    l.at_nd(coords)
+                }
+            })
+            .cloned()
+    }
+
+    /// Valid-axis range scan over `[start, end)` with every non-valid axis fixed
+    /// at `fixed` (empty for single-axis lenses), resolved newest-wins (MVCC,
+    /// `as_of`-scoped when `Some`) into adjacent-merged `(start, end, value)`
+    /// segments. Default implementation sweeps [`Store::layers`].
+    fn scan(
+        &self,
+        lens: &str,
+        start: Timestamp,
+        end: Timestamp,
+        fixed: &[Timestamp],
+        as_of: Option<i64>,
+    ) -> Vec<(Timestamp, Timestamp, V)>
+    where
+        V: PartialEq,
+    {
+        let Some(layers) = self.layers(lens) else {
+            return Vec::new();
+        };
+        if start >= end {
+            return Vec::new();
+        }
+        let arity = fixed.len() + 1;
+        let filtered: Vec<Layer<V>> = layers
+            .iter()
+            .filter(|l| as_of.is_none_or(|a| l.written_at <= a))
+            .map(|l| {
+                if fixed.is_empty() {
+                    l.clone()
+                } else {
+                    let taus = l
+                        .taus
+                        .iter()
+                        .filter(|t| {
+                            t.coords.len() == arity
+                                && t.coords[1..]
+                                    .iter()
+                                    .zip(fixed)
+                                    .all(|(b, &p)| b.lo <= p && p < b.hi)
+                        })
+                        .cloned()
+                        .collect();
+                    Layer::new_sorted_unchecked(l.id, taus, l.written_at)
+                }
+            })
+            .collect();
+        crate::storage::layers::sweep_range(&filtered, start, end)
+            .into_iter()
+            .map(|t| (t.start(), t.end(), t.value))
+            .collect()
+    }
+
+    /// Per-layer metadata for `HISTORY`, newest last. Default reads
+    /// [`Store::layers`]; on-disk backends override.
+    fn layer_infos(&self, lens: &str) -> Vec<LayerInfoTuple> {
+        self.layers(lens)
+            .map(|ls| {
+                ls.iter()
+                    .map(|l| (l.id, l.written_at, l.min_start, l.max_end, l.taus.len()))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Snapshot the layer stack for `lens` as a shared `Arc<[Layer]>`.
