@@ -113,7 +113,8 @@ The WAL sits between the caller and the store. Every mutation writes to the WAL 
 WAL entries are line-oriented text:
 
 ```
-<crc32> <layer_id> <written_at_ms> <lens> <s:e:v ...>   # data entry
+<crc32> <layer_id> <written_at_ms> <lens> <s:e:v ...>   # data entry (1-axis tau)
+                                          <N<k>:lo:hi:…:v>  # k-axis tau
 E:<base64>                                              # encrypted data entry
 S:<crc32> <CREATE LENS ...>                             # schema DDL
 SE:<base64>                                             # encrypted schema DDL
@@ -139,6 +140,8 @@ Auto-compaction fires when a lens exceeds a threshold (default: 8 layers, config
 4. Emit a merged segment whenever the winning value changes.
 
 This is O(E log E) where E is the total number of taus. After compaction a lens holds one layer per surviving generation. Preserving generations is what keeps `AT … AS OF <t>` and `HISTORY` exact after compaction: the earlier collapse-to-one-layer form stamped the merged layer with `max(written_at)` and silently erased older beliefs. When all appends share a generation (the common burst-of-writes case) compaction still collapses to a single layer.
+
+Multi-axis lenses (`CREATE LENS … AXES (…)`) are exempt from compaction entirely: the sweep merges along valid time only, which would be lossy for taus that also carry filter axes. Their layers accumulate as appended — trivially lossless — and newest-wins layer order resolves every query.
 
 `Store::append` returns a `bool` indicating whether compaction fired. The `Database` layer counts these and triggers a WAL-checkpoint every `CHECKPOINT_COMPACTION_INTERVAL` (8) compactions (or sooner, if `[wal] max_size_mb` is reached first) rather than on every single one, which keeps the per-append cost of the disk backend close to the in-memory backend.
 

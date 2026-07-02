@@ -100,6 +100,31 @@ Types:
 
 Requires `C` permission on the active database.
 
+An optional `AXES (<axis>, …)` clause declares a multi-dimensional lens: each tau then spans one half-open interval per axis, with axis 0 always valid time. Axis names must be distinct.
+
+```
+CREATE LENS grid int AXES (valid, region)
+→ OK
+```
+
+Multi-axis lenses have their own statement forms — bracketed boxes for `APPEND`, one coordinate per axis for `AT`, and `RANGE … AT (…)` (see below). Single-axis statements, `SET TTL`, `DERIVE`, and `XDERIVE` over them are rejected with an arity error. They are never auto-compacted: every append stays its own layer, so `AS OF` and `HISTORY` are exact by construction.
+
+```
+APPEND LENS grid [0 100] [0 50] 1, [0 100] [50 100] 2
+→ OK
+
+AT LENS grid 10 25
+→ VAL i1
+
+AT LENS grid 10 75 AS OF 1717000000000
+→ VAL i2
+
+RANGE LENS grid 0 100 AT (25)
+→ RANGE 1; 0:100:i1
+```
+
+Within one `APPEND`, two boxes may overlap on valid time as long as they differ somewhere else; boxes that intersect on *every* axis are rejected as ambiguous duplicates. Across appends the newest layer wins, exactly as for single-axis lenses.
+
 ### `DROP LENS <name>`
 
 Removes a lens and all its data from the active database.

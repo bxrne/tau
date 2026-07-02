@@ -55,7 +55,7 @@ The write clock is virtualized: each applied op advances a replay-safe tick that
 
 ### Behavior tree
 
-A static `LazyLock<Tree<SimCtx, Op>>` of 28 closure-based leaves, including `AT … AS OF` and `HISTORY`. Guards and builders are `Arc<dyn Fn>` — no fn-pointer constraints. Tag bits suppress WAL-excluded ops at runtime (`excluded_tags` parameter to `Tree::pick`).
+A static `LazyLock<Tree<SimCtx, Op>>` of 34 closure-based leaves, including `AT … AS OF`, `HISTORY`, and the N-dimensional ops (create/append/drop/point/range over a 2-axis lens, modelled independently in the oracle as orthotope scans). Guards and builders are `Arc<dyn Fn>` — no fn-pointer constraints. Tag bits suppress WAL-excluded ops at runtime (`excluded_tags` parameter to `Tree::pick`).
 
 ### Deterministic scheduler
 
