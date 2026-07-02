@@ -1915,6 +1915,172 @@ fn disk_backend_drop_lens_survives_restart() {
     ));
 }
 
+/// Sstable backend: schema + data survive a restart, including a lens created
+/// after some data was already flushed from the memtable to a run file.
+#[test]
+fn sstable_backend_persists_schema_and_data_across_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let threshold = crate::storage::COMPACT_THRESHOLD;
+    {
+        let mut e =
+            Executor::with_sstable_backend(dir.path(), threshold, 3, None, true, None).unwrap();
+        run(&mut e, "CREATE DATABASE main").unwrap();
+        run(&mut e, "CREATE LENS temp int").unwrap();
+        run(&mut e, "APPEND LENS temp 0 1000 42").unwrap();
+        run(&mut e, "DERIVE LENS hot AS temp > 20").unwrap();
+    }
+    let mut e = Executor::with_sstable_backend(dir.path(), threshold, 3, None, true, None).unwrap();
+    run(&mut e, "CREATE DATABASE main").unwrap();
+
+    assert_eq!(
+        run(&mut e, "AT LENS temp 500").unwrap(),
+        Output::Value(Some(Value::Int(42)))
+    );
+    assert_eq!(
+        run(&mut e, "AT LENS hot 500").unwrap(),
+        Output::Value(Some(Value::Bool(true)))
+    );
+    let Output::Names(lenses) = run(&mut e, "SHOW LENSES").unwrap() else {
+        panic!("expected names");
+    };
+    assert_eq!(lenses, vec!["hot".to_string(), "temp".to_string()]);
+}
+
+/// Sstable backend: per-layer `written_at` survives a restart, so `AS OF`
+/// still distinguishes layers written at different times.
+#[test]
+fn sstable_backend_persists_written_at_for_as_of_across_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let threshold = crate::storage::COMPACT_THRESHOLD;
+    {
+        let mut e =
+            Executor::with_sstable_backend(dir.path(), threshold, 3, None, true, None).unwrap();
+        run(&mut e, "CREATE DATABASE main").unwrap();
+        run(&mut e, "CREATE LENS temp int").unwrap();
+        run(&mut e, "APPEND LENS temp 0 1000 42").unwrap();
+    }
+    let mut e = Executor::with_sstable_backend(dir.path(), threshold, 3, None, true, None).unwrap();
+    run(&mut e, "CREATE DATABASE main").unwrap();
+
+    let Output::LayerHistory(layers) = run(&mut e, "HISTORY LENS temp").unwrap() else {
+        panic!("expected layer history");
+    };
+    let written_at = layers[0].written_at;
+    assert!(written_at > 0, "written_at lost on reopen");
+
+    assert_eq!(
+        run(
+            &mut e,
+            &format!("AT LENS temp 500 AS OF {}", written_at - 1)
+        )
+        .unwrap(),
+        Output::Value(None)
+    );
+    assert_eq!(
+        run(&mut e, &format!("AT LENS temp 500 AS OF {written_at}")).unwrap(),
+        Output::Value(Some(Value::Int(42)))
+    );
+}
+
+/// Sstable backend: a persisted `SET TTL` policy is replayed on restart.
+#[test]
+fn sstable_backend_persists_ttl_across_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let threshold = crate::storage::COMPACT_THRESHOLD;
+    {
+        let mut e =
+            Executor::with_sstable_backend(dir.path(), threshold, 3, None, true, None).unwrap();
+        run(&mut e, "CREATE DATABASE main").unwrap();
+        run(&mut e, "CREATE LENS old int").unwrap();
+        run(&mut e, "SET TTL LENS old 10").unwrap();
+        run(&mut e, "APPEND LENS old 0 1000 7").unwrap();
+    }
+    let mut e = Executor::with_sstable_backend(dir.path(), threshold, 3, None, true, None).unwrap();
+    run(&mut e, "CREATE DATABASE main").unwrap();
+    assert_eq!(run(&mut e, "AT LENS old 500").unwrap(), Output::Value(None));
+}
+
+/// Sstable backend: a `DROP LENS` persisted before restart stays dropped, and
+/// recreating the same name afterward does not resurrect the old data.
+#[test]
+fn sstable_backend_drop_lens_survives_restart_and_recreate() {
+    let dir = tempfile::tempdir().unwrap();
+    let threshold = crate::storage::COMPACT_THRESHOLD;
+    {
+        let mut e =
+            Executor::with_sstable_backend(dir.path(), threshold, 3, None, true, None).unwrap();
+        run(&mut e, "CREATE DATABASE main").unwrap();
+        run(&mut e, "CREATE LENS gone int").unwrap();
+        run(&mut e, "APPEND LENS gone 0 10 1").unwrap();
+        run(&mut e, "DROP LENS gone").unwrap();
+    }
+    let mut e = Executor::with_sstable_backend(dir.path(), threshold, 3, None, true, None).unwrap();
+    run(&mut e, "CREATE DATABASE main").unwrap();
+    assert!(matches!(
+        run(&mut e, "AT LENS gone 0"),
+        Err(ExecError::UnknownLens(_))
+    ));
+
+    // Recreate with the same name: no pre-drop data resurfaces.
+    run(&mut e, "CREATE LENS gone int").unwrap();
+    assert_eq!(run(&mut e, "AT LENS gone 5").unwrap(), Output::Value(None));
+    run(&mut e, "APPEND LENS gone 0 10 99").unwrap();
+    assert_eq!(
+        run(&mut e, "AT LENS gone 5").unwrap(),
+        Output::Value(Some(Value::Int(99)))
+    );
+}
+
+/// Sstable backend: exceeding the compaction threshold flushes the memtable
+/// to on-disk runs and merges them, without losing or corrupting data.
+#[test]
+fn sstable_backend_flush_and_run_compaction_preserve_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut e = Executor::with_sstable_backend(dir.path(), 2, 3, None, true, None).unwrap();
+    run(&mut e, "CREATE DATABASE main").unwrap();
+    run(&mut e, "CREATE LENS x int").unwrap();
+    for i in 0..20i64 {
+        run(
+            &mut e,
+            &format!("APPEND LENS x {} {} {i}", i * 10, i * 10 + 10),
+        )
+        .unwrap();
+    }
+    for i in 0..20i64 {
+        assert_eq!(
+            run(&mut e, &format!("AT LENS x {}", i * 10 + 5)).unwrap(),
+            Output::Value(Some(Value::Int(i)))
+        );
+    }
+    assert_eq!(
+        run(&mut e, "REDUCE LENS x 0 200 USING count").unwrap(),
+        Output::Value(Some(Value::Int(20)))
+    );
+}
+
+/// Sstable backend: N-dimensional lenses work identically to InMemory/Disk.
+#[test]
+fn sstable_backend_nd_lens_round_trips() {
+    let dir = tempfile::tempdir().unwrap();
+    let threshold = crate::storage::COMPACT_THRESHOLD;
+    let mut e = Executor::with_sstable_backend(dir.path(), threshold, 3, None, true, None).unwrap();
+    run(&mut e, "CREATE DATABASE main").unwrap();
+    run(&mut e, "CREATE LENS grid int AXES (valid, region)").unwrap();
+    run(
+        &mut e,
+        "APPEND LENS grid [0 100] [0 50] 1, [0 100] [50 100] 2",
+    )
+    .unwrap();
+    assert_eq!(
+        run(&mut e, "AT LENS grid 10 25").unwrap(),
+        Output::Value(Some(Value::Int(1)))
+    );
+    assert_eq!(
+        run(&mut e, "RANGE LENS grid 0 100 AT (75)").unwrap(),
+        Output::Range(vec![(0, 100, Value::Int(2))])
+    );
+}
+
 #[test]
 fn nd_create_append_at_newest_wins() {
     let mut e = setup();

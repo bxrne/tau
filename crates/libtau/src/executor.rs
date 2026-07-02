@@ -42,7 +42,7 @@ use crate::query::{
     build_range_segments, collect_range_bounds, eval_agg, eval_lens, ttl_cutoff, would_cycle,
 };
 use crate::storage::{
-    Disk, InMemory, Store,
+    Disk, InMemory, Sstable, Store,
     wal::{Wal, WalEntry},
 };
 use crate::users::{Perm, User, UserStore};
@@ -149,6 +149,18 @@ pub enum StorageBackend {
         wal_fsync_each: bool,
         wal_max_bytes: Option<u64>,
     },
+    /// Every database gets its own `<dir>/<name>.manifest` + `<dir>/<name>.run.<id>`
+    /// SSTable files (see [`crate::storage::Sstable`]): an in-memory memtable
+    /// absorbs appends, and checkpoints flush it into a new immutable run
+    /// instead of rewriting the whole database, with newest-wins/`AS OF`
+    /// resolved at read time (MVCC) across the memtable and runs.
+    Sstable {
+        dir: std::path::PathBuf,
+        compression_level: i32,
+        enc_key: Option<[u8; 32]>,
+        wal_fsync_each: bool,
+        wal_max_bytes: Option<u64>,
+    },
 }
 
 /// Definition of a materialised (`XDERIVE`) lens: the expression to compute,
@@ -245,6 +257,39 @@ impl DbState {
 
         // Migrate schema DDL embedded in older disk files (pre-WAL format)
         // into the WAL, which is now the source of truth for schema.
+        if wal.replay_schemas()?.is_empty() {
+            for stmt in store.schema_stmts() {
+                wal.append_schema(&stmt)?;
+            }
+        }
+
+        wal.set_fsync_each(wal_fsync_each);
+        if let Some(bytes) = wal_max_bytes {
+            wal.set_max_bytes(bytes);
+        }
+
+        let db = Database::with_wal(store, wal);
+        let schema_stmts = db.schema_stmts()?;
+        Ok((Self::from_db(db), schema_stmts))
+    }
+
+    fn with_sstable(
+        base: impl AsRef<Path>,
+        compact_threshold: usize,
+        compression_level: i32,
+        enc_key: Option<[u8; 32]>,
+        wal_fsync_each: bool,
+        wal_max_bytes: Option<u64>,
+    ) -> io::Result<(Self, Vec<String>)> {
+        let base = base.as_ref();
+        let mut store = Sstable::open(base, enc_key)?;
+        store.set_compact_threshold(compact_threshold);
+        store.set_compression_level(compression_level);
+
+        let wal_path = base.with_extension("wal");
+        let mut wal = Wal::open(&wal_path, enc_key)?;
+        wal.replay(&mut store)?;
+
         if wal.replay_schemas()?.is_empty() {
             for stmt in store.schema_stmts() {
                 wal.append_schema(&stmt)?;
@@ -431,6 +476,30 @@ impl Executor {
         fs::create_dir_all(&dir)?;
         let mut executor = Self::with_threshold(compact_threshold);
         executor.backend = StorageBackend::Disk {
+            dir,
+            compression_level,
+            enc_key,
+            wal_fsync_each,
+            wal_max_bytes,
+        };
+        Ok(executor)
+    }
+
+    /// Create an SSTable-backed executor (see [`crate::storage::Sstable`]).
+    /// Each `CREATE DATABASE` allocates `<dir>/<name>.manifest` +
+    /// `<dir>/<name>.run.<id>` files paired with a `<dir>/<name>.wal` WAL.
+    pub fn with_sstable_backend(
+        dir: impl AsRef<Path>,
+        compact_threshold: usize,
+        compression_level: i32,
+        enc_key: Option<[u8; 32]>,
+        wal_fsync_each: bool,
+        wal_max_bytes: Option<u64>,
+    ) -> io::Result<Self> {
+        let dir = dir.as_ref().to_path_buf();
+        fs::create_dir_all(&dir)?;
+        let mut executor = Self::with_threshold(compact_threshold);
+        executor.backend = StorageBackend::Sstable {
             dir,
             compression_level,
             enc_key,
@@ -914,6 +983,23 @@ impl Executor {
                 let path = dir.join(format!("{name}.dat"));
                 DbState::with_disk(
                     &path,
+                    self.compact_threshold,
+                    *compression_level,
+                    *enc_key,
+                    *wal_fsync_each,
+                    *wal_max_bytes,
+                )?
+            }
+            StorageBackend::Sstable {
+                dir,
+                compression_level,
+                enc_key,
+                wal_fsync_each,
+                wal_max_bytes,
+            } => {
+                let base = dir.join(name);
+                DbState::with_sstable(
+                    &base,
                     self.compact_threshold,
                     *compression_level,
                     *enc_key,
