@@ -39,11 +39,10 @@ use crate::metrics::Op;
 use crate::model::{Layer, LayerId, Tau, Timestamp};
 use crate::ql::ast::{AggFunc, Expr, Stmt, Type};
 use crate::query::{
-    at_layers, build_range_segments, collect_range_bounds, eval_agg, eval_lens, ttl_cutoff,
-    would_cycle,
+    build_range_segments, collect_range_bounds, eval_agg, eval_lens, ttl_cutoff, would_cycle,
 };
 use crate::storage::{
-    Disk, InMemory, Store, sweep_range,
+    Disk, InMemory, Store,
     wal::{Wal, WalEntry},
 };
 use crate::users::{Perm, User, UserStore};
@@ -1147,16 +1146,7 @@ impl Executor {
         if ts.len() != arity {
             return Err(Self::arity_error(name, arity, ts.len()));
         }
-        let val = state
-            .db
-            .layers(name)
-            .unwrap_or_default()
-            .iter()
-            .rev()
-            .filter(|l| as_of.is_none_or(|a| l.written_at <= a))
-            .find_map(|l| l.at_nd(ts))
-            .cloned();
-        Ok(Output::Value(val))
+        Ok(Output::Value(state.db.get(name, ts, as_of)))
     }
 
     /// N-dimensional range scan: sweep valid time over `[start, end)` with the
@@ -1182,30 +1172,7 @@ impl Executor {
         if fixed.len() + 1 != arity {
             return Err(Self::arity_error(name, arity, fixed.len() + 1));
         }
-        let layers = state.db.layers(name).unwrap_or_default();
-        let filtered: Vec<Layer<Value>> = layers
-            .iter()
-            .map(|l| {
-                let taus: Vec<Tau<Value>> = l
-                    .taus
-                    .iter()
-                    .filter(|t| {
-                        t.coords.len() == arity
-                            && t.coords[1..]
-                                .iter()
-                                .zip(fixed)
-                                .all(|(b, &p)| b.lo <= p && p < b.hi)
-                    })
-                    .cloned()
-                    .collect();
-                Layer::new_sorted_unchecked(l.id, taus, l.written_at)
-            })
-            .collect();
-        let segs = sweep_range(&filtered, start, end)
-            .into_iter()
-            .map(|t| (t.start(), t.end(), t.value))
-            .collect();
-        Ok(Output::Range(segs))
+        Ok(Output::Range(state.db.scan(name, start, end, fixed, None)))
     }
 
     fn copy_lens(&self, name: &str, path: &str) -> Result<Output, ExecError> {
@@ -1360,21 +1327,11 @@ impl Executor {
         if effective_start >= end {
             return Ok(Output::Range(vec![]));
         }
-        // Fast path for unfiltered base-lens queries: single-pass O(E log E) sweep.
+        // Fast path for unfiltered base-lens queries: pushed to the store as a
+        // single valid-axis scan (no non-valid axes to fix on a 1-D lens).
         if filter.is_none() && state.base_types.contains_key(name) {
-            let layers = state.db.layers(name).unwrap_or_default();
-            let raw = sweep_range(&layers, effective_start, end);
-            let mut out: Vec<(Timestamp, Timestamp, Value)> = Vec::with_capacity(raw.len());
-            for tau in raw {
-                match out.last_mut() {
-                    Some(last) if last.1 == tau.start() && last.2 == tau.value => {
-                        last.1 = tau.end()
-                    }
-                    _ => out.push((tau.start(), tau.end(), tau.value)),
-                }
-            }
-            let out = apply_offset_limit(out, offset, limit);
-            return Ok(Output::Range(out));
+            let out = state.db.scan(name, effective_start, end, &[], None);
+            return Ok(Output::Range(apply_offset_limit(out, offset, limit)));
         }
         let (bounds, layers_snap) =
             collect_range_bounds(&state, name, effective_start, end, filter)?;
@@ -1488,17 +1445,7 @@ impl Executor {
         let state = db_arc.read().expect("db lock poisoned");
         ensure_base_lens(&state, name, "AT AS OF")?;
         ensure_single_axis(&state, name, "AT AS OF")?;
-        let filtered: Vec<Layer<Value>> = state
-            .db
-            .layers(name)
-            .map(|arc| {
-                arc.iter()
-                    .filter(|l| l.written_at <= as_of)
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default();
-        Ok(Output::Value(at_layers(&filtered, t)))
+        Ok(Output::Value(state.db.get(name, &[t], Some(as_of))))
     }
 
     fn at_layer_lens(&self, name: &str, t: Timestamp, layer_id: u64) -> Result<Output, ExecError> {
@@ -1520,20 +1467,23 @@ impl Executor {
         let db_arc = self.active_db_arc()?;
         let state = db_arc.read().expect("db lock poisoned");
         ensure_lens_exists(&state, name)?;
-        let layers = state.db.layers(name).unwrap_or_default();
-        let infos = layers
-            .iter()
-            .filter(|l| match range {
-                Some((start, end)) => l.max_end > start && l.min_start < end,
+        let infos = state
+            .db
+            .layer_infos(name)
+            .into_iter()
+            .filter(|(_, _, min_start, max_end, _)| match range {
+                Some((start, end)) => *max_end > start && *min_start < end,
                 None => true,
             })
-            .map(|l| LayerInfo {
-                id: l.id,
-                written_at: l.written_at,
-                min_start: l.min_start,
-                max_end: l.max_end,
-                tau_count: l.taus.len(),
-            })
+            .map(
+                |(id, written_at, min_start, max_end, tau_count)| LayerInfo {
+                    id,
+                    written_at,
+                    min_start,
+                    max_end,
+                    tau_count,
+                },
+            )
             .collect();
         Ok(Output::LayerHistory(infos))
     }

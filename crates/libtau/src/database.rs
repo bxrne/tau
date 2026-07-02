@@ -405,6 +405,45 @@ where
         self.store.read().expect("store lock poisoned").at(name, t)
     }
 
+    /// N-dimensional point lookup (MVCC, `as_of`-scoped when `Some`) pushed to
+    /// the store, so an on-disk backend answers without materialising layers.
+    #[inline]
+    pub fn get(&self, name: &str, coords: &[Timestamp], as_of: Option<i64>) -> Option<V> {
+        self.store
+            .read()
+            .expect("store lock poisoned")
+            .get(name, coords, as_of)
+    }
+
+    /// Valid-axis range scan with non-valid axes fixed, resolved into merged
+    /// segments by the store (MVCC, `as_of`-scoped when `Some`).
+    #[inline]
+    pub fn scan(
+        &self,
+        name: &str,
+        start: Timestamp,
+        end: Timestamp,
+        fixed: &[Timestamp],
+        as_of: Option<i64>,
+    ) -> Vec<(Timestamp, Timestamp, V)>
+    where
+        V: PartialEq,
+    {
+        self.store
+            .read()
+            .expect("store lock poisoned")
+            .scan(name, start, end, fixed, as_of)
+    }
+
+    /// Per-layer metadata for `HISTORY`, from the store.
+    #[inline]
+    pub fn layer_infos(&self, name: &str) -> Vec<crate::storage::store::LayerInfoTuple> {
+        self.store
+            .read()
+            .expect("store lock poisoned")
+            .layer_infos(name)
+    }
+
     /// Snapshot of the layer stack for `lens` as a shared `Arc<[Layer]>` so all
     /// query phases (bounds collection, segment building, etc.) share one
     /// allocation. The snapshot is a single pointer bump — no vector clone — and
