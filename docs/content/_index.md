@@ -8,9 +8,9 @@ page_template = "page.html"
 
 **A bitemporal time series database. Corrections, restatements and out of order arrivals are first class. Old values are never overwritten and every query returns the right answer at any point in time.**
 
-1. **Corrections are first class.** Every append is an immutable layer. The newest layer wins where layers overlap. Old values stay on disk.
-2. **Compaction is a provable normalisation.** A sweep line algorithm collapses N layers into one canonical layer. Query equivalent before and after. Checked by property based tests on every build.
-3. **TauQL.** A tiny query language. One statement in, one response line out. Derived lenses compose as lazy closures. Rolling window aggregations are first class expressions.
+1. **Corrections are first class.** Every append is an immutable layer stamped with its transaction time. The newest layer wins where layers overlap; `AT … AS OF` winds the clock back and `HISTORY` audits every write. Old values are never destroyed.
+2. **Compaction is a provable normalisation.** It canonicalises layers within each transaction-time generation (never across them, so time-travel survives) — a sweep line for single-axis lenses, orthotope subtraction for multi-dimensional ones. Every query is equivalent before and after, checked by property tests and deterministic simulation on every build.
+3. **TauQL.** A tiny query language. One statement in, one response line out. Lenses can be multi-dimensional (`AXES`); derived lenses compose as lazy closures; rolling window aggregations are first class expressions.
 4. **Library or server.** Embed `libtau` in a Rust process or run the standalone TCP server. Same engine.
 
 ---
