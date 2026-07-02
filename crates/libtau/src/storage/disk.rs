@@ -11,7 +11,9 @@
 //!     Entries: layer_id (8 bytes, u64) + written_at_ms (8 bytes, i64) +
 //!              lens_name_len (4 bytes) + lens_name +
 //!              tau_count (4 bytes) + repeated taus
-//!              Each tau: start (8 bytes, i64) + end (8 bytes, i64) + value (encoded)
+//!              Each tau (v2): axis_count (1 byte) + axis_count × [ lo (8 bytes,
+//!              i64) + hi (8 bytes, i64) ] + value (encoded). v1 taus omit the
+//!              axis_count byte and carry a single (start, end) pair.
 
 use crate::crypto;
 use crate::model::{Layer, LayerId, Tau};
@@ -26,7 +28,7 @@ use std::sync::Arc;
 use crc32fast::Hasher;
 
 const MAGIC: &[u8] = b"TAUZ";
-/// On-disk format version. The only supported version; bump on any layout
+/// Current on-disk format version written by this build; bump on any layout
 /// change once files exist in the wild.
 const VERSION: u8 = 2;
 /// Oldest on-disk version this build can still read. v1 entries carry a single
@@ -376,6 +378,21 @@ impl<V: Clone + Codec> Disk<V> {
         Self::decode_payload(&mut cursor, VERSION).map(|_| ())
     }
 
+    /// Decode a payload at an explicit format `version`. Fuzz entry point: lets
+    /// the harness reach both the v1 (bare `start`/`end` pairs) and v2 (per-tau
+    /// axis count) tau parsers from raw bytes, so the migration read path is
+    /// exercised directly. Must never panic; out-of-range versions error.
+    pub fn decode_payload_bytes_versioned(bytes: &[u8], version: u8) -> io::Result<()> {
+        if !(MIN_VERSION..=VERSION).contains(&version) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unsupported payload version",
+            ));
+        }
+        let mut cursor = Cursor::new(bytes);
+        Self::decode_payload(&mut cursor, version).map(|_| ())
+    }
+
     /// Create a new store at `path`. Pass `Some(key)` to encrypt at rest.
     pub fn create(path: impl AsRef<Path>, key: Option<[u8; 32]>) -> io::Result<Self> {
         let path = path.as_ref().to_path_buf();
@@ -566,6 +583,47 @@ mod tests {
         assert_eq!(entry.taus[0].arity(), 2);
         assert!(entry.taus[0].contains_point(&[5, 150]));
         assert!(entry.taus[1].contains_point(&[5, 250]));
+    }
+
+    #[test]
+    #[ignore = "seed generator; run with --ignored to (re)write the v2 fuzz seeds"]
+    fn emit_v2_nd_fuzz_seeds() {
+        use crate::value::Value;
+        let dir = std::path::Path::new("../fuzztau/seeds/disk_decode");
+
+        // Raw decompressed payload: empty schema section + one N-D layer entry.
+        let taus = vec![
+            Tau::try_new_nd(&[(0, 100), (0, 50)], Value::Int(1)).unwrap(),
+            Tau::try_new_nd(&[(0, 100), (50, 100)], Value::Int(2)).unwrap(),
+        ];
+        let mut payload = Vec::new();
+        write_schema(
+            &mut payload,
+            &["CREATE LENS grid int AXES (valid, region)".into()],
+        )
+        .unwrap();
+        write_entry(&mut payload, 1, 1_700_000_000_000, "grid", &taus).unwrap();
+        // Sanity: it round-trips through the real v2 decoder.
+        Disk::<Value>::decode_payload_bytes_versioned(&payload, 2).expect("payload decodes");
+        std::fs::write(dir.join("nd-v2-payload"), &payload).unwrap();
+
+        // Full on-disk image (header + zstd + payload) via the public store API.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("grid.dat");
+        let mut store = Disk::<Value>::create(&path, None).unwrap();
+        store
+            .append_schema("CREATE LENS grid int AXES (valid, region)")
+            .unwrap();
+        store
+            .append(
+                "grid",
+                Layer::try_new_nd_at(1, taus, 1_700_000_000_000).unwrap(),
+            )
+            .unwrap();
+        store.flush().unwrap();
+        let image = std::fs::read(&path).unwrap();
+        Disk::<Value>::decode_image_bytes(&image, None).expect("image decodes");
+        std::fs::write(dir.join("nd-v2-image"), &image).unwrap();
     }
 
     #[test]
