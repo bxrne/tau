@@ -127,14 +127,17 @@ The aggregate now reflects the correction.
 
 Each entry: `<layer_id>:<written_at_ms>:<min_start>:<max_end>`.
 
-To see what the lens looked like before the correction, query against a specific layer:
+To see what the lens looked like before the correction, wind the transaction clock back with `AS OF` (using a timestamp between the two appends), or query a specific layer directly:
 
 ```
+τ: AT LENS temperature 1800 AS OF <ts-before-correction>
+→ VAL f18.5
+
 τ: AT LENS temperature 1800 LAYER 1
 → VAL f18.5
 ```
 
-Layer 1 still carries the original reading. Nothing was overwritten.
+`AS OF` filters to layers written at or before the given wall-clock time (the `written_at` values `HISTORY` printed above); `LAYER 1` reads one layer by id. Either way the original reading is intact — nothing was overwritten.
 
 ---
 
@@ -191,16 +194,16 @@ Both appends were buffered until `COMMIT`. No other connection saw partial state
 
 ## Step 7 — Compaction
 
-After several corrections the lens accumulates layers. Compaction fires automatically when the layer count exceeds the configured threshold (default 8). It is also possible to trigger it manually by appending enough layers in a test environment.
+After enough corrections the lens accumulates layers, and compaction fires automatically once the count exceeds the configured threshold (default 8). It runs inline, never as a background job.
 
-After compaction:
+Compaction canonicalises **within each transaction-time generation** (layers sharing a `written_at`) and never merges across them — that is what keeps `AS OF` and `HISTORY` exact. So corrections made at *different* times stay as distinct one-layer generations:
 
 ```
 τ: HISTORY LENS temperature
-→ LAYERS 1; 4:<ts>:0:7200
+→ LAYERS 3; 2:<ts₁>:0:3600; 3:<ts₂>:0:1800; 4:<ts₃>:1800:3600
 ```
 
-The lens now has one canonical layer containing three taus: `[0,1800)`, `[1800,3600)`, `[3600,7200)`. Every previous `AT`, `RANGE`, and `REDUCE` result is identical — compaction is a provable normalisation, checked by property tests on every build.
+whereas appends made in the *same* instant — a `BATCH APPEND`, or a tight ingest loop — share a generation and collapse to one canonical layer. Either way, **every previous `AT`, `RANGE`, `REDUCE`, `AS OF`, and `HISTORY` result is identical** before and after compaction: it is a provable normalisation, checked by property tests and the deterministic simulation tester on every build.
 
 ---
 

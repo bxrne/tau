@@ -12,6 +12,7 @@ Complete reference for Tau. The data model, query language, storage internals, t
 - [Overview](/docs/overview/). The bitemporal interval model, layers, lenses, compaction and concurrency.
 - [How it works](/docs/how-it-works/). Storage internals, WAL, compaction algorithm, design decisions.
 - [TauQL Reference](/docs/tauql/). Every statement, operator and response code.
+- [Examples](/docs/examples/). Short, copy-pasteable TauQL for IoT, observability and backtesting.
 - [Testing](/docs/testing/). Property based tests and unit anchors. How the three layers fit together.
 - [Permissions](/docs/permissions/). The CRUDA bitmap, per-statement requirements, grants and wildcards.
 - [Configuration](/docs/configuration/). All server flags and environment variables.

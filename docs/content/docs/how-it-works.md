@@ -40,31 +40,27 @@ Stmt → Executor → Database<Value> → Store<V> + optional Wal
 
 ### `Tau<V>`
 
-An atomic temporal fact: value `V` is true over the half-open interval `[start, end)`.
+An atomic temporal fact: value `V` is true over one half-open `[lo, hi)` interval per axis.
 
 ```
-Tau { start: i64, end: i64, value: V }
+Tau { coords: Arc<[Bound]>, value: V }   # Bound { lo: i64, hi: i64 }
 ```
 
-The half-open interval is intentional. Adjacent intervals tile cleanly: `[0, 10)` and `[10, 20)` cover `[0, 20)` with no overlap and no gap. Equality on the boundary belongs unambiguously to the later interval.
-
-`Tau::new` asserts `start < end`. There are no zero-width taus.
+Axis 0 is always valid time; `Tau::new(start, end, v)` builds the common single-axis form, and a multi-axis lens (`CREATE LENS … AXES (…)`) adds filter axes so a tau is an N-orthotope. The half-open interval is intentional. Adjacent intervals tile cleanly: `[0, 10)` and `[10, 20)` cover `[0, 20)` with no overlap and no gap; equality on the boundary belongs unambiguously to the later interval. `Tau::new` asserts `start < end` on every axis; there are no zero-width taus.
 
 Timestamps are `i64` (nanoseconds, milliseconds, or any other unit the caller agrees on). Tau treats them as opaque ordered integers.
 
 ### `Layer<V>`
 
-A batch of taus that arrived together: a sorted, non-overlapping `Arc<[Tau<V>]>`.
+A batch of taus that arrived together, sorted by valid-time start:
 
 ```
-Layer { id: u64, min_start: i64, max_end: i64, taus: Arc<[Tau<V>]> }
+Layer { id: u64, min_start: i64, max_end: i64, taus: Arc<[Tau<V>]>, written_at: i64 }
 ```
 
-Layers are immutable once created. Cloning a layer is an atomic reference-count bump.
+Layers are immutable once created. Cloning a layer is an atomic reference-count bump. `written_at` is the transaction timestamp stamped at append time (and restored on replay) — the axis `AT … AS OF` filters on.
 
-`min_start` and `max_end` are skip-check bounds. A point query for timestamp `t` can skip an entire layer with two comparisons (`t < min_start || t >= max_end`) before touching the data.
-
-Within the slice, a binary search (`partition_point` on `tau.end <= t`) locates the candidate in O(log n).
+`min_start` and `max_end` are valid-axis skip-check bounds. A point query for timestamp `t` can skip an entire layer with two comparisons (`t < min_start || t >= max_end`) before touching the data. Within a single-axis slice a binary search locates the candidate in O(log n); multi-axis point lookup fast-skips on the valid axis then checks the remaining axes.
 
 ### Lenses
 
@@ -85,14 +81,14 @@ Cycle detection runs at `DERIVE` time by walking the dependency graph (`would_cy
 
 ### Backends
 
-**`InMemory`**: a `HashMap<name, Vec<Layer<V>>>` with no I/O. Used for tests and ephemeral workloads.
+**`InMemory`**: a `HashMap<name, Arc<[Layer<V>]>>` with no I/O. Reads snapshot the per-lens stack with a pointer bump; appends rebuild it copy-on-write (RCU). Used for tests and ephemeral workloads.
 
 **`Disk`**: one compressed binary file per database (`<name>.dat`):
 
 ```
 header
   magic   "TAUZ" (4 bytes)
-  version u8         # 1; the only supported version
+  version u8         # 2 (v1 files still readable; v2 adds a per-tau axis count)
   flags   u8         # bit 0 = encrypted body
   crc32   u32 LE     # over magic+version+flags
 body  zstd-compressed payload, AES-256-GCM-encrypted after compression when flagged
