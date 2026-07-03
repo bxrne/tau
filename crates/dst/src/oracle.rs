@@ -13,7 +13,9 @@ use libtau::{AggFunc, Value};
 
 pub type Ts = i64;
 
-/// Fixed "now" for DST — must stay in sync with [`libtau::wall_clock::set_fixed_now_secs`].
+/// Fixed "now" for DST — the default the oracle's virtual clock starts at;
+/// the simulation advances it in lock-step with the target kernel's
+/// [`libtau::Clock`].
 pub const DST_NOW_SECS: i64 = 1_700_000_000;
 
 /// Base transaction timestamp (ms) for the virtual write-clock: the value the
@@ -257,8 +259,7 @@ impl OracleDb {
 
     /// Append one N-D layer, stamped from the virtual clock like the engine.
     /// No compaction — the engine exempts multi-axis lenses.
-    fn append_nd(&mut self, name: &str, taus: &[(Vec<(Ts, Ts)>, Value)]) {
-        let written_at = libtau::wall_clock::now_ms();
+    fn append_nd(&mut self, name: &str, taus: &[(Vec<(Ts, Ts)>, Value)], written_at: i64) {
         if let Some(LensData::NdBase { arity, layers }) = self.lenses.get_mut(name) {
             let boxes: Vec<NdBox> = taus
                 .iter()
@@ -507,10 +508,10 @@ impl OracleDb {
         })
     }
 
-    fn append(&mut self, name: &str, taus: Vec<(Ts, Ts, Value)>) {
-        // Stamp the transaction time from the same virtual clock the engine
-        // reads when it builds the layer, so both models agree on `written_at`.
-        let written_at = libtau::wall_clock::now_ms();
+    fn append(&mut self, name: &str, taus: Vec<(Ts, Ts, Value)>, written_at: i64) {
+        // The transaction stamp comes from the oracle's virtual clock — the
+        // same value the simulation pins on the target kernel's clock, so
+        // both models agree on `written_at`.
         if let Some(LensData::Base { layers, .. }) = self.lenses.get_mut(name) {
             let valid: Vec<TauInterval> = taus
                 .into_iter()
@@ -533,7 +534,7 @@ impl OracleDb {
         }
     }
 
-    /// Per-generation sweep compaction mirroring `libtau::storage::layers`:
+    /// Per-generation sweep compaction mirroring `libtau::layers`:
     /// layers are compacted **within** each transaction-time generation (a
     /// contiguous run sharing `written_at`) newest-wins with adjacent same-value
     /// merging, but generations are never merged with one another — so distinct
@@ -661,11 +662,15 @@ pub struct Oracle {
     active: String,
     pending: Option<Vec<(String, PendingMutation)>>,
     compact_threshold: usize,
+    /// Virtual clock (ms): transaction stamps and TTL cutoffs.  Starts at
+    /// [`DST_TX_BASE_MS`]; the simulation advances it per op, mirroring the
+    /// target kernel's clock.
+    now_ms: Ts,
 }
 
 impl Oracle {
     pub fn new() -> Self {
-        Self::with_threshold(libtau::storage::COMPACT_THRESHOLD)
+        Self::with_threshold(libtau::COMPACT_THRESHOLD)
     }
 
     /// Match the SUT's compact threshold so boundary counts agree.
@@ -677,11 +682,17 @@ impl Oracle {
             active: "default".to_string(),
             pending: None,
             compact_threshold: threshold,
+            now_ms: DST_TX_BASE_MS,
         }
     }
 
-    fn now_secs() -> Ts {
-        libtau::wall_clock::now_secs()
+    /// Advance the oracle's virtual clock (mirrors the target kernel's).
+    pub fn set_now_ms(&mut self, ms: Ts) {
+        self.now_ms = ms;
+    }
+
+    fn now_secs(&self) -> Ts {
+        self.now_ms / 1000
     }
 
     fn db(&self) -> &OracleDb {
@@ -781,7 +792,8 @@ impl Oracle {
     fn apply_mutation_now(&mut self, mutation: PendingMutation) {
         match mutation {
             PendingMutation::Append { lens, taus } => {
-                self.db_mut().append(&lens, taus);
+                let now = self.now_ms;
+                self.db_mut().append(&lens, taus, now);
             }
             PendingMutation::CreateLens { name } => self.create_lens(&name),
             PendingMutation::DropLens { name } => self.drop_lens(&name),
@@ -793,7 +805,8 @@ impl Oracle {
                 self.db_mut().create_nd_lens(&name, arity);
             }
             PendingMutation::AppendNd { lens, taus } => {
-                self.db_mut().append_nd(&lens, &taus);
+                let now = self.now_ms;
+                self.db_mut().append_nd(&lens, &taus, now);
             }
         }
     }
@@ -807,7 +820,7 @@ impl Oracle {
     }
 
     pub fn at(&self, lens: &str, t: Ts) -> Option<Value> {
-        self.db().at(lens, t, Self::now_secs())
+        self.db().at(lens, t, self.now_secs())
     }
 
     pub fn at_as_of(&self, lens: &str, t: Ts, as_of: i64) -> Option<Value> {
@@ -829,11 +842,11 @@ impl Oracle {
     }
 
     pub fn range(&self, lens: &str, qs: Ts, qe: Ts) -> Vec<(Ts, Ts, Value)> {
-        self.db().range(lens, qs, qe, Self::now_secs())
+        self.db().range(lens, qs, qe, self.now_secs())
     }
 
     pub fn reduce(&self, lens: &str, qs: Ts, qe: Ts, func: AggFunc) -> Option<Value> {
-        self.db().reduce(lens, qs, qe, func, Self::now_secs())
+        self.db().reduce(lens, qs, qe, func, self.now_secs())
     }
 
     pub fn has_lens(&self, name: &str) -> bool {
@@ -1070,8 +1083,6 @@ mod tests {
 
     #[test]
     fn ttl_hides_old_entries() {
-        let _clock_guard = crate::sim::lock_clock();
-        libtau::wall_clock::set_fixed_now_secs(DST_NOW_SECS);
         let mut o = Oracle::new();
         o.create_lens("x");
         o.append("x", vec![(0, 100, Value::Int(99))]);

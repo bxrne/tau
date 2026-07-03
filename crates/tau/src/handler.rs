@@ -1,9 +1,9 @@
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::SocketAddr;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Instant;
 
-use libtau::{Executor, Metrics, Response, format_parse_error, needs_registry_lock, parse};
+use libtau::{Kernel, Metrics, Response, format_parse_error, parse};
 use tracing::{debug, info, trace, warn};
 
 // Parse an AUTH line, returning the username and password if successful.  The caller should enforce
@@ -21,20 +21,14 @@ fn parse_auth_line(line: &str) -> Option<(String, String)> {
 fn handle_auth_attempt<S: Read + Write>(
     reader: &mut BufReader<S>,
     peer: SocketAddr,
-    exec: &Arc<RwLock<Executor>>,
+    exec: &Arc<Kernel>,
     metrics: &Arc<Metrics>,
     trimmed: &str,
 ) -> io::Result<Option<String>> {
     match parse_auth_line(trimmed) {
         Some((u, p)) => {
             metrics.record_auth_attempt();
-            if exec
-                .read()
-                .expect("executor lock poisoned")
-                .users()
-                .verify(&u, &p)
-                .is_some()
-            {
+            if exec.auth().authenticate(&u, &p) == Some(true) {
                 reader.get_mut().write_all(b"OK\n")?;
                 reader.get_mut().flush()?;
                 info!(%peer, user = %u, "authenticated");
@@ -143,10 +137,10 @@ fn read_line_bounded<R: BufRead>(reader: &mut R, max_len: usize) -> io::Result<L
 pub fn run_query_loop<S: Read + Write>(
     reader: &mut BufReader<S>,
     peer: SocketAddr,
-    exec: &Arc<RwLock<Executor>>,
+    exec: &Arc<Kernel>,
     auth_enabled: bool,
 ) -> io::Result<()> {
-    let metrics = exec.read().expect("executor lock poisoned").metrics();
+    let metrics = exec.metrics();
     let mut authenticated_user: Option<String> = None;
 
     loop {
@@ -205,49 +199,19 @@ pub fn run_query_loop<S: Read + Write>(
 }
 
 /// Parse + dispatch one query line.  Returns the response line (without the
-/// trailing newline).  Lock-routing: read-only statements take the shared
-/// lock; everything else takes the exclusive lock.  When `caller` is `Some`,
-/// the statement is executed via `exec_as` so per-user CRUDA permissions are
-/// enforced.
-fn handle_query(query: &str, exec: &Arc<RwLock<Executor>>, caller: Option<&str>) -> Response {
+/// trailing newline).  The kernel routes the statement to the owning service
+/// (query for reads, db for mutations, auth for user management) and locks
+/// internally.  When `caller` is `Some`, the statement is executed via
+/// `exec_as` so per-user CRUDA permissions are enforced.
+fn handle_query(query: &str, exec: &Arc<Kernel>, caller: Option<&str>) -> Response {
     let stmt = match parse(query) {
         Ok((rest, s)) if rest.trim().is_empty() => s,
         Ok((rest, _)) => return Response::Err(format!("trailing input: {rest:?}")),
         Err(e) => return Response::Err(format_parse_error(query, e)),
     };
-    // Read-only: shared executor lock + per-DB read lock.
-    // Registry write (CREATE DATABASE etc.): exclusive executor lock.
-    // Data write (APPEND etc.): shared executor lock + per-DB write lock.
-    // When a transaction is active data writes still use exec.write() so they are buffered.
-    let needs_exclusive = !stmt.is_read_only()
-        && (needs_registry_lock(&stmt)
-            || exec
-                .read()
-                .expect("executor lock poisoned")
-                .is_in_transaction());
-
-    let result = match (stmt.is_read_only(), needs_exclusive, caller) {
-        (true, _, Some(u)) => exec
-            .read()
-            .expect("executor lock poisoned")
-            .exec_read_as(&stmt, u),
-        (true, _, None) => exec
-            .read()
-            .expect("executor lock poisoned")
-            .exec_read(&stmt),
-        (false, true, Some(u)) => exec
-            .write()
-            .expect("executor lock poisoned")
-            .exec_as(&stmt, u),
-        (false, true, None) => exec.write().expect("executor lock poisoned").exec(&stmt),
-        (false, false, Some(u)) => exec
-            .read()
-            .expect("executor lock poisoned")
-            .exec_db_write_as(&stmt, u),
-        (false, false, None) => exec
-            .read()
-            .expect("executor lock poisoned")
-            .exec_db_write(&stmt),
+    let result = match caller {
+        Some(u) => exec.exec_as(&stmt, u),
+        None => exec.exec(&stmt),
     };
     Response::from_result(&result)
 }
@@ -258,19 +222,30 @@ mod tests {
     use hegel::TestCase;
     use hegel::generators as gs;
     use hegel::generators::Generator;
-    use libtau::{ExecError, Perm, Stmt, User};
+    use libtau::services::auth::Perm;
+    use libtau::{ExecError, Stmt, User};
     use pretty_assertions::assert_eq;
     use std::collections::HashMap;
     use std::net::{TcpListener, TcpStream};
     use std::thread;
 
-    fn exec() -> Arc<RwLock<Executor>> {
-        Arc::new(RwLock::new(Executor::new()))
+    fn exec() -> Arc<Kernel> {
+        Arc::new(Kernel::new())
+    }
+
+    /// Install a user directly in the kernel's auth service.
+    fn add_user(e: &Arc<Kernel>, name: &str, pw: &str, grants: HashMap<String, Perm>) {
+        e.auth()
+            .users()
+            .lock()
+            .expect("user store lock poisoned")
+            .add(User::new(name, pw, grants))
+            .expect("add test user");
     }
 
     /// Run a query and render the response to its wire line, for assertions
     /// against the protocol's exact string output.
-    fn q(query: &str, e: &Arc<RwLock<Executor>>, caller: Option<&str>) -> String {
+    fn q(query: &str, e: &Arc<Kernel>, caller: Option<&str>) -> String {
         handle_query(query, e, caller).to_string()
     }
 
@@ -408,12 +383,8 @@ mod tests {
     #[test]
     fn exec_read_rejects_mutations() {
         let e = exec();
-        let guard = e.write().expect("test executor lock");
         let stmt = Stmt::CreateDatabase { name: "a".into() };
-        assert!(matches!(
-            guard.exec_read(&stmt),
-            Err(ExecError::InvalidExpr(_))
-        ));
+        assert!(matches!(e.exec_read(&stmt), Err(ExecError::InvalidExpr(_))));
     }
 
     #[hegel::test]
@@ -581,12 +552,9 @@ mod tests {
         let (client, server, peer) = connected_pair();
         let e = exec();
         {
-            let mut g = e.write().expect("test executor lock");
             let mut grants = HashMap::new();
             grants.insert("*".to_string(), Perm::ALL);
-            g.users_mut()
-                .add(User::new("admin", "pw", grants))
-                .expect("add test admin user");
+            add_user(&e, "admin", "pw", grants);
         }
         thread::spawn(move || {
             let mut reader = BufReader::new(server);
@@ -605,12 +573,9 @@ mod tests {
         let (mut client, server, peer) = connected_pair();
         let e = exec();
         {
-            let mut g = e.write().expect("test executor lock");
             let mut grants = HashMap::new();
             grants.insert("*".to_string(), Perm::ALL);
-            g.users_mut()
-                .add(User::new("admin", "pw", grants))
-                .expect("add test admin user");
+            add_user(&e, "admin", "pw", grants);
         }
         let handle = thread::spawn(move || {
             let mut reader = BufReader::new(server);
@@ -645,12 +610,9 @@ mod tests {
         let (mut client, server, peer) = connected_pair();
         let e = exec();
         {
-            let mut g = e.write().expect("test executor lock");
             let mut grants = HashMap::new();
             grants.insert("*".to_string(), Perm::ALL);
-            g.users_mut()
-                .add(User::new("admin", "pw", grants))
-                .expect("add test admin user");
+            add_user(&e, "admin", "pw", grants);
         }
         let handle = thread::spawn(move || {
             let mut reader = BufReader::new(server);
@@ -693,12 +655,9 @@ mod tests {
         let (mut client, server, peer) = connected_pair();
         let e = exec();
         {
-            let mut g = e.write().expect("test executor lock");
             let mut grants = HashMap::new();
             grants.insert("*".to_string(), Perm::ALL);
-            g.users_mut()
-                .add(User::new("admin", "pw", grants))
-                .expect("add test admin user");
+            add_user(&e, "admin", "pw", grants);
         }
         let handle = thread::spawn(move || {
             let mut reader = BufReader::new(server);
@@ -739,12 +698,9 @@ mod tests {
         let (mut client, server, peer) = connected_pair();
         let e = exec();
         {
-            let mut g = e.write().expect("test executor lock");
             let mut grants = HashMap::new();
             grants.insert("*".to_string(), Perm::ALL);
-            g.users_mut()
-                .add(User::new("admin", "pw", grants))
-                .expect("add test admin user");
+            add_user(&e, "admin", "pw", grants);
         }
         let handle = thread::spawn(move || {
             let mut reader = BufReader::new(server);
@@ -781,19 +737,13 @@ mod tests {
         let (mut client, server, peer) = connected_pair();
         let e = exec();
         {
-            let mut g = e.write().expect("test executor lock");
-
             let mut admin_grants = HashMap::new();
             admin_grants.insert("*".to_string(), Perm::ALL);
-            g.users_mut()
-                .add(User::new("admin", "adminpw", admin_grants))
-                .expect("add test admin user");
+            add_user(&e, "admin", "adminpw", admin_grants);
 
             let mut ro_grants = HashMap::new();
             ro_grants.insert("main".to_string(), Perm::R);
-            g.users_mut()
-                .add(User::new("reader", "readerpw", ro_grants))
-                .expect("add test read-only user");
+            add_user(&e, "reader", "readerpw", ro_grants);
         }
         {
             assert_eq!(

@@ -1,6 +1,6 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use libtau::storage::Codec;
+use libtau::Codec;
 
 // `Value::decode` (the VAL/RANGE wire segment decoder) must never panic.
 fuzz_target!(|data: &[u8]| {

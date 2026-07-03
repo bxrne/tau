@@ -1,136 +1,25 @@
 # Tau DB container stack
 
-Production Docker stack: Tau DB + Prometheus + Grafana.
+## What it is
 
-## Quick start
+The production Docker stack: Tau DB plus Prometheus and Grafana. The runtime base image is `scratch` — no shell, no curl — so health checking goes through the metrics endpoint (`up{job="tau"}` in Prometheus, or `GET /healthz` on the metrics port for Kubernetes/Nomad probes). Bundled Prometheus rules alert on server down, high error rate, auth brute-force, latency, memory, and connection rejections; the Grafana dashboard (`tau-db-prod` at `http://localhost:3000/d/tau-db-prod`) has Overview, Throughput, Latency, Security, and Resources rows.
+
+## How it works
+
+All server settings live in `tau-config.toml`, mounted as `/data/tau-config.toml` — bind, WAL, auth, metrics port, connection limits. Only secrets and infrastructure overrides belong in `.env` (copied from `.env.example`): `TAU_ENCRYPTION_KEY` (64 hex chars, enables AES-256-GCM at rest — files written with it cannot be read without it), `GRAFANA_PASSWORD`, and `TAU_IMAGE_TAG` (pin to a release for reproducibility; compose uses `ghcr.io/bxrne/tau:${TAU_IMAGE_TAG:-latest}`).
+
+Host ports: 7070 (TauQL, optionally TLS), 9100 (Prometheus metrics + `/healthz`), 9090 (Prometheus UI), 3000 (Grafana). All default to `127.0.0.1`; override the `*_BIND_ADDR` variables in `.env` to expose externally. For TLS, enable `[tls]` in `tau-config.toml` with cert/key paths, uncomment the TLS volume mounts in `docker-compose.yml`, and connect with `connect prod 127.0.0.1:7070 tls`; with no cert/key set the server generates an ephemeral self-signed cert for development.
+
+## Using it
 
 ```sh
 cd container
-
-# Copy config templates and fill in secrets/settings
-cp .env.example .env
-# Edit tau-config.toml: set [auth] username/password and other settings
-$EDITOR tau-config.toml
-
-# Start the stack
+cp .env.example .env          # fill in secrets
+$EDITOR tau-config.toml       # set [auth] username/password
 docker compose up -d
 
-# Connect via tauctl
-tauctl
-# τ connect prod 127.0.0.1:7070
-# τ AUTH admin <your password from tau-config.toml>
-
-# Open Grafana
-open http://localhost:3000   # login: GRAFANA_USER / GRAFANA_PASSWORD from .env
+tauctl                        # τ connect prod 127.0.0.1:7070 → AUTH admin <password>
+open http://localhost:3000    # Grafana (GRAFANA_USER / GRAFANA_PASSWORD)
 ```
 
-## Configuration
-
-All server settings live in **`tau-config.toml`** (mounted as `/data/tau-config.toml`
-inside the container). Edit it before starting the stack:
-
-```toml
-bind = "0.0.0.0:7070"
-log_level = "info"
-compact_threshold = 8
-
-[wal]
-enabled = true
-path = "/data/tau.wal"
-
-[auth]
-enabled = true
-username = "admin"
-password = "changeme_use_a_strong_password"
-users_file = "/data/users.db"
-
-[metrics]
-port = 9100
-
-[limits]
-max_connections = 1024
-idle_timeout_secs = 300
-```
-
-Only secrets and infrastructure overrides (bind interfaces, resource limits,
-encryption key) belong in `.env`. Copy `.env.example` to `.env` and fill in:
-
-| variable | purpose |
-|----------|---------|
-| `TAU_ENCRYPTION_KEY` | 64 hex chars; enables AES-256-GCM at-rest encryption |
-| `GRAFANA_PASSWORD` | Grafana admin password (required) |
-| `TAU_IMAGE_TAG` | Pin to a release tag, e.g. `v0.1.3` |
-
-## Pulling the image from GHCR
-
-```sh
-docker pull ghcr.io/bxrne/tau:latest
-# Pin to a release tag for reproducibility
-docker pull ghcr.io/bxrne/tau:v0.1.0
-```
-
-`docker-compose.yml` uses `ghcr.io/bxrne/tau:${TAU_IMAGE_TAG:-latest}` by default.
-
-## Ports (host-visible)
-
-| Port  | Service    | Purpose                                            |
-|-------|------------|----------------------------------------------------|
-| 7070  | tau        | TauQL query port (TCP, optionally TLS)             |
-| 9100  | tau        | Prometheus `/metrics` and `/healthz` HTTP endpoint |
-| 9090  | prometheus | Prometheus web UI                                  |
-| 3000  | grafana    | Grafana dashboards                                 |
-
-All ports default to `127.0.0.1`. Override `TAU_BIND_ADDR`, `TAU_METRICS_BIND_ADDR`,
-`PROM_BIND_ADDR`, `GRAFANA_BIND_ADDR` in `.env` to expose externally.
-
-## TLS
-
-1. Edit `tau-config.toml`:
-   ```toml
-   [tls]
-   enabled = true
-   cert = "/data/tls/server.crt"
-   key  = "/data/tls/server.key"
-   ```
-2. Uncomment the TLS volume mounts in `docker-compose.yml`.
-3. Connect with tauctl: `connect prod 127.0.0.1:7070 tls`.
-
-For development, set `enabled = true` with no `cert`/`key` — the server
-generates an ephemeral self-signed cert at startup.
-
-## Encryption at rest
-
-```sh
-openssl rand -hex 32   # generate key
-```
-
-Set `TAU_ENCRYPTION_KEY` in `.env`. WAL/Disk files written with this key are
-AES-256-GCM encrypted and cannot be read without it.
-
-## Prometheus alerts
-
-`prometheus/alerts.yml` includes rules for: server down, high error rate,
-auth brute-force, high append/read latency, high memory, connection rejections.
-
-## Grafana dashboard
-
-UID `tau-db-prod` at `http://localhost:3000/d/tau-db-prod`.
-
-Rows: Overview · Throughput · Latency · Security · Resources.
-
-## Healthcheck
-
-The runtime base image is `scratch` — no shell, no `curl`. Use Prometheus:
-
-- `up{job="tau"}` = 1 means the server is reachable.
-- `GET /healthz` on the metrics port for Kubernetes/Nomad liveness probes.
-
-## Production hardening checklist
-
-- [ ] Set strong `[auth] password` in `tau-config.toml` and `GRAFANA_PASSWORD` in `.env`
-- [ ] Set `TAU_ENCRYPTION_KEY` for encryption at rest
-- [ ] Enable TLS with real certificates
-- [ ] Put a reverse proxy in front of Grafana with HTTPS
-- [ ] Configure Alertmanager and on-call routing
-- [ ] Back up the `tau_data` volume on schedule
-- [ ] Pin `TAU_IMAGE_TAG` to a release tag
+Production hardening: strong `[auth]` and Grafana passwords, `TAU_ENCRYPTION_KEY` set, real TLS certificates, a reverse proxy with HTTPS in front of Grafana, Alertmanager routing, scheduled backups of the `tau_data` volume, and a pinned `TAU_IMAGE_TAG`.

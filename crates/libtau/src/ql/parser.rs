@@ -24,7 +24,7 @@ use nom::{
 };
 
 use super::ast::{AggFunc, BinOp, Expr, Literal, Stmt, Type, UnOp};
-use crate::users::Perm;
+use crate::services::auth::Perm;
 
 /// Turn a `nom` parse failure into a human-readable, single-line message that
 /// points at the column where parsing stalled.  `nom`'s own `Display`/`Debug`
@@ -727,14 +727,13 @@ fn ident(i: &str) -> IResult<&str, String> {
     Ok((i, s.to_string()))
 }
 
-/// A type name: `int`, `float`, `str`, `bool`, or `bytes`.
+/// A type name: `int`, `float`, `str`, or `bool`.
 fn type_name(i: &str) -> IResult<&str, Type> {
     alt((
         value(Type::Int, tag("int")),
         value(Type::Float, tag("float")),
         value(Type::Str, tag("str")),
         value(Type::Bool, tag("bool")),
-        value(Type::Bytes, tag("bytes")),
     ))
     .parse(i)
 }
@@ -887,7 +886,6 @@ mod tests {
             ("float", Type::Float),
             ("str", Type::Str),
             ("bool", Type::Bool),
-            ("bytes", Type::Bytes),
         ])
     }
 

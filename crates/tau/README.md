@@ -1,122 +1,29 @@
 # tau server
 
-The TCP server binary. Exposes a `libtau` executor over a line-oriented TCP protocol.
+## What it is
 
-## Install
+The TCP server binary. It exposes a `libtau` kernel over a line-oriented protocol — one TauQL statement per line in, one response line out — with optional TLS, authentication, and durable storage. All engine logic lives in `libtau`; this crate is transport, configuration, and metrics.
+
+## How it works
+
+The wire codec is `libtau::wire::Response`, shared by the server encoder and client decoder. Responses are `OK`, `OK BYE` (after `QUIT`/`EXIT`), `VAL <codec>` / `VAL NIL`, `RANGE <n>; <s>:<e>:<v>; …`, `NAMES …`, `GRANTS …`, `LAYERS …` (from `HISTORY`), or `ERR <message>`. Values carry a one-character type tag: `i<int>`, `f<float>`, `s<percent-escaped>`, `b<0|1>`, `n` (null).
+
+When `[auth] enabled = true`, the first client message must be `AUTH <username> <password>`; the session is then bound to that user and every statement dispatches through `exec_as` for CRUDA grant enforcement.
+
+Each connection runs on its own OS thread; all threads share one plain `Arc<Kernel>` — the server has no lock router. The kernel routes each statement to the owning service and locks internally: readers never block each other, a data write locks only its database, and database DDL takes the registry write lock briefly. `tau::harness::EphemeralServer` spawns this server on `127.0.0.1:0` with an in-memory or supplied `Kernel` for the DST wire profiles, so the accept loop and auth handshake are exercised by simulation testing.
+
+## Using it
 
 ```bash
 # Release binary (Linux x86_64)
 curl -fsSL https://github.com/bxrne/tau/releases/latest/download/tau-x86_64-linux -o tau
 chmod +x tau && sudo mv tau /usr/local/bin/
 
-# Via cargo install (builds from source)
-cargo install --git https://github.com/bxrne/tau tau
+cargo install --git https://github.com/bxrne/tau tau          # from source
+docker run -p 7070:7070 ghcr.io/bxrne/tau:latest              # Docker
 
-# Docker
-docker pull ghcr.io/bxrne/tau:latest
-docker run -p 7070:7070 ghcr.io/bxrne/tau:latest
+tau                              # in-memory, ./config.toml if present
+tau --config /etc/tau/cfg.toml   # explicit config
 ```
 
-## Configuration
-
-The server reads `config.toml` in the current working directory, or a path supplied with `--config`:
-
-```bash
-tau                          # uses ./config.toml if present, otherwise defaults
-tau --config /etc/tau/cfg.toml
-```
-
-A sample config lives at the repo root. Key sections:
-
-```toml
-bind = "127.0.0.1:7070"
-log_level = "info"
-compact_threshold = 8
-
-[disk]
-backend = "memory"          # "memory" (default) or "disk"
-# path = "/var/lib/tau/data"  # required for backend = "disk"; one <db>.manifest + <db>.run.<id> set per database
-compression_level = 3       # zstd level 1–22 (disk backend)
-
-[wal]
-enabled = true
-path = "/var/lib/tau/tau.wal"
-max_size_mb = 512           # rotate WAL when it reaches 512 MiB
-
-[tls]
-enabled = true
-cert = "/etc/tau/cert.pem"
-key  = "/etc/tau/key.pem"
-
-[auth]
-enabled = true
-username = "admin"
-password = "changeme"
-users_file = "/var/lib/tau/users.db"
-
-[metrics]
-port = 9100
-
-[limits]
-max_connections = 1024
-idle_timeout_secs = 300
-```
-
-**WAL encryption:** Set `TAU_ENCRYPTION_KEY` (64 hex chars = 32 bytes) to enable per-entry
-AES-256-GCM encryption. Generate a key with `openssl rand -hex 32`. The key is never stored
-on disk; without it an encrypted WAL cannot be replayed.
-
-```bash
-export TAU_ENCRYPTION_KEY=$(openssl rand -hex 32)
-tau --config /etc/tau/config.toml
-```
-
-See [docs/configuration](https://tau.bxrne.com/docs/configuration/) for the full reference.
-
-## Wire protocol
-
-One statement per line in, one response line out. The wire codec lives in `libtau::wire::Response` — both the server encoder and the client decoder use the same type.
-
-| Response | Meaning |
-|----------|---------|
-| `OK` | DDL or write succeeded |
-| `OK BYE` | Server acknowledged `QUIT` / `EXIT` |
-| `VAL <codec>` | Point lookup returned a value |
-| `VAL NIL` | Point lookup: no tau covers that timestamp |
-| `RANGE <n>; <s>:<e>:<v>; ...` | Range scan returned `n` segments |
-| `NAMES <n>; name; ...` | Name list from `SHOW DATABASES` / `SHOW LENSES` / `SHOW USERS` |
-| `GRANTS <n>; <user> <db>:<perms>; ...` | Output of `SHOW GRANTS` |
-| `LAYERS <n>; <id>:<written_at>:<min>:<max>; ...` | Output of `HISTORY LENS` |
-| `ERR <message>` | Parse failure, executor error, or permission denial |
-
-Values are encoded with a one-character type tag: `i<int>`, `f<float>`, `s<percent-escaped>`, `b<0|1>`, `n` (null).
-
-## Authentication
-
-When `[auth] enabled = true`, the first message from every client must be `AUTH <username> <password>`. After a successful `AUTH`, the session is bound to that user and every subsequent statement dispatches through `exec_as` for CRUDA grant enforcement.
-
-## Concurrency model
-
-Per-connection OS threads, one `Arc<RwLock<Executor>>` wrapping a `FxHashMap<String, Arc<RwLock<DbState>>>`.
-
-Lock routing in `handle_query`:
-- Read-only statements: shared executor lock + per-DB read lock inside `exec_read`.
-- Registry writes (`CREATE DATABASE`, user management, transactions): exclusive executor lock.
-- Data writes (`APPEND`, `CREATE LENS`, etc.): shared executor lock + per-DB write lock inside `exec_db_write`.
-
-## Running
-
-```bash
-tau                          # in-memory, defaults
-tau --config cfg.toml        # with config file
-
-# From source (developer workflow)
-cargo run --release --bin tau                       # in-memory, defaults
-cargo run --release --bin tau -- --config cfg.toml  # with config file
-```
-
-## Test harness
-
-`tau::harness::EphemeralServer` and `HarnessOpts` spawn this server on `127.0.0.1:0` with an
-in-memory or supplied `Executor`, with optional TLS and auth. They back the DST wire profiles,
-so any change to the accept loop or auth handshake here is exercised by simulation testing.
+Configuration is TOML: `bind`, `log_level`, `compact_threshold`, and the `[disk]` (memory or SSTable backend + zstd level), `[wal]` (path, `max_size_mb`, fsync mode), `[tls]`, `[auth]` (bootstrap user + `users_file`), `[metrics]` (Prometheus port), and `[limits]` (`max_connections`, `idle_timeout_secs`) sections — full reference at [docs/configuration](https://tau.bxrne.com/docs/configuration/). Setting `TAU_ENCRYPTION_KEY` (64 hex chars, e.g. `openssl rand -hex 32`) enables AES-256-GCM encryption of WAL and disk files; the key is never stored on disk.

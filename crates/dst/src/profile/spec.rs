@@ -1,6 +1,6 @@
 //! Cartesian **profile matrix** for libtau — add dimensions here instead of new enum variants.
 
-use libtau::storage::COMPACT_THRESHOLD;
+use libtau::COMPACT_THRESHOLD;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SuiteTier {
@@ -14,7 +14,7 @@ pub enum Storage {
     Memory,
     Wal,
     /// On-disk `Sstable` backend (immutable runs + manifest, read-time MVCC).
-    /// See `libtau::storage::Sstable`.
+    /// See `libtau::Sstable`.
     Disk,
 }
 

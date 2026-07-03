@@ -34,6 +34,9 @@ rcgen = "0.13"
 ratatui = "0.29"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+async-trait = "0.1"
+postcard = { version = "1", features = ["use-std"] }
 toml = "0.8"
 crossterm = "0.28"
 tui-textarea = { version = "0.7", features = ["crossterm"] }

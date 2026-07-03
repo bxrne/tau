@@ -25,6 +25,10 @@ sysinfo.workspace = true
 hex.workspace = true
 itoa.workspace = true
 zstd = "0.13.3"
+tokio.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+postcard.workspace = true
 
 [dev-dependencies]
 hegeltest.workspace = true

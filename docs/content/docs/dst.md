@@ -69,7 +69,9 @@ A static `LazyLock<Tree<SimCtx, Op>>` of 34 closure-based leaves, including `AT 
 
 Profiles are a Cartesian product in [`profile/spec.rs`](https://github.com/bxrne/tau/tree/master/crates/dst/src/profile/spec.rs): **storage** × **compaction** × **encryption** × **transport** × **auth**. Names look like `wal_stress_enc_single_direct_noauth`.
 
-Every sequential run uses a **fresh isolated oracle** (never seeded from the executor). The **target** is either a direct [`Executor`](https://github.com/bxrne/tau/tree/master/crates/libtau/src/executor.rs) or a TCP/TLS [`WireClient`](https://github.com/bxrne/tau/tree/master/crates/dst/src/target/wire.rs) talking to an ephemeral [`tau` harness](https://github.com/bxrne/tau/tree/master/crates/tau/src/harness.rs).
+Every sequential run uses a **fresh isolated oracle** (never seeded from the target). The **target** is either a direct [`Kernel`](https://github.com/bxrne/tau/tree/master/crates/libtau/src/kernel/engine.rs) or a TCP/TLS [`WireClient`](https://github.com/bxrne/tau/tree/master/crates/dst/src/target/wire.rs) talking to an ephemeral [`tau` harness](https://github.com/bxrne/tau/tree/master/crates/tau/src/harness.rs).
+
+The microkernel makes each simulation self-contained: a run pins **its own kernel's** virtual clock and arms **its own kernel's** fault injector — no process-global state, so simulations can run in parallel. Divergences name the kernel service that owned the op (`[query]` / `[db]`).
 
 | Tier | When | Cells |
 |------|------|-------|
@@ -91,19 +93,19 @@ Damage kinds — a short write (truncate) vs a length-preserving bit-flip run (c
 |---------|---------------------|
 | Memory | Rebuild target + oracle, dual-replay op log |
 | WAL (odd) | Delete WAL + oracle replay; dual-replay op log |
-| WAL (even) | Truncate **or corrupt** the WAL; reopen-probe; fresh target; reset op log |
+| WAL (even) | Arm the kernel's `FaultInjector` to fail the next WAL write **in flight** (clean `Io` error, store untouched — the WAL-first invariant); then truncate **or corrupt** the WAL file; reopen-probe; fresh target; reset op log |
 | Disk (odd) | Wipe target `.manifest`/`.run.*`/`.wal` files, dual-replay op log (replay equivalence). A separate `pbt_disk_persists_*_across_reopen` test exercises faithful restart over the real persisted files (no wipe). |
 | Disk (even) | Truncate **or corrupt** a random manifest/run file, reopen-probe, then wipe + dual-replay |
-| Wire (odd) | Server crash: rebuild the whole wire stack (new server, fresh executor) + dual-replay |
+| Wire (odd) | Server crash: rebuild the whole wire stack (new server, fresh kernel) + dual-replay |
 | Wire (even) | Network drop: sever the TCP connection and reconnect to the same live server; state survives, op log untouched |
 
 The disk corruption probe caught a real bug: a corrupted on-disk file could decode an inverted `[start, end)` interval and panic in `Tau::new`. The loader now validates intervals and bounds untrusted length prefixes, returning `InvalidData` instead.
 
 **Transactions** are enabled for memory/disk/wire profiles. WAL profiles use `WAL_EXCLUDED` tags in the behavior tree to skip transaction and multi-DB ops until single-DB WAL replay semantics are fully validated.
 
-For TTL, DST pins the wall clock via [`wall_clock::set_fixed_now_secs`](https://github.com/bxrne/tau/tree/master/crates/libtau/src/wall_clock.rs) (`1_700_000_000`).
+For TTL and transaction stamps, DST pins each target kernel's own virtual [`Clock`](https://github.com/bxrne/tau/tree/master/crates/libtau/src/clock.rs) (base `1_700_000_000` s) and advances it per op in lock-step with the oracle's — there is no process-global clock.
 
-The `disk` backend (when selected) is an [`Sstable`](https://github.com/bxrne/tau/tree/master/crates/libtau/src/storage/sstable.rs) store paired with a `<db>.wal`: appends and schema DDL (`CREATE`/`DERIVE`/`SET TTL`/`DROP`) go to the WAL first (fsynced by default), and the memtable is flushed into a new immutable run only on checkpoint (compaction or `[wal].max_size_mb`) — never a whole-database rewrite. This makes acknowledged DML and lens definitions durable across clean restarts; `CREATE DATABASE <name>` on a disk executor re-opens the existing manifest, replays `<db>.wal` on top, and replays the schema section to restore base/derived lenses and TTL policies. The `pbt_disk_persists_data_and_schema_across_reopen` test in `sim.rs` covers this path under the DST harness.
+The `disk` backend (when selected) is an [`Sstable`](https://github.com/bxrne/tau/tree/master/crates/libtau/src/services/store/sstable.rs) store paired with a `<db>.wal`: appends and schema DDL (`CREATE`/`DERIVE`/`SET TTL`/`DROP`) go to the WAL first (fsynced by default), and the memtable is flushed into a new immutable run only on checkpoint (compaction or `[wal].max_size_mb`) — never a whole-database rewrite. This makes acknowledged DML and lens definitions durable across clean restarts; `CREATE DATABASE <name>` on a disk executor re-opens the existing manifest, replays `<db>.wal` on top, and replays the schema section to restore base/derived lenses and TTL policies. The `pbt_disk_persists_data_and_schema_across_reopen` test in `sim.rs` covers this path under the DST harness.
 
 ## Concurrent phase
 

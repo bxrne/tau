@@ -1,12 +1,27 @@
 //! Lock-step apply to target (SUT) and isolated oracle (model).
 
 use libdst::Divergence;
-use libtau::{Executor, Output, Value};
+use libtau::{Kernel, Output, Value};
 use tracing::{debug, warn};
 
 use crate::op::Op;
 use crate::oracle::{Oracle, Ts};
-use crate::target::{DirectExecutor, Target};
+use crate::target::{DirectKernel, Target};
+
+/// The kernel service that owns an op, for divergence attribution: reads are
+/// evaluated by the query service, everything else by the db service.
+fn service_of(op: &Op) -> &'static str {
+    match op {
+        Op::At { .. }
+        | Op::AtAsOf { .. }
+        | Op::AtNd { .. }
+        | Op::Range { .. }
+        | Op::RangeNd { .. }
+        | Op::Reduce { .. }
+        | Op::History { .. } => "query",
+        _ => "db",
+    }
+}
 
 #[cfg(test)]
 pub fn apply_oracle_only(op: &Op, model: &mut Oracle) {
@@ -51,40 +66,56 @@ pub fn apply_dual(
 
     match op {
         Op::At { lens, t } => {
-            let Some(got) = exec_output(target, &op.to_sql(), step, &mut divs) else {
+            let Some(got) = exec_output(target, &op.to_sql(), service_of(op), step, &mut divs)
+            else {
                 return divs;
             };
             let expected = model.at(lens, *t);
-            check_at(step, &format!("AT {lens} {t}"), &got, expected, &mut divs);
+            check_at(
+                step,
+                &format!("[query] AT {lens} {t}"),
+                &got,
+                expected,
+                &mut divs,
+            );
         }
         Op::AtAsOf { lens, t, as_of } => {
-            let Some(got) = exec_output(target, &op.to_sql(), step, &mut divs) else {
+            let Some(got) = exec_output(target, &op.to_sql(), service_of(op), step, &mut divs)
+            else {
                 return divs;
             };
             let expected = model.at_as_of(lens, *t, *as_of);
             check_at(
                 step,
-                &format!("AT {lens} {t} AS OF {as_of}"),
+                &format!("[query] AT {lens} {t} AS OF {as_of}"),
                 &got,
                 expected,
                 &mut divs,
             );
         }
         Op::History { lens } => {
-            let Some(got) = exec_output(target, &op.to_sql(), step, &mut divs) else {
+            let Some(got) = exec_output(target, &op.to_sql(), service_of(op), step, &mut divs)
+            else {
                 return divs;
             };
             let expected = model.history_generations(lens);
-            check_history(step, &format!("HISTORY {lens}"), &got, expected, &mut divs);
+            check_history(
+                step,
+                &format!("[query] HISTORY {lens}"),
+                &got,
+                expected,
+                &mut divs,
+            );
         }
         Op::AtNd { lens, ts, as_of } => {
-            let Some(got) = exec_output(target, &op.to_sql(), step, &mut divs) else {
+            let Some(got) = exec_output(target, &op.to_sql(), service_of(op), step, &mut divs)
+            else {
                 return divs;
             };
             let expected = model.at_nd(lens, ts, *as_of);
             check_at(
                 step,
-                &format!("AT ND {lens} {ts:?} as_of={as_of:?}"),
+                &format!("[query] AT ND {lens} {ts:?} as_of={as_of:?}"),
                 &got,
                 expected,
                 &mut divs,
@@ -99,13 +130,14 @@ pub fn apply_dual(
             if start >= end {
                 return divs;
             }
-            let Some(got) = exec_output(target, &op.to_sql(), step, &mut divs) else {
+            let Some(got) = exec_output(target, &op.to_sql(), service_of(op), step, &mut divs)
+            else {
                 return divs;
             };
             let expected = model.range_nd(lens, *start, *end, fixed);
             check_range(
                 step,
-                &format!("RANGE ND {lens} {start} {end} at {fixed:?}"),
+                &format!("[query] RANGE ND {lens} {start} {end} at {fixed:?}"),
                 &got,
                 expected,
                 &mut divs,
@@ -115,13 +147,14 @@ pub fn apply_dual(
             if start >= end {
                 return divs;
             }
-            let Some(got) = exec_output(target, &op.to_sql(), step, &mut divs) else {
+            let Some(got) = exec_output(target, &op.to_sql(), service_of(op), step, &mut divs)
+            else {
                 return divs;
             };
             let expected = model.range(lens, *start, *end);
             check_range(
                 step,
-                &format!("RANGE {lens} {start} {end}"),
+                &format!("[query] RANGE {lens} {start} {end}"),
                 &got,
                 expected,
                 &mut divs,
@@ -133,13 +166,14 @@ pub fn apply_dual(
             end,
             func,
         } => {
-            let Some(got) = exec_output(target, &op.to_sql(), step, &mut divs) else {
+            let Some(got) = exec_output(target, &op.to_sql(), service_of(op), step, &mut divs)
+            else {
                 return divs;
             };
             let expected = model.reduce(lens, *start, *end, *func);
             check_reduce(
                 step,
-                &format!("REDUCE {lens} {start} {end} {func}"),
+                &format!("[query] REDUCE {lens} {start} {end} {func}"),
                 &got,
                 expected,
                 &mut divs,
@@ -152,7 +186,7 @@ pub fn apply_dual(
                 target.rollback_open_transaction();
             }
             let sql = op.to_sql();
-            if exec_ok(target, &sql, step, &mut divs) {
+            if exec_ok(target, &sql, service_of(op), step, &mut divs) {
                 apply_model_after_target(op, model);
                 debug!(step, sql, "OP");
             }
@@ -161,32 +195,39 @@ pub fn apply_dual(
     divs
 }
 
-pub fn apply_dual_executor(
+pub fn apply_dual_kernel(
     step: usize,
     op: &Op,
-    target: &mut Executor,
+    target: &mut Kernel,
     model: &mut Oracle,
 ) -> Vec<Divergence> {
-    apply_dual(step, op, &mut DirectExecutor(target), model)
+    apply_dual(step, op, &mut DirectKernel(target), model)
 }
 
-fn exec_ok(target: &mut impl Target, q: &str, step: usize, divs: &mut Vec<Divergence>) -> bool {
-    exec_output(target, q, step, divs).is_some()
+fn exec_ok(
+    target: &mut impl Target,
+    q: &str,
+    service: &str,
+    step: usize,
+    divs: &mut Vec<Divergence>,
+) -> bool {
+    exec_output(target, q, service, step, divs).is_some()
 }
 
 fn exec_output(
     target: &mut impl Target,
     q: &str,
+    service: &str,
     step: usize,
     divs: &mut Vec<Divergence>,
 ) -> Option<Output> {
     match target.exec(q) {
         Ok(out) => Some(out),
         Err(e) => {
-            warn!(?e, q, "exec error");
+            warn!(?e, q, service, "exec error");
             divs.push(Divergence::new(
                 step,
-                format!("exec error: {q}"),
+                format!("[{service}] exec error: {q}"),
                 "Ok",
                 format!("{e:?}"),
             ));
@@ -337,19 +378,17 @@ mod tests {
     }
 
     #[test]
-    fn ttl_at_matches_oracle_with_fixed_wall_clock() {
-        let _clock_guard = crate::sim::lock_clock();
-        libtau::wall_clock::set_fixed_now_secs(crate::oracle::DST_NOW_SECS);
+    fn ttl_at_matches_oracle_with_fixed_clock() {
         let paths = crate::profile::ProfileWorkspace::new(MEMORY_MULTI).paths;
-        let mut target = MEMORY_MULTI.bootstrap_executor(&paths);
+        let mut target = MEMORY_MULTI.bootstrap_kernel(&paths);
         let mut model = MEMORY_MULTI.bootstrap_oracle(&paths);
         let append = Op::Append {
             lens: "a".into(),
             data: crate::op::Payload::Int(vec![(0, 100, 42)]),
         };
-        let divs = apply_dual_executor(0, &append, &mut target, &mut model);
+        let divs = apply_dual_kernel(0, &append, &mut target, &mut model);
         assert!(divs.is_empty(), "unexpected divergences: {divs:?}");
-        let divs = apply_dual_executor(
+        let divs = apply_dual_kernel(
             1,
             &Op::Ttl {
                 lens: "a".into(),
@@ -372,7 +411,7 @@ mod tests {
     #[hegel::test]
     fn pbt_append_at_matches_oracle(tc: TestCase) {
         let paths = crate::profile::ProfileWorkspace::new(MEMORY_MULTI).paths;
-        let mut target = MEMORY_MULTI.bootstrap_executor(&paths);
+        let mut target = MEMORY_MULTI.bootstrap_kernel(&paths);
         let mut model = MEMORY_MULTI.bootstrap_oracle(&paths);
         let n = tc.draw(gs::integers::<usize>().min_value(1).max_value(8));
         let taus = crate::op::gen_int_taus(
@@ -384,7 +423,7 @@ mod tests {
             lens: lens.clone(),
             data: crate::op::Payload::Int(taus),
         };
-        let divs = apply_dual_executor(0, &op, &mut target, &mut model);
+        let divs = apply_dual_kernel(0, &op, &mut target, &mut model);
         assert!(divs.is_empty(), "{divs:?}");
         let t = tc.draw(gs::integers::<i64>().min_value(0).max_value(3000));
         let got = crate::harness::exec(&mut target, &format!("AT LENS {lens} {t}"));

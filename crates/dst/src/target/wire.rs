@@ -134,7 +134,7 @@ impl WireClient {
     }
 
     /// Carry the logical transaction state onto a freshly reconnected client.
-    /// tau buffers transactions in the shared executor (not per-connection), so
+    /// tau buffers transactions in the shared kernel (not per-connection), so
     /// after a connection drop the server's open transaction survives; the new
     /// client must inherit that flag to stay in step with the server and oracle.
     pub fn set_in_transaction(&mut self, in_transaction: bool) {

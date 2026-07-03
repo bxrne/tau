@@ -1,42 +1,66 @@
 use super::*;
+use crate::ql::ast::Type;
 use crate::ql::parse;
+use crate::services::auth::{Perm, User};
+use crate::services::db::{ExecError, Output};
+use crate::value::Value;
 use hegel::TestCase;
 use hegel::generators as gs;
 use pretty_assertions::assert_eq;
 use std::collections::HashMap as StdHashMap;
 
+/// Install a user directly in the kernel's auth service.
+fn add_user(k: &Kernel, u: User) {
+    k.auth()
+        .users()
+        .lock()
+        .expect("user store lock poisoned")
+        .add(u)
+        .expect("add user");
+}
+
+/// Snapshot one user out of the auth service.
+fn user(k: &Kernel, name: &str) -> Option<User> {
+    k.auth()
+        .users()
+        .lock()
+        .expect("user store lock poisoned")
+        .get(name)
+        .cloned()
+}
+
 /// Parse + run.  Panics on parse failure; returns `Result` on exec.
-fn run(exec: &mut Executor, q: &str) -> Result<Output, ExecError> {
+fn run(exec: &mut Kernel, q: &str) -> Result<Output, ExecError> {
     let (rest, stmt) = parse(q).expect("parse failed");
     assert!(rest.is_empty(), "unconsumed: {rest:?}");
     exec.exec(&stmt)
 }
 
-fn setup() -> Executor {
-    let mut e = Executor::new();
+fn setup() -> Kernel {
+    let mut e = Kernel::new();
     run(&mut e, "CREATE DATABASE main").unwrap();
     e
 }
 
 #[test]
 fn create_database_sets_active_on_first_create() {
-    let mut e = Executor::new();
+    let mut e = Kernel::new();
     assert_eq!(e.active(), None);
     run(&mut e, "CREATE DATABASE a").unwrap();
-    assert_eq!(e.active(), Some("a"));
+    assert_eq!(e.active().as_deref(), Some("a"));
 }
 
 #[test]
 fn second_create_does_not_change_active() {
-    let mut e = Executor::new();
+    let mut e = Kernel::new();
     run(&mut e, "CREATE DATABASE a").unwrap();
     run(&mut e, "CREATE DATABASE b").unwrap();
-    assert_eq!(e.active(), Some("a"));
+    assert_eq!(e.active().as_deref(), Some("a"));
 }
 
 #[test]
 fn create_duplicate_database_errors() {
-    let mut e = Executor::new();
+    let mut e = Kernel::new();
     run(&mut e, "CREATE DATABASE a").unwrap();
     assert_eq!(
         run(&mut e, "CREATE DATABASE a"),
@@ -46,7 +70,7 @@ fn create_duplicate_database_errors() {
 
 #[test]
 fn use_unknown_database_errors() {
-    let mut e = Executor::new();
+    let mut e = Kernel::new();
     assert_eq!(
         run(&mut e, "USE DATABASE ghost"),
         Err(ExecError::UnknownDatabase("ghost".into()))
@@ -55,11 +79,11 @@ fn use_unknown_database_errors() {
 
 #[test]
 fn use_switches_active() {
-    let mut e = Executor::new();
+    let mut e = Kernel::new();
     run(&mut e, "CREATE DATABASE a").unwrap();
     run(&mut e, "CREATE DATABASE b").unwrap();
     run(&mut e, "USE DATABASE b").unwrap();
-    assert_eq!(e.active(), Some("b"));
+    assert_eq!(e.active().as_deref(), Some("b"));
 }
 
 #[test]
@@ -75,7 +99,7 @@ fn drop_active_database_clears_active() {
 
 #[test]
 fn drop_unknown_database_errors() {
-    let mut e = Executor::new();
+    let mut e = Kernel::new();
     assert_eq!(
         run(&mut e, "DROP DATABASE ghost"),
         Err(ExecError::UnknownDatabase("ghost".into()))
@@ -84,7 +108,7 @@ fn drop_unknown_database_errors() {
 
 #[test]
 fn create_lens_without_active_database_errors() {
-    let mut e = Executor::new();
+    let mut e = Kernel::new();
     assert_eq!(
         run(&mut e, "CREATE LENS x int"),
         Err(ExecError::NoActiveDatabase)
@@ -369,13 +393,13 @@ fn xderive_persists_and_auto_updates_across_wal_restart() {
     let dir = tempfile::tempdir().unwrap();
     let wal_path = dir.path().join("xd.wal");
     {
-        let mut e = Executor::with_wal(&wal_path, None).unwrap();
+        let mut e = Kernel::with_wal(&wal_path, None).unwrap();
         run(&mut e, "CREATE LENS c int").unwrap();
         run(&mut e, "APPEND LENS c 0 100 10").unwrap();
         run(&mut e, "XDERIVE LENS doubled AS c * 2").unwrap();
     }
     // Reopen: the materialised data and the auto-update rule must both survive.
-    let mut e2 = Executor::with_wal(&wal_path, None).unwrap();
+    let mut e2 = Kernel::with_wal(&wal_path, None).unwrap();
     assert_eq!(
         run(&mut e2, "AT LENS doubled 50").unwrap(),
         Output::Value(Some(Value::Int(20)))
@@ -705,7 +729,7 @@ fn reduce_on_derived_lens() {
 
 #[test]
 fn lenses_are_isolated_per_database() {
-    let mut e = Executor::new();
+    let mut e = Kernel::new();
     run(&mut e, "CREATE DATABASE a").unwrap();
     run(&mut e, "CREATE LENS x int").unwrap();
     run(&mut e, "APPEND LENS x 0 10 1").unwrap();
@@ -731,14 +755,14 @@ fn schema_persists_across_wal_restart() {
 
     // First session: create lens, append data, derive another lens.
     {
-        let mut e = Executor::with_wal(&wal_path, None).unwrap();
+        let mut e = Kernel::with_wal(&wal_path, None).unwrap();
         run(&mut e, "CREATE LENS temp int").unwrap();
         run(&mut e, "APPEND LENS temp 0 10 42").unwrap();
         run(&mut e, "DERIVE LENS cold AS (temp * 2)").unwrap();
     }
 
     // Second session: reopen WAL - schema must be recovered automatically.
-    let mut e2 = Executor::with_wal(&wal_path, None).unwrap();
+    let mut e2 = Kernel::with_wal(&wal_path, None).unwrap();
     // Data is recovered.
     assert_eq!(
         run(&mut e2, "AT LENS temp 5").unwrap(),
@@ -796,7 +820,7 @@ fn append_multi_tau_type_mismatch_rejects_all() {
 
 #[test]
 fn show_databases_lists_all() {
-    let mut e = Executor::new();
+    let mut e = Kernel::new();
     run(&mut e, "CREATE DATABASE alpha").unwrap();
     run(&mut e, "CREATE DATABASE beta").unwrap();
     let Output::Names(mut names) = run(&mut e, "SHOW DATABASES").unwrap() else {
@@ -821,7 +845,7 @@ fn show_lenses_lists_base_and_derived() {
 
 #[test]
 fn show_lenses_requires_active_database() {
-    let e = Executor::new();
+    let e = Kernel::new();
     assert_eq!(
         e.exec_read(&crate::ql::parse("SHOW LENSES").unwrap().1),
         Err(ExecError::NoActiveDatabase)
@@ -874,21 +898,21 @@ fn copy_lens_from_csv() {
     );
 }
 
-fn install_admin(e: &mut Executor) {
+fn install_admin(e: &mut Kernel) {
     let mut grants = StdHashMap::new();
     grants.insert("*".into(), Perm::ALL);
-    e.users.add(User::new("admin", "p", grants)).unwrap(); // codeql[rust/hard-coded-cryptographic-value]
+    add_user(e, User::new("admin", "p", grants)); // codeql[rust/hard-coded-cryptographic-value]
 }
 
-fn install_reader(e: &mut Executor, db: &str) {
+fn install_reader(e: &mut Kernel, db: &str) {
     let mut grants = StdHashMap::new();
     grants.insert(db.to_string(), Perm::R);
-    e.users.add(User::new("reader", "p", grants)).unwrap(); // codeql[rust/hard-coded-cryptographic-value]
+    add_user(e, User::new("reader", "p", grants)); // codeql[rust/hard-coded-cryptographic-value]
 }
 
 #[test]
 fn exec_as_admin_can_do_anything() {
-    let mut e = Executor::new();
+    let mut e = Kernel::new();
     install_admin(&mut e);
     let (_, stmt) = parse("CREATE DATABASE main").unwrap();
     assert_eq!(e.exec_as(&stmt, "admin").unwrap(), Output::Empty);
@@ -905,7 +929,7 @@ fn exec_as_admin_can_do_anything() {
 
 #[test]
 fn exec_as_reader_can_read_not_write() {
-    let mut e = Executor::new();
+    let mut e = Kernel::new();
     install_admin(&mut e);
     let (_, stmt) = parse("CREATE DATABASE main").unwrap();
     e.exec_as(&stmt, "admin").unwrap();
@@ -949,7 +973,7 @@ fn exec_as_reader_can_read_not_write() {
 
 #[test]
 fn exec_as_unknown_user_errors() {
-    let mut e = Executor::new();
+    let e = Kernel::new();
     let (_, stmt) = parse("SHOW DATABASES").unwrap();
     assert!(matches!(
         e.exec_as(&stmt, "ghost"),
@@ -959,28 +983,28 @@ fn exec_as_unknown_user_errors() {
 
 #[test]
 fn admin_can_create_drop_user_and_grant() {
-    let mut e = Executor::new();
+    let mut e = Kernel::new();
     install_admin(&mut e);
     let (_, stmt) = parse("CREATE USER bob PASSWORD \"hunter2\"").unwrap();
     e.exec_as(&stmt, "admin").unwrap();
-    assert!(e.users.get("bob").is_some());
+    assert!(user(&e, "bob").is_some());
 
     let (_, stmt) = parse("GRANT R ON main TO bob").unwrap();
     e.exec_as(&stmt, "admin").unwrap();
-    assert_eq!(e.users.get("bob").unwrap().effective("main"), Perm::R);
+    assert_eq!(user(&e, "bob").unwrap().effective("main"), Perm::R);
 
     let (_, stmt) = parse("REVOKE R ON main FROM bob").unwrap();
     e.exec_as(&stmt, "admin").unwrap();
-    assert_eq!(e.users.get("bob").unwrap().effective("main"), Perm::NONE);
+    assert_eq!(user(&e, "bob").unwrap().effective("main"), Perm::NONE);
 
     let (_, stmt) = parse("DROP USER bob").unwrap();
     e.exec_as(&stmt, "admin").unwrap();
-    assert!(e.users.get("bob").is_none());
+    assert!(user(&e, "bob").is_none());
 }
 
 #[test]
 fn promote_to_admin_via_a_bit() {
-    let mut e = Executor::new();
+    let mut e = Kernel::new();
     install_admin(&mut e);
     let (_, stmt) = parse("CREATE USER bob PASSWORD \"p\"").unwrap();
     e.exec_as(&stmt, "admin").unwrap();
@@ -1000,7 +1024,7 @@ fn promote_to_admin_via_a_bit() {
 
 #[test]
 fn show_databases_filters_for_non_admin() {
-    let mut e = Executor::new();
+    let mut e = Kernel::new();
     install_admin(&mut e);
     let (_, stmt) = parse("CREATE DATABASE alpha").unwrap();
     e.exec_as(&stmt, "admin").unwrap();
@@ -1009,7 +1033,7 @@ fn show_databases_filters_for_non_admin() {
 
     let mut grants = StdHashMap::new();
     grants.insert("alpha".to_string(), Perm::R);
-    e.users.add(User::new("alice", "p", grants)).unwrap(); // codeql[rust/hard-coded-cryptographic-value]
+    add_user(&e, User::new("alice", "p", grants)); // codeql[rust/hard-coded-cryptographic-value]
 
     let (_, stmt) = parse("SHOW DATABASES").unwrap();
     let out = e.exec_as(&stmt, "alice").unwrap();
@@ -1434,7 +1458,7 @@ fn backup_restore_roundtrip_preserves_data() {
     run(&mut e, "APPEND LENS x 10 20 99").unwrap();
     run(&mut e, &format!("BACKUP DATABASE main TO \"{bak}\"")).unwrap();
 
-    let mut e2 = Executor::new();
+    let mut e2 = Kernel::new();
     run(&mut e2, "CREATE DATABASE other").unwrap();
     run(&mut e2, &format!("RESTORE DATABASE main FROM \"{bak}\"")).unwrap();
     run(&mut e2, "USE DATABASE main").unwrap();
@@ -1528,7 +1552,7 @@ fn pbt_backup_restore_at_matches_original(tc: TestCase) {
         run(&mut original, &format!("APPEND LENS x {s} {end} {v}")).unwrap();
     }
     run(&mut original, &format!("BACKUP DATABASE main TO \"{bak}\"")).unwrap();
-    let mut restored = Executor::new();
+    let mut restored = Kernel::new();
     run(&mut restored, "CREATE DATABASE anchor").unwrap();
     run(
         &mut restored,
@@ -1619,7 +1643,7 @@ fn reduce_min_max_on_derived_lens() {
 fn pbt_range_limit_truncates_segments(tc: TestCase) {
     let n = tc.draw(gs::integers::<usize>().min_value(2).max_value(10));
     let limit = tc.draw(gs::integers::<usize>().min_value(1).max_value(n - 1));
-    let mut e = Executor::new();
+    let mut e = Kernel::new();
     run(&mut e, "CREATE DATABASE main").unwrap();
     run(&mut e, "CREATE LENS x int").unwrap();
     // append n non-overlapping unit-width taus
@@ -1638,7 +1662,7 @@ fn pbt_range_limit_truncates_segments(tc: TestCase) {
 
 #[test]
 fn range_offset_skips_segments() {
-    let mut e = Executor::new();
+    let mut e = Kernel::new();
     run(&mut e, "CREATE DATABASE main").unwrap();
     run(&mut e, "CREATE LENS x int").unwrap();
     run(&mut e, "APPEND LENS x 0 1 10, 1 2 20, 2 3 30, 3 4 40").unwrap();
@@ -1658,7 +1682,7 @@ fn range_offset_skips_segments() {
 
 #[test]
 fn range_limit_and_offset_compose() {
-    let mut e = Executor::new();
+    let mut e = Kernel::new();
     run(&mut e, "CREATE DATABASE main").unwrap();
     run(&mut e, "CREATE LENS x int").unwrap();
     run(&mut e, "APPEND LENS x 0 1 10, 1 2 20, 2 3 30, 3 4 40").unwrap();
@@ -1673,7 +1697,7 @@ fn range_limit_and_offset_compose() {
 
 #[test]
 fn multi_db_transaction_is_atomic() {
-    let mut e = Executor::new();
+    let mut e = Kernel::new();
     run(&mut e, "CREATE DATABASE db1").unwrap();
     run(&mut e, "CREATE LENS a int").unwrap();
     run(&mut e, "CREATE DATABASE db2").unwrap();
@@ -1705,7 +1729,7 @@ fn multi_db_transaction_is_atomic() {
 
 #[test]
 fn ttl_hides_expired_at_queries() {
-    let mut e = Executor::new();
+    let mut e = Kernel::new();
     run(&mut e, "CREATE DATABASE main").unwrap();
     run(&mut e, "CREATE LENS sensor int").unwrap();
     // timestamp 0 is far in the past relative to any real now-secs value
@@ -1720,7 +1744,7 @@ fn ttl_hides_expired_at_queries() {
 
 #[test]
 fn ttl_hides_expired_range_queries() {
-    let mut e = Executor::new();
+    let mut e = Kernel::new();
     run(&mut e, "CREATE DATABASE main").unwrap();
     run(&mut e, "CREATE LENS sensor int").unwrap();
     run(&mut e, "APPEND LENS sensor 0 10 99").unwrap();
@@ -1733,7 +1757,7 @@ fn ttl_hides_expired_range_queries() {
 
 #[test]
 fn ttl_on_base_operand_hides_derived_lens_values() {
-    let mut e = Executor::new();
+    let mut e = Kernel::new();
     run(&mut e, "CREATE DATABASE main").unwrap();
     run(&mut e, "CREATE LENS a int").unwrap();
     run(&mut e, "CREATE LENS b int").unwrap();
@@ -1753,7 +1777,7 @@ fn ttl_on_base_operand_hides_derived_lens_values() {
 
 #[test]
 fn unset_ttl_restores_visibility() {
-    let mut e = Executor::new();
+    let mut e = Kernel::new();
     run(&mut e, "CREATE DATABASE main").unwrap();
     run(&mut e, "CREATE LENS sensor int").unwrap();
     run(&mut e, "APPEND LENS sensor 0 10 99").unwrap();
@@ -1771,7 +1795,7 @@ fn unset_ttl_restores_visibility() {
 
 #[test]
 fn show_status_returns_uptime_and_counts() {
-    let mut e = Executor::new();
+    let mut e = Kernel::new();
     run(&mut e, "CREATE DATABASE main").unwrap();
     run(&mut e, "CREATE LENS a int").unwrap();
     run(&mut e, "CREATE LENS b float").unwrap();
@@ -1803,16 +1827,15 @@ fn show_status_wire_roundtrip() {
 #[test]
 fn disk_backend_persists_schema_and_data_across_restart() {
     let dir = tempfile::tempdir().unwrap();
-    let threshold = crate::storage::COMPACT_THRESHOLD;
+    let threshold = crate::services::store::COMPACT_THRESHOLD;
     {
-        let mut e =
-            Executor::with_disk_backend(dir.path(), threshold, 3, None, true, None).unwrap();
+        let mut e = Kernel::with_disk_backend(dir.path(), threshold, 3, None, true, None).unwrap();
         run(&mut e, "CREATE DATABASE main").unwrap();
         run(&mut e, "CREATE LENS temp int").unwrap();
         run(&mut e, "APPEND LENS temp 0 1000 42").unwrap();
         run(&mut e, "DERIVE LENS hot AS temp > 20").unwrap();
     }
-    let mut e = Executor::with_disk_backend(dir.path(), threshold, 3, None, true, None).unwrap();
+    let mut e = Kernel::with_disk_backend(dir.path(), threshold, 3, None, true, None).unwrap();
     run(&mut e, "CREATE DATABASE main").unwrap();
 
     assert_eq!(
@@ -1834,15 +1857,14 @@ fn disk_backend_persists_schema_and_data_across_restart() {
 #[test]
 fn disk_backend_persists_written_at_for_as_of_across_restart() {
     let dir = tempfile::tempdir().unwrap();
-    let threshold = crate::storage::COMPACT_THRESHOLD;
+    let threshold = crate::services::store::COMPACT_THRESHOLD;
     {
-        let mut e =
-            Executor::with_disk_backend(dir.path(), threshold, 3, None, true, None).unwrap();
+        let mut e = Kernel::with_disk_backend(dir.path(), threshold, 3, None, true, None).unwrap();
         run(&mut e, "CREATE DATABASE main").unwrap();
         run(&mut e, "CREATE LENS temp int").unwrap();
         run(&mut e, "APPEND LENS temp 0 1000 42").unwrap();
     }
-    let mut e = Executor::with_disk_backend(dir.path(), threshold, 3, None, true, None).unwrap();
+    let mut e = Kernel::with_disk_backend(dir.path(), threshold, 3, None, true, None).unwrap();
     run(&mut e, "CREATE DATABASE main").unwrap();
 
     let Output::LayerHistory(layers) = run(&mut e, "HISTORY LENS temp").unwrap() else {
@@ -1869,16 +1891,15 @@ fn disk_backend_persists_written_at_for_as_of_across_restart() {
 #[test]
 fn disk_backend_persists_ttl_across_restart() {
     let dir = tempfile::tempdir().unwrap();
-    let threshold = crate::storage::COMPACT_THRESHOLD;
+    let threshold = crate::services::store::COMPACT_THRESHOLD;
     {
-        let mut e =
-            Executor::with_disk_backend(dir.path(), threshold, 3, None, true, None).unwrap();
+        let mut e = Kernel::with_disk_backend(dir.path(), threshold, 3, None, true, None).unwrap();
         run(&mut e, "CREATE DATABASE main").unwrap();
         run(&mut e, "CREATE LENS old int").unwrap();
         run(&mut e, "SET TTL LENS old 10").unwrap();
         run(&mut e, "APPEND LENS old 0 1000 7").unwrap();
     }
-    let mut e = Executor::with_disk_backend(dir.path(), threshold, 3, None, true, None).unwrap();
+    let mut e = Kernel::with_disk_backend(dir.path(), threshold, 3, None, true, None).unwrap();
     run(&mut e, "CREATE DATABASE main").unwrap();
     assert_eq!(run(&mut e, "AT LENS old 500").unwrap(), Output::Value(None));
 }
@@ -1888,16 +1909,15 @@ fn disk_backend_persists_ttl_across_restart() {
 #[test]
 fn disk_backend_drop_lens_survives_restart_and_recreate() {
     let dir = tempfile::tempdir().unwrap();
-    let threshold = crate::storage::COMPACT_THRESHOLD;
+    let threshold = crate::services::store::COMPACT_THRESHOLD;
     {
-        let mut e =
-            Executor::with_disk_backend(dir.path(), threshold, 3, None, true, None).unwrap();
+        let mut e = Kernel::with_disk_backend(dir.path(), threshold, 3, None, true, None).unwrap();
         run(&mut e, "CREATE DATABASE main").unwrap();
         run(&mut e, "CREATE LENS gone int").unwrap();
         run(&mut e, "APPEND LENS gone 0 10 1").unwrap();
         run(&mut e, "DROP LENS gone").unwrap();
     }
-    let mut e = Executor::with_disk_backend(dir.path(), threshold, 3, None, true, None).unwrap();
+    let mut e = Kernel::with_disk_backend(dir.path(), threshold, 3, None, true, None).unwrap();
     run(&mut e, "CREATE DATABASE main").unwrap();
     assert!(matches!(
         run(&mut e, "AT LENS gone 0"),
@@ -1919,7 +1939,7 @@ fn disk_backend_drop_lens_survives_restart_and_recreate() {
 #[test]
 fn disk_backend_flush_and_run_compaction_preserve_data() {
     let dir = tempfile::tempdir().unwrap();
-    let mut e = Executor::with_disk_backend(dir.path(), 2, 3, None, true, None).unwrap();
+    let mut e = Kernel::with_disk_backend(dir.path(), 2, 3, None, true, None).unwrap();
     run(&mut e, "CREATE DATABASE main").unwrap();
     run(&mut e, "CREATE LENS x int").unwrap();
     for i in 0..20i64 {
@@ -1945,8 +1965,8 @@ fn disk_backend_flush_and_run_compaction_preserve_data() {
 #[test]
 fn disk_backend_nd_lens_round_trips() {
     let dir = tempfile::tempdir().unwrap();
-    let threshold = crate::storage::COMPACT_THRESHOLD;
-    let mut e = Executor::with_disk_backend(dir.path(), threshold, 3, None, true, None).unwrap();
+    let threshold = crate::services::store::COMPACT_THRESHOLD;
+    let mut e = Kernel::with_disk_backend(dir.path(), threshold, 3, None, true, None).unwrap();
     run(&mut e, "CREATE DATABASE main").unwrap();
     run(&mut e, "CREATE LENS grid int AXES (valid, region)").unwrap();
     run(
@@ -2119,7 +2139,7 @@ fn nd_layers_compact_losslessly_past_threshold() {
 fn nd_compaction_preserves_occlusion_and_range() {
     // Force compaction with overlapping boxes in one generation, then confirm
     // AT (newest-wins) and RANGE are unchanged by the collapse.
-    let mut e = Executor::with_threshold(2);
+    let mut e = Kernel::with_threshold(2);
     run(&mut e, "CREATE DATABASE main").unwrap();
     run(&mut e, "CREATE LENS grid int AXES (valid, region)").unwrap();
     run(&mut e, "APPEND LENS grid [0 100] [0 100] 1").unwrap();
@@ -2154,7 +2174,7 @@ fn nd_lens_survives_wal_restart() {
     let dir = tempfile::tempdir().unwrap();
     let wal_path = dir.path().join("nd.wal");
     {
-        let mut e = Executor::with_wal(&wal_path, None).unwrap();
+        let mut e = Kernel::with_wal(&wal_path, None).unwrap();
         run(&mut e, "CREATE LENS grid int AXES (valid, region)").unwrap();
         run(
             &mut e,
@@ -2162,7 +2182,7 @@ fn nd_lens_survives_wal_restart() {
         )
         .unwrap();
     }
-    let mut e2 = Executor::with_wal(&wal_path, None).unwrap();
+    let mut e2 = Kernel::with_wal(&wal_path, None).unwrap();
     assert_eq!(
         run(&mut e2, "AT LENS grid 10 25").unwrap(),
         Output::Value(Some(Value::Int(1)))
@@ -2173,4 +2193,50 @@ fn nd_lens_survives_wal_restart() {
     );
     // The arity restriction must survive replay too.
     assert!(run(&mut e2, "AT LENS grid 5").is_err());
+}
+
+#[test]
+fn injected_wal_write_fault_is_clean_and_wal_first() {
+    let tmp = tempfile::tempdir().unwrap();
+    let wal_path = tmp.path().join("fault.wal");
+    let e = Kernel::with_wal(&wal_path, None).unwrap();
+    run(&mut Kernel::new(), "CREATE DATABASE scratch").unwrap(); // unrelated kernel untouched by the fault
+
+    run_on(&e, "CREATE LENS x int").unwrap();
+    run_on(&e, "APPEND LENS x 0 10 1").unwrap();
+
+    // Arm: the very next WAL write fails. The append must surface a clean
+    // Io error and leave the store untouched (WAL-first invariant).
+    e.faults().arm_wal_write_failure(1);
+    let err = run_on(&e, "APPEND LENS x 10 20 2").expect_err("injected fault must fail the append");
+    assert!(
+        matches!(&err, ExecError::Io(m) if m.contains("injected")),
+        "expected injected Io error, got {err:?}"
+    );
+    assert_eq!(
+        run_on(&e, "AT LENS x 15").unwrap(),
+        Output::Value(None),
+        "failed append must not reach the store"
+    );
+    assert_eq!(
+        run_on(&e, "AT LENS x 5").unwrap(),
+        Output::Value(Some(Value::Int(1)))
+    );
+
+    // Disarmed after firing: the retry succeeds and persists.
+    run_on(&e, "APPEND LENS x 10 20 2").unwrap();
+    drop(e);
+    let reopened = Kernel::with_wal(&wal_path, None).unwrap();
+    assert_eq!(
+        run_on(&reopened, "AT LENS x 15").unwrap(),
+        Output::Value(Some(Value::Int(2))),
+        "post-fault append must survive a restart"
+    );
+}
+
+/// Parse + run against a shared kernel reference.
+fn run_on(e: &Kernel, q: &str) -> Result<Output, ExecError> {
+    let (rest, stmt) = parse(q).expect("parse failed");
+    assert!(rest.is_empty(), "unconsumed: {rest:?}");
+    e.exec(&stmt)
 }

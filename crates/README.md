@@ -1,14 +1,15 @@
 # crates
 
-Tau is a Cargo workspace. One engine library, two binaries, and one fuzz harness.
+## What it is
 
-| crate | kind | purpose |
-|-------|------|---------|
-| [`libtau`](libtau/src/README.md) | library | The engine: data model, query language, storage backends, executor. Everything else depends on it. |
-| [`tau`](tau/README.md) | binary | TCP server: exposes a `libtau` executor over a line-oriented protocol with optional TLS, auth, and WAL. |
-| [`tauctl`](tauctl/README.md) | binary (`tauctl`) | Interactive client: named connection pool, lazygit-style pane navigation, clipboard copy/paste, client-side CSV load. |
-| [`fuzztau`](fuzztau/README.md) | fuzz harness | LibFuzzer targets for the TauQL/wire text parsers; a TauQL dictionary and committed seeds; requires a nightly toolchain. |
+Tau is a Cargo workspace: one engine library, two runtime binaries, and three testing crates. Binary names are unique, so `cargo run --bin tau|tauctl|dst` works from the repo root.
 
-Binary names are unique across the workspace, so `cargo run --bin tau|tauctl` works from the repo root.
+## How the crates fit
 
-`dst`, `libdst`, and `fuzztau` complete the picture for testing and tooling but are not part of the runtime dependency chain (see their own READMEs).
+`libtau` is the engine — a syscall-routing microkernel (`Kernel`) over db, query, auth, and metrics services. The `tau` server exposes a kernel over line-oriented TCP (optional TLS, auth, WAL); `tauctl` is the interactive TUI client speaking the same wire protocol. Neither binary contains engine logic.
+
+`libdst` is a generic deterministic-simulation framework; `dst` is its Tau driver, driving a kernel and an independent oracle in lock-step. `fuzztau` holds LibFuzzer targets for the TauQL and wire parsers (nightly toolchain). None of the three are in the runtime dependency chain.
+
+## Where to look
+
+Each crate has its own README covering what it is, how it works, and how to use it: [libtau](libtau/README.md), [tau](tau/README.md), [tauctl](tauctl/README.md), [dst](dst/README.md), [libdst](libdst/README.md), [fuzztau](fuzztau/README.md).

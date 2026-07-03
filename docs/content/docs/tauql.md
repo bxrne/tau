@@ -11,7 +11,7 @@ TauQL is a line-oriented command language. **One statement in, one response line
 Case is significant, and it is what separates the *server* language (TauQL) from the *client* meta-commands you type into `tauctl`.
 
 - **TauQL statement keywords are UPPERCASE** — `CREATE`, `APPEND`, `AT`, `RANGE`, `REDUCE`, `USE`, `AS`, `OVER`, `WHERE`, … The lowercase form of a keyword is rejected, so `at lens x 5` is a parse error.
-- **Type names, aggregate functions, and value literals are lowercase** — `int`, `float`, `str`, `bool`, `bytes`; `min`, `max`, `avg`, `sum`, `count`; `true`, `false`, `null`. Their uppercase forms are *not* valid TauQL.
+- **Type names, aggregate functions, and value literals are lowercase** — `int`, `float`, `str`, `bool`; `min`, `max`, `avg`, `sum`, `count`; `true`, `false`, `null`. Their uppercase forms are *not* valid TauQL.
 - **Identifiers** (database, lens, and user names) are case-sensitive and used verbatim.
 - **`tauctl` meta-commands are lowercase** — `connect`, `disconnect`, `use`, `load`, `exit`, `quit`. These are interpreted by the client and never reach the server, so they are deliberately lowercase to stand apart from TauQL.
 
@@ -68,7 +68,7 @@ SHOW STATUS
 
 | key | value |
 |-----|-------|
-| `uptime_secs` | seconds since the executor was created |
+| `uptime_secs` | seconds since the server's kernel was created |
 | `databases` | number of named databases |
 | `lenses` | total base + derived lens count across all databases |
 | `wal_bytes` | total WAL file size on disk (0 for in-memory backends) |
@@ -96,7 +96,6 @@ Types:
 | `float` | `f64` | `f<value>` |
 | `str` | `String` | `s<percent-encoded>` |
 | `bool` | `bool` | `b0` or `b1` |
-| `bytes` | `Vec<u8>` | `n` (null-encoded; raw bytes not transmitted) |
 
 Requires `C` permission on the active database.
 
@@ -623,7 +622,7 @@ min(cpu, -3600, 0)  ← minimum cpu over the last hour
 | `GRANTS <n>; <user> <db>:<perms>; ...` | Output of `SHOW GRANTS` |
 | `LAYERS <n>; <id>:<written_at>:<min>:<max>; ...` | Layer metadata from `HISTORY LENS` |
 | `STATUS <n>; <key>:<value>; ...` | Key-value pairs from `SHOW STATUS` |
-| `ERR <message>` | Parse, executor, or permission error |
+| `ERR <message>` | Parse, execution, or permission error |
 
 ### Value encoding
 
@@ -673,7 +672,7 @@ statement :=
   | AUTH user pass
   | QUIT | EXIT
 
-type      := int | float | str | bool | bytes
+type      := int | float | str | bool
 func      := min | max | avg | sum | count
 perms     := any combination of C R U D A, or *, or -
 tau_list  := s e v [, s e v ...]

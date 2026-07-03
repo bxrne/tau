@@ -2,12 +2,12 @@
 
 use std::io;
 use std::net::{SocketAddr, TcpListener};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use libtau::Executor;
+use libtau::Kernel;
 use rustls::ServerConfig;
 
 use crate::server::build_tls_config;
@@ -38,7 +38,7 @@ pub struct EphemeralServer {
 }
 
 impl EphemeralServer {
-    pub fn spawn(executor: Arc<RwLock<Executor>>, opts: HarnessOpts) -> io::Result<Self> {
+    pub fn spawn(kernel: Arc<Kernel>, opts: HarnessOpts) -> io::Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let addr = listener.local_addr()?;
         listener.set_nonblocking(true).expect("set_nonblocking");
@@ -60,7 +60,7 @@ impl EphemeralServer {
                     }
                     match listener.accept() {
                         Ok((stream, peer)) => {
-                            let exec = executor.clone();
+                            let exec = kernel.clone();
                             let tls = tls_config.clone();
                             thread::Builder::new()
                                 .name("tau-dst-conn".into())

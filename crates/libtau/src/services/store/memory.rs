@@ -1,6 +1,6 @@
 use crate::model::Layer;
-use crate::storage::layers::compact_layers;
-use crate::storage::store::{COMPACT_THRESHOLD, Store};
+use crate::services::store::layers::compact_layers;
+use crate::services::store::store::{COMPACT_THRESHOLD, Store};
 use rustc_hash::FxHashMap as HashMap;
 use std::io;
 use std::sync::Arc;
@@ -76,7 +76,7 @@ where
 mod tests {
     use super::*;
     use crate::model::{Tau, Timestamp};
-    use crate::storage::layers::compact_layers;
+    use crate::services::store::layers::compact_layers;
     use hegel::TestCase;
     use hegel::generators as gs;
     use hegel::generators::Generator;

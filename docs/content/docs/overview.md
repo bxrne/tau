@@ -94,14 +94,9 @@ Encryption is AES-256-GCM with a random 12-byte nonce, keyed by `TAU_ENCRYPTION_
 
 ## Concurrency
 
-Each TCP connection runs on its own OS thread. All threads share one `Arc<RwLock<Executor>>` which guards the database registry, plus a separate `Arc<RwLock<DbState>>` per named database.
+Each TCP connection runs on its own OS thread; all threads share one `Arc<Kernel>`. The kernel routes each statement to the service that owns it (query for reads, db for mutations, auth for user management) and locks internally, so readers never block each other and a write to one database does not block reads on another. Transactions buffer mutations until `COMMIT`; `ROLLBACK` discards them.
 
-Lock routing:
-- Read-only statements (`AT`, `RANGE`, `REDUCE`, `SHOW *`) take the shared executor lock and a per-database read lock, so concurrent readers never block each other.
-- Data writes (`APPEND`, `CREATE LENS`, `COPY`, etc.) take only the shared executor lock plus a per-database write lock. A write to database `prod` does not block reads on database `metrics`.
-- Registry writes (`CREATE DATABASE`, `DROP DATABASE`, user management, transactions) take the exclusive executor lock for their brief duration.
-
-When a connection uses `START TRANSACTION … COMMIT`, mutations are buffered per-connection and not written to storage until `COMMIT`. During a transaction, writes route through the exclusive executor lock so the buffer is applied atomically. `ROLLBACK` discards the buffer. Nesting is not supported.
+Locking tiers, transaction semantics, and design rationale live in [How it works](/docs/how-it-works/) — this page stays conceptual.
 
 ---
 

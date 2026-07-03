@@ -121,16 +121,12 @@ fn handle_metrics_request(s: &mut TcpStream, metrics: &Arc<Metrics>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use libtau::Executor;
-    use std::sync::RwLock;
+    use libtau::Kernel;
 
     fn metrics_response(request: &[u8]) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").expect("test metrics bind");
         let addr = listener.local_addr().expect("test metrics addr");
-        let metrics = Arc::new(RwLock::new(Executor::new()))
-            .read()
-            .expect("test metrics read lock")
-            .metrics();
+        let metrics = Kernel::new().metrics();
         thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("test metrics accept");
             handle_metrics_request(&mut stream, &metrics);

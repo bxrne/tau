@@ -17,7 +17,7 @@ Tau uses four distinct testing layers. Each one finds a different class of bug; 
 **Coverage:**
 
 - Parser rejects malformed input and accepts valid input
-- Executor returns the correct `Output` variant for each statement
+- The kernel routes each statement to the right service and returns the correct `Output` variant
 - Permission checks fire on the correct conditions
 - WAL replay reconstructs the same in-memory state as a direct write
 - WAL rotation archives the pre-rotation file for point-in-time recovery
@@ -71,7 +71,7 @@ All such tests are named `pbt_*` for easy log filtering. Hegel auto-installs a P
 
 **Location:** `crates/libdst` (framework), `crates/dst` (Tau driver binary).
 
-**What they test:** End-to-end agreement between `libtau::Executor` and an independent reference oracle (no libtau code) under random workloads — including derived lenses, TTL, multi-database switching, WAL replay, and truncated-WAL recovery. Divergences are structured ([`Divergence`](https://github.com/bxrne/tau/tree/master/crates/libdst/src/divergence.rs)) with step index, description, and expected/got values. Failing traces are minimised via delta-debug shrinking.
+**What they test:** End-to-end agreement between `libtau::Kernel` and an independent reference oracle (no libtau code) under random workloads — including derived lenses, TTL, multi-database switching, WAL replay, and truncated-WAL recovery. Divergences are structured ([`Divergence`](https://github.com/bxrne/tau/tree/master/crates/libdst/src/divergence.rs)) with step index, description, and expected/got values. Failing traces are minimised via delta-debug shrinking.
 
 **How to run:**
 

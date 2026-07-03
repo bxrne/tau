@@ -28,10 +28,12 @@ The cost is that every query must resolve which layer wins at each point in time
 
 ## Architecture
 
-Tau is structured as a library (`libtau`) consumed by two binaries: the TCP server (`tau`) and the interactive client (`tauctl`, a ratatui TUI that requires an interactive terminal). The library exposes a clean `Executor` API; auth, TLS, and network concerns live exclusively in the server.
+Tau is structured as a library (`libtau`) consumed by two binaries: the TCP server (`tau`) and the interactive client (`tauctl`, a ratatui TUI that requires an interactive terminal). The library is a **syscall-routing microkernel**: a `Kernel` owns four built-in services — db (mutations), query (reads), auth (users and grants), and metrics — and routes every statement to the service that owns it, applying per-user policy on the way. TLS and network concerns live exclusively in the server.
 
 ```
-Stmt → Executor → Database<Value> → Store<V> + optional Wal
+Stmt → Kernel ─┬→ query service (reads) ──┐
+               ├→ db service (mutations) ──┴→ shared Registry → Database<Value> → Store<V> + optional Wal
+               └→ auth service (user management)
 ```
 
 ---
@@ -166,7 +168,7 @@ Multi-axis lenses (`CREATE LENS … AXES (…)`) compact losslessly too, but the
 
 ---
 
-## Database and Executor
+## Database and Kernel
 
 ### `Database<V>`
 
@@ -178,23 +180,19 @@ WAL.write(entry) → WAL.fsync() → Store.append(layer)
 
 A WAL fsync failure leaves the in-memory store unchanged; the entry is not committed. No partial-write window is visible to readers.
 
-### `Executor`
+### `Kernel`
 
-`Executor` is the top-level query processor. It owns a `HashMap<String, DbState>` of named databases, an active-database pointer, and a `UserStore`.
+`Kernel` is the top-level statement processor. It owns four services and a shared `Registry` of named databases (plus an active-database pointer). The **db service** executes mutations (lens DDL, appends, transactions, backup/restore); the **query service** evaluates reads over the same registry with read locks only; the **auth service** owns users and grants; **metrics** counts everything. Each kernel also owns a virtual `Clock` (transaction stamps, TTL "now") and a `FaultInjector` — both per-kernel capabilities, pinned by deterministic simulation.
 
-Each `DbState` carries:
-- A `Database<Value>` (live store + WAL)
-- A `HashMap<name, Type>` for base lens declarations
-- A `HashMap<name, Expr>` for derived lens ASTs
-- A monotonic `next_layer_id` counter
+Each `DbState` in the registry carries a `Database<Value>` (live store + WAL), the base-lens type declarations, derived-lens ASTs, a monotonic `next_layer_id`, and the kernel's clock.
 
-**Two entry-point pairs:**
+**Two entry-point pairs**, all `&self`:
 
-`exec` / `exec_read`: unrestricted. Used by library consumers, tests, and schema replay (`in_replay = true` prevents DDL from being re-appended).
+`exec` / `exec_read`: unrestricted. Used by library consumers, tests, and DST.
 
-`exec_as(stmt, caller)` / `exec_read_as(stmt, caller)`: looks up `caller` in `self.users`, calls `check_permission`, then delegates. Used by the TCP server for every authenticated session. `SHOW DATABASES` is post-filtered to only databases the caller holds any grant on.
+`exec_as(stmt, caller)` / `exec_read_as(stmt, caller)`: resolves `caller` in the auth service, applies the kernel's permission policy, then routes. Used by the TCP server for every authenticated session. `SHOW DATABASES` is post-filtered to only databases the caller holds any grant on.
 
-The split is intentional: embedding Tau as a library bypasses auth entirely. Auth is a server concern, not an engine concern.
+The split is intentional: embedding Tau as a library bypasses auth entirely. Policy lives in the kernel, not in any service — no service ever sees a statement the caller wasn't allowed to run.
 
 ---
 
@@ -202,7 +200,7 @@ The split is intentional: embedding Tau as a library bypasses auth entirely. Aut
 
 TauQL is a line-oriented command language: one statement in, one response line out. The grammar is minimal: no implicit join, no subquery. Multi-statement atomicity is provided by `START TRANSACTION / COMMIT / ROLLBACK`.
 
-The parser is a `nom` combinator in `libtau::ql::parser`. Adding a new statement requires changes to four files: `ast.rs` (new variant + `Display`), `parser.rs` (production + `alt` entry), `executor.rs` (handler + `check_permission` arm), and `libtau::wire` (`Response::from_output` and `Response::parse`).
+The parser is a `nom` combinator in `libtau::ql::parser`, deliberately outside the kernel. Adding a new statement touches the AST (`Stmt` variant + `Display` + `is_read_only`), the parser, the owning service's handler, the kernel's permission policy, and the wire codec.
 
 Operator precedence from low to high: `||`, `&&`, comparison, additive, multiplicative, unary, primary.
 
@@ -216,12 +214,12 @@ Line-oriented text: one TauQL statement per line in, one response line out.
 
 ### Concurrency
 
-Each accepted connection runs on its own OS thread. The executor holds one `Arc<RwLock<Executor>>` for the database registry and a separate `Arc<RwLock<DbState>>` per named database.
+Each accepted connection runs on its own OS thread. All threads share one plain `Arc<Kernel>`; the kernel routes each statement to its owning service and locks internally — the server has no lock router of its own.
 
-Three lock routing tiers in `handle_query`:
-- Read-only statements: shared executor lock + per-database read lock. All readers run concurrently.
-- Data writes (`APPEND`, `CREATE LENS`, `COPY`, etc.): shared executor lock + per-database write lock. A write to `prod` does not block reads on `metrics`.
-- Registry writes (`CREATE DATABASE`, `DROP DATABASE`, user management, transactions): exclusive executor lock for their brief duration.
+Three locking tiers inside the kernel:
+- Read-only statements: registry read lock + per-database read lock (query service). All readers run concurrently.
+- Data writes (`APPEND`, `CREATE LENS`, `COPY`, etc.): registry read lock + per-database write lock (db service). A write to `prod` does not block reads on `metrics`.
+- Database DDL (`CREATE DATABASE`, `DROP DATABASE`, `USE DATABASE`, `RESTORE`): registry write lock for its brief duration. User management routes to the auth service.
 
 The `--no-fsync-each` flag removes per-record WAL fsync from the write path entirely; a 50 ms background thread takes over durability, dramatically cutting write lock hold-time for WAL-enabled deployments.
 
@@ -243,9 +241,9 @@ The tradeoff is query cost: O(log n) per layer rather than O(log n) total. Compa
 
 ### Transaction semantics
 
-`START TRANSACTION / COMMIT / ROLLBACK` provide per-connection multi-statement atomicity across one or more databases. Mutations after `START TRANSACTION` are buffered in memory; `COMMIT` applies the buffer under the exclusive executor write lock so no other reader sees partial state. `ROLLBACK` discards the buffer.
+`START TRANSACTION / COMMIT / ROLLBACK` provide multi-statement atomicity across one or more databases. Mutations after `START TRANSACTION` are buffered in the db service; `COMMIT` replays each buffered statement against the database that was active when it was buffered. `ROLLBACK` discards the buffer.
 
-Each buffered statement carries the name of the database that was active when it was issued. `USE DATABASE` always executes immediately (it changes the active context for subsequent statements), so a transaction can span multiple databases: writes to `db1` and `db2` within one `START TRANSACTION / COMMIT` block are applied atomically.
+`USE DATABASE` always executes immediately (it changes the active context for subsequent statements), so a transaction can span multiple databases within one `START TRANSACTION / COMMIT` block.
 
 Nesting is not supported. Concurrent readers on other connections see only pre-transaction state throughout. This fits the append-only workload well without the complexity of MVCC or 2PC.
 
@@ -253,7 +251,7 @@ For single-layer atomicity without explicit transactions, batching works equally
 
 ### `exec` vs `exec_as` split
 
-Auth is a transport concern. A Tau binary embedded in another process, reading sensor data directly, has no need for network authentication. Keeping the auth check out of `exec` means embedded use never pays the overhead or requires a dummy user.
+Auth is a transport concern. A Tau binary embedded in another process, reading sensor data directly, has no need for network authentication. Keeping the auth check out of `exec` means embedded use never pays the overhead or requires a dummy user. When auth *is* wanted, the kernel enforces it before routing — services never check permissions themselves.
 
 ### Arc-backed layers
 

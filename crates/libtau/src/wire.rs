@@ -24,10 +24,10 @@
 
 use std::fmt;
 
-use crate::executor::{ExecError, LayerInfo, Output};
 use crate::model::Timestamp;
-use crate::storage::Codec;
-use crate::users::Perm;
+use crate::services::auth::Perm;
+use crate::services::db::{ExecError, LayerInfo, Output};
+use crate::services::store::Codec;
 use crate::value::Value;
 
 /// A single protocol response. Built from an executor [`Output`]/[`ExecError`] on

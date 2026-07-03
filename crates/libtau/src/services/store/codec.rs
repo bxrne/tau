@@ -1,5 +1,5 @@
 //! Binary encode/decode contract shared by on-disk formats (`Sstable`'s runs
-//! and manifest). Distinct from [`crate::storage::wal::Codec`] (the WAL's
+//! and manifest). Distinct from [`crate::services::store::wal::Codec`] (the WAL's
 //! text-line codec) — kept as a separate trait of the same name in a
 //! different module rather than merged, since the two formats' encodings are
 //! unrelated (binary vs. text) and a shared trait would force one to bend

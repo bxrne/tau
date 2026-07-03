@@ -183,7 +183,7 @@ pub(crate) fn scan_layers<V: Clone + PartialEq>(
             }
         })
         .collect();
-    crate::storage::layers::sweep_range(&filtered, start, end)
+    crate::services::store::layers::sweep_range(&filtered, start, end)
         .into_iter()
         .map(|t| (t.start(), t.end(), t.value))
         .collect()

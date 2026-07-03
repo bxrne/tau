@@ -9,9 +9,9 @@ use std::sync::Arc;
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
-use crate::executor::{DbState, ExecError};
 use crate::model::{Layer, Timestamp};
 use crate::ql::ast::{AggFunc, BinOp, Expr, UnOp};
+use crate::services::db::{DbState, ExecError};
 use crate::value::Value;
 
 /// Returns `true` if wiring `target = expr` would create a derivation cycle.
@@ -55,7 +55,7 @@ pub(crate) fn ttl_cutoff(state: &DbState, lens: &str) -> Option<Timestamp> {
     state
         .ttl_secs
         .get(lens)
-        .map(|&secs| crate::wall_clock::now_secs() - secs)
+        .map(|&secs| state.clock.now_secs() - secs)
 }
 
 pub(crate) fn eval_lens(
@@ -639,11 +639,11 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::*;
-    use crate::database::Database;
-    use crate::executor::DbState;
     use crate::model::{Layer, Tau};
     use crate::ql::ast::{Literal, Type};
-    use crate::storage::InMemory;
+    use crate::services::db::Database;
+    use crate::services::db::DbState;
+    use crate::services::store::InMemory;
 
     fn make_int_state(lens: &str, taus: &[(i64, i64, i64)]) -> DbState {
         let db = Database::new(InMemory::<Value>::new());
@@ -667,6 +667,7 @@ mod tests {
             xderived: HashMap::default(),
             ttl_secs: HashMap::default(),
             axes: HashMap::default(),
+            clock: std::sync::Arc::new(crate::clock::Clock::system()),
         }
     }
 
