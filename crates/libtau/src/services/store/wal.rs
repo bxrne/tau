@@ -32,7 +32,7 @@ use crc32fast::Hasher;
 
 use crate::crypto;
 use crate::model::{Layer, LayerId, Tau, Timestamp};
-use crate::storage::Store;
+use crate::services::store::Store;
 #[cfg(test)]
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
@@ -300,9 +300,25 @@ pub struct Wal {
     /// reaches or exceeds this many bytes.  The caller (Database) is
     /// responsible for acting on the signal by calling `checkpoint()`.
     max_bytes: Option<u64>,
+    /// Optional kernel-owned fault injector consulted before every write
+    /// (see [`crate::services::store::FaultInjector`]).
+    injector: Option<std::sync::Arc<super::FaultInjector>>,
 }
 
 impl Wal {
+    /// Attach a kernel-owned fault injector consulted before every write.
+    pub fn set_fault_injector(&mut self, injector: std::sync::Arc<super::FaultInjector>) {
+        self.injector = Some(injector);
+    }
+
+    /// Consult the fault injector (if any) before a write.
+    fn check_write_fault(&self) -> io::Result<()> {
+        match &self.injector {
+            Some(inj) => inj.check_wal_write(),
+            None => Ok(()),
+        }
+    }
+
     /// Open (or create) the WAL at `path`. Pass `Some(key)` to enable AES-256-GCM
     /// encryption of every entry. An existing unencrypted WAL remains readable when
     /// `key` is `None`; encrypted entries require the same key used to write them.
@@ -320,6 +336,7 @@ impl Wal {
             fsync_each: true,
             scratch: String::with_capacity(256),
             max_bytes: None,
+            injector: None,
         })
     }
 
@@ -379,6 +396,7 @@ impl Wal {
             tau_count = entry.taus.len(),
             "writing WAL entry"
         );
+        self.check_write_fault()?;
         write_data_line(&mut self.writer, &self.key, entry)?;
         self.maybe_sync()
     }
@@ -395,10 +413,14 @@ impl Wal {
         use std::fmt::Write as _;
 
         // Encrypted path keeps the original serialise() route - encryption
-        // dominates cost and the buffer allocation noise is negligible.
+        // dominates cost and the buffer allocation noise is negligible
+        // (`append` performs its own fault check, so check after this return
+        // to count each logical write exactly once).
         if self.key.is_some() {
             return self.append(&WalEntry::from_layer(lens, layer));
         }
+
+        self.check_write_fault()?;
 
         self.scratch.clear();
         _ = write!(
@@ -517,6 +539,7 @@ impl Wal {
     /// Plaintext format: `S:<crc32> <stmt_text>`
     /// Encrypted format: `SE:<base64>` where the plaintext is `<crc32> <stmt_text>`
     pub fn append_schema(&mut self, stmt_text: &str) -> io::Result<()> {
+        self.check_write_fault()?;
         let ck = crc32(stmt_text);
         let inner = format!("{} {}", ck, stmt_text);
         if let Some(key) = &self.key {
@@ -654,7 +677,7 @@ impl Wal {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::memory::InMemory;
+    use crate::services::store::memory::InMemory;
     use hegel::TestCase;
     use hegel::generators as gs;
     use hegel::generators::Generator;

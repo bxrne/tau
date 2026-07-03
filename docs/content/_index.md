@@ -6,26 +6,30 @@ template = "index.html"
 page_template = "page.html"
 +++
 
+<p class="hero__lede">Tau is a <b>bitemporal</b> time-series database: every fact keeps <span class="t-valid">when it was true</span> and <span class="t-tx">when you learned it</span>. Corrections are appends — nothing is ever overwritten — and <code>AT … AS OF</code> replays exactly what you believed at any past moment.</p>
 
-<p class="hero__lede">Tau is <b>bitemporal</b>: every fact records when it was true and when you learned it. Corrections are just appends, nothing is overwritten and <code>AT … AS OF</code> replays any past belief, exactly.</p>
+<p class="hero__links"><a href="#quickstart">Quickstart</a> · <a href="/docs/tutorial/">Tutorial</a> · <a href="/docs/examples/">Examples</a> · <a href="https://github.com/bxrne/tau">GitHub</a></p>
 
-<div class="term">
-<span class="term__line"><span class="term__p">τ:</span> APPEND LENS px 0 3600 100.4         <span class="term__c"># the 09:00 bar prints</span></span>
-<span class="term__line"><span class="term__p">τ:</span> AT LENS px 1800                      <span class="term__r">→ VAL f100.4</span></span>
-<span class="term__line"> </span>
-<span class="term__line"><span class="term__p">τ:</span> APPEND LENS px 0 3600 100.0         <span class="term__c"># next day — the exchange restates it</span></span>
-<span class="term__line"><span class="term__p">τ:</span> AT LENS px 1800                      <span class="term__now">→ VAL f100.0    ← today's truth</span></span>
-<span class="term__line"><span class="term__p">τ:</span> AT LENS px 1800 AS OF &lt;trade-day&gt;   <span class="term__asof">→ VAL f100.4    ← what you actually traded on</span></span>
+<div class="stack" role="img" aria-label="Two appended layers for the lens px over the same valid-time interval. The newer layer answers AT with 100.0; AT AS OF day one answers from the older layer with 100.4.">
+  <div class="stack__head"><span class="t-valid">valid time →</span><span class="t-tx">written_at ↓</span></div>
+  <div class="stack__lanes">
+    <div class="stack__lane">
+      <span class="stack__gen t-tx">day 1</span>
+      <span class="stack__bar stack__bar--old">APPEND LENS px 0 3600 100.4<em>the 09:00 bar prints</em></span>
+    </div>
+    <div class="stack__lane">
+      <span class="stack__gen t-tx">day 2</span>
+      <span class="stack__bar stack__bar--new">APPEND LENS px 0 3600 100.0<em>the exchange restates it</em></span>
+    </div>
+    <span class="stack__probe" aria-hidden="true"><i>t&nbsp;=&nbsp;1800</i></span>
+  </div>
+  <div class="stack__queries">
+    <span class="q q--now"><span class="q__prompt">τ:</span> AT LENS px 1800 <span class="q__arrow">→</span> <b>VAL f100.0</b><span class="q__note">today’s truth · newest layer wins</span></span>
+    <span class="q q--asof"><span class="q__prompt">τ:</span> AT LENS px 1800 <span class="q__asof">AS OF day-1</span> <span class="q__arrow">→</span> <b class="t-tx">VAL f100.4</b><span class="q__note">what you actually traded on</span></span>
+  </div>
 </div>
 
-<p class="term__cap">One question, <span class="astime">two answers</span> — the price you see now, and the price you saw then. No lookahead bias, no shadow tables, no rebuild.</p>
-
-<div class="cta-row">
-<a class="cta" href="#quickstart">Quickstart</a>
-<a class="cta cta--ghost" href="/docs/tutorial/">Read the tutorial</a>
-<a class="cta cta--ghost" href="/docs/examples/">Browse examples</a>
-</div>
-
+<p class="stack__cap">One question, two honest answers. The restated value never deletes the original — it stacks on top, the newest layer wins, and both clocks stay queryable forever.</p>
 
 ## Two clocks, one fact
 
@@ -46,10 +50,10 @@ Most stores have one axis of time and mutate in place. Tau keeps both axes and m
 ## What that buys you
 
 <ul class="pillars">
-<li><b>Corrections are appends.</b> <span>Overwrite nothing. The newest layer wins at any overlap; the belief it replaced stays queryable forever.</span></li>
-<li><b>Time-travel that survives compaction.</b> <span>Normalisation preserves every transaction-time generation — a sweep line in one dimension, orthotope subtraction in N — and is proven query-equivalent by property tests and deterministic simulation on every build.</span></li>
-<li><b>Lenses go N-dimensional.</b> <span><code>CREATE LENS grid float AXES (time, region)</code> — box-shaped facts, queried one coordinate per axis.</span></li>
-<li><b>Library or server.</b> <span>Embed <code>libtau</code> in a Rust process, or run the TCP/TLS server and speak TauQL. Same engine either way.</span></li>
+<li><b>Corrections are appends.</b> <span>The newest layer wins at any overlap; the belief it replaced stays queryable forever.</span></li>
+<li><b>Time travel survives compaction.</b> <span>Normalisation preserves every transaction-time generation, and is proven query-equivalent by property tests and deterministic simulation on every build.</span></li>
+<li><b>Lenses go N-dimensional.</b> <span><code>CREATE LENS grid float AXES (time, region)</code> — box-shaped facts, one coordinate per axis.</span></li>
+<li><b>Library or server.</b> <span>Embed the <code>libtau</code> kernel in a Rust process, or run the TCP/TLS server and speak TauQL. Same engine either way.</span></li>
 </ul>
 
 <div class="chips">
@@ -86,8 +90,16 @@ Start an in-memory server on `127.0.0.1:7070` with `tau`, then drive it from `ta
 VAL i45
 ```
 
-From here: the [tutorial](/docs/tutorial/) walks a full correction-and-audit story, the [examples](/docs/examples/) are copy-pasteable per use case, and [how it works](/docs/how-it-works/) opens up storage, the WAL and compaction.
+
+## Where next
+
+- [Tutorial](/docs/tutorial/) — a full correction-and-audit story, end to end
+- [Examples](/docs/examples/) — copy-pasteable: IoT recalibration, observability rollups, backtesting
+- [TauQL reference](/docs/tauql/) — every statement, the grammar, and the wire protocol
+- [How it works](/docs/how-it-works/) — the kernel, layers, compaction, storage and the WAL
+- [Simulation testing](/docs/dst/) — the oracle, fault injection, and why seeds reproduce bugs
+- [Configuration](/docs/configuration/) — backends, TLS, auth, metrics, and limits
 
 ---
 
-*Open source under the [Apache&nbsp;2.0 license](https://github.com/bxrne/tau/blob/master/LICENSE). Correctness is enforced by property-based tests, a deterministic simulation tester, and fuzzing — see [Testing](/docs/testing/).*
+<em class="colophon">Open source under the <a href="https://github.com/bxrne/tau/blob/master/LICENSE">Apache 2.0 license</a>. Correctness is enforced by property-based tests, deterministic simulation, and fuzzing — see <a href="/docs/testing/">Testing</a>.</em>

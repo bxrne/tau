@@ -4,7 +4,7 @@
 //!
 //! # Why this exists
 //!
-//! [`Disk`](crate::storage::Disk) rewrites the *entire* accumulated state into
+//! [`Disk`](crate::services::store::Disk) rewrites the *entire* accumulated state into
 //! one file on every checkpoint. That is fine at small scale but does not
 //! survive billions of points. Tau's append/compact/newest-wins model is
 //! already a naive LSM tree — this backend makes that explicit and on-disk:
@@ -75,9 +75,9 @@
 
 use crate::crypto;
 use crate::model::{Layer, LayerId, Tau, Timestamp};
-use crate::storage::codec::{Codec, DEFAULT_ZSTD_LEVEL};
-use crate::storage::layers::compact_layers;
-use crate::storage::store::{Store, layers_get, scan_layers};
+use crate::services::store::codec::{Codec, DEFAULT_ZSTD_LEVEL};
+use crate::services::store::layers::compact_layers;
+use crate::services::store::store::{Store, layers_get, scan_layers};
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -798,8 +798,8 @@ impl<V: Clone + PartialEq + Codec> Sstable<V> {
             base,
             key,
             compression_level: DEFAULT_ZSTD_LEVEL,
-            compact_threshold: crate::storage::store::COMPACT_THRESHOLD,
-            run_gc_threshold: crate::storage::store::COMPACT_THRESHOLD,
+            compact_threshold: crate::services::store::store::COMPACT_THRESHOLD,
+            run_gc_threshold: crate::services::store::store::COMPACT_THRESHOLD,
             inner: RwLock::new(inner),
         };
         if !manifest_path.exists() {
@@ -1235,7 +1235,7 @@ impl<V: Clone + PartialEq + Codec + Send + Sync + 'static> Store<V> for Sstable<
 mod tests {
     use super::*;
     use crate::model::Tau;
-    use crate::storage::InMemory;
+    use crate::services::store::InMemory;
     use hegel::TestCase;
     use hegel::generators as gs;
     use pretty_assertions::assert_eq;

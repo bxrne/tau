@@ -1,6 +1,6 @@
-use crate::metrics::Metrics;
 use crate::model::{Layer, LayerId, Timestamp};
-use crate::storage::{Store, Wal, WalEntry, wal::Codec};
+use crate::services::metrics::Metrics;
+use crate::services::store::{Store, Wal, WalEntry, wal::Codec};
 use std::io;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -119,6 +119,17 @@ where
     pub fn set_wal_max_bytes(&self, bytes: u64) {
         if let Some(wal) = &self.wal {
             wal.lock().expect("wal lock poisoned").set_max_bytes(bytes);
+        }
+    }
+
+    /// Attach a kernel-owned fault injector to this database's WAL (no-op
+    /// without a WAL).  Injected write failures then surface as clean
+    /// `io::Error`s from `append`/`append_schema`.
+    pub fn set_wal_fault_injector(&self, injector: Arc<crate::services::store::FaultInjector>) {
+        if let Some(wal) = &self.wal {
+            wal.lock()
+                .expect("wal lock poisoned")
+                .set_fault_injector(injector);
         }
     }
 
@@ -418,7 +429,7 @@ where
 
     /// Per-layer metadata for `HISTORY`, from the store.
     #[inline]
-    pub fn layer_infos(&self, name: &str) -> Vec<crate::storage::store::LayerInfoTuple> {
+    pub fn layer_infos(&self, name: &str) -> Vec<crate::services::store::store::LayerInfoTuple> {
         self.store
             .read()
             .expect("store lock poisoned")
@@ -456,7 +467,7 @@ where
 mod tests {
     use super::*;
     use crate::model::Tau;
-    use crate::storage::{InMemory, Sstable, Wal};
+    use crate::services::store::{InMemory, Sstable, Wal};
 
     fn db() -> Database<i64> {
         Database::new(InMemory::new())
@@ -561,7 +572,7 @@ mod tests {
 
     #[test]
     fn checkpoint_rewrites_wal_after_compaction() {
-        use crate::storage::store::COMPACT_THRESHOLD;
+        use crate::services::store::store::COMPACT_THRESHOLD;
         let tmp_dir = tempfile::tempdir().unwrap();
         let wal_path = tmp_dir.path().join("test.wal");
 

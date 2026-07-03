@@ -2,7 +2,7 @@
 
 mod wire;
 
-use libtau::{ExecError, Executor, Output};
+use libtau::{ExecError, Kernel, Output};
 
 pub use wire::{DST_AUTH_PASS, DST_AUTH_USER, WireClient};
 
@@ -19,10 +19,11 @@ pub trait Target {
     }
 }
 
-/// In-process [`Executor`] (direct libtau path).
-pub struct DirectExecutor<'a>(pub &'a mut Executor);
+/// In-process [`Kernel`] (direct libtau path).  The kernel locks internally,
+/// so a shared reference suffices even for mutations.
+pub struct DirectKernel<'a>(pub &'a Kernel);
 
-impl Target for DirectExecutor<'_> {
+impl Target for DirectKernel<'_> {
     fn exec(&mut self, sql: &str) -> Result<Output, ExecError> {
         let (_, stmt) = libtau::parse(sql).unwrap_or_else(|_| panic!("parse failed: {sql}"));
         self.0.exec(&stmt)

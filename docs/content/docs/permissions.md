@@ -115,7 +115,7 @@ A grant on `"*"` is a wildcard. It combines with database-specific grants via bi
 
 ## Embedded use bypasses auth
 
-Library consumers calling `Executor::exec` directly never pass through `check_permission`. Auth is a server-side concern, enforced only when using `exec_as` / `exec_read_as` in the TCP server layer.
+Library consumers calling `Kernel::exec` directly never pass through the permission check. Policy lives in the kernel, enforced only on the `exec_as` / `exec_read_as` paths the TCP server uses — services themselves never check permissions.
 
 ---
 

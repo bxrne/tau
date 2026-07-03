@@ -11,7 +11,7 @@ use ratatui::{
 };
 use tui_textarea::TextArea;
 
-use libtau::{Response, storage::Codec};
+use libtau::{Codec, Response};
 
 use super::app::{App, Focus};
 

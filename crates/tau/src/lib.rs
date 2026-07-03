@@ -10,12 +10,13 @@ use std::collections::HashMap;
 use std::io;
 use std::net::TcpListener;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
 use clap::Parser;
-use libtau::{Executor, Perm, User, UserStore, crypto};
+use libtau::services::auth::{Perm, UserStore};
+use libtau::{Kernel, User, crypto};
 use tracing::{info, warn};
 
 use crate::config::{BackendChoice, Config, load_config};
@@ -31,10 +32,7 @@ pub struct Cli {
     pub config: Option<PathBuf>,
 }
 
-pub fn build_executor(
-    config: &Config,
-    enc_key: Option<[u8; 32]>,
-) -> io::Result<Arc<RwLock<Executor>>> {
+pub fn build_kernel(config: &Config, enc_key: Option<[u8; 32]>) -> io::Result<Arc<Kernel>> {
     let exec = match config.disk.backend {
         BackendChoice::Disk => {
             let dir = config.disk.path.clone().ok_or_else(|| {
@@ -55,7 +53,7 @@ pub fn build_executor(
                 compact_threshold = config.compact_threshold,
                 "starting with disk backend (each database durably WAL-backed)"
             );
-            Executor::with_disk_backend(
+            Kernel::with_disk_backend(
                 dir,
                 config.compact_threshold,
                 config.disk.compression_level,
@@ -73,8 +71,7 @@ pub fn build_executor(
                     )
                 })?;
                 info!(wal_path = %wal_path.display(), compact_threshold = config.compact_threshold, "starting with WAL");
-                let mut e =
-                    Executor::with_wal_threshold(wal_path, config.compact_threshold, enc_key)?;
+                let e = Kernel::with_wal_threshold(wal_path, config.compact_threshold, enc_key)?;
                 if config.wal.no_fsync_each {
                     e.set_wal_fsync_each(false);
                 }
@@ -83,15 +80,15 @@ pub fn build_executor(
                 }
                 e
             } else {
-                Executor::with_threshold(config.compact_threshold)
+                Kernel::with_threshold(config.compact_threshold)
             }
         }
     };
 
-    Ok(Arc::new(RwLock::new(exec)))
+    Ok(Arc::new(exec))
 }
 
-pub fn setup_auth(config: &Config, executor: &Arc<RwLock<Executor>>) -> io::Result<()> {
+pub fn setup_auth(config: &Config, kernel: &Arc<Kernel>) -> io::Result<()> {
     let mut store = match config.auth.users_file.as_ref() {
         Some(path) => UserStore::open(path)?,
         None => UserStore::new(),
@@ -111,10 +108,7 @@ pub fn setup_auth(config: &Config, executor: &Arc<RwLock<Executor>>) -> io::Resu
             "[auth] enabled = true but no users configured",
         ));
     }
-    executor
-        .write()
-        .expect("executor lock poisoned")
-        .set_users(store);
+    kernel.set_users(store);
     Ok(())
 }
 
@@ -133,10 +127,10 @@ pub fn run_server(cli: Cli) -> io::Result<()> {
         std::process::exit(1);
     });
 
-    let executor = build_executor(&config, enc_key)?;
+    let kernel = build_kernel(&config, enc_key)?;
 
     if config.auth.enabled {
-        setup_auth(&config, &executor)?;
+        setup_auth(&config, &kernel)?;
     }
 
     let tls_config: Option<Arc<rustls::ServerConfig>> = if config.tls.enabled {
@@ -149,7 +143,7 @@ pub fn run_server(cli: Cli) -> io::Result<()> {
     };
 
     if let Some(port) = config.metrics.port {
-        let metrics = executor.read().expect("executor lock poisoned").metrics();
+        let metrics = kernel.metrics();
         thread::Builder::new()
             .name("tau-metrics".into())
             .spawn(move || serve_metrics_http(port, metrics))
@@ -161,7 +155,7 @@ pub fn run_server(cli: Cli) -> io::Result<()> {
 
     accept_loop(
         listener,
-        executor,
+        kernel,
         tls_config,
         config.auth.enabled,
         config.limits.max_connections,

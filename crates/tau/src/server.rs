@@ -2,12 +2,12 @@ use std::fs::File;
 use std::io::{self, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
 
-use libtau::Executor;
+use libtau::Kernel;
 use rcgen::generate_simple_self_signed;
 use rustls::ServerConfig;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
@@ -62,14 +62,14 @@ pub fn build_tls_config(
 
 pub fn accept_loop(
     listener: TcpListener,
-    executor: Arc<RwLock<Executor>>,
+    kernel: Arc<Kernel>,
     tls_config: Option<Arc<ServerConfig>>,
     auth_enabled: bool,
     connection_limit: usize,
     idle_timeout: Option<Duration>,
 ) -> io::Result<()> {
     let active_connections = Arc::new(AtomicUsize::new(0));
-    let shared_metrics = executor.read().expect("executor lock poisoned").metrics();
+    let shared_metrics = kernel.metrics();
     for incoming in listener.incoming() {
         match incoming {
             Ok(stream) => {
@@ -90,7 +90,7 @@ pub fn accept_loop(
                 }
                 shared_metrics.connections.inc();
                 debug!(%peer, in_flight, "accepted connection");
-                let exec = executor.clone();
+                let exec = kernel.clone();
                 let tls = tls_config.clone();
                 let active_clone = active_connections.clone();
                 let metrics_clone = shared_metrics.clone();
@@ -116,7 +116,7 @@ pub fn accept_loop(
 pub fn handle_connection(
     stream: TcpStream,
     peer: std::net::SocketAddr,
-    exec: Arc<RwLock<Executor>>,
+    exec: Arc<Kernel>,
     tls_config: Option<Arc<ServerConfig>>,
     auth_enabled: bool,
     idle_timeout: Option<Duration>,

@@ -41,7 +41,7 @@
 //! grant       := GRANT  <perm-letters> ON <db-or-star> TO   <ident>
 //! revoke      := REVOKE <perm-letters> ON <db-or-star> FROM <ident>
 //!
-//! type      := int | float | str | bool | bytes
+//! type      := int | float | str | bool
 //! func      := min | max | avg | sum | count
 //! literal   := int | float | string | bool | null
 //! expr      := disjunction      (full operator-precedence grammar; see parser)
@@ -63,7 +63,6 @@ pub enum Type {
     Float,
     Str,
     Bool,
-    Bytes,
 }
 
 /// A literal value embedded in a query.  Floats use a string form so we can
@@ -291,14 +290,14 @@ pub enum Stmt {
     /// `GRANT <perms> ON <db|*> TO <user>` - grant per-database permissions.
     /// Requires admin on the target database (or global).
     Grant {
-        perms: crate::users::Perm,
+        perms: crate::services::auth::Perm,
         database: String,
         user: String,
     },
     /// `REVOKE <perms> ON <db|*> FROM <user>` - strip per-database permissions.
     /// Requires admin on the target database (or global).
     Revoke {
-        perms: crate::users::Perm,
+        perms: crate::services::auth::Perm,
         database: String,
         user: String,
     },
@@ -387,7 +386,6 @@ impl std::fmt::Display for Type {
             Type::Float => write!(f, "float"),
             Type::Str => write!(f, "str"),
             Type::Bool => write!(f, "bool"),
-            Type::Bytes => write!(f, "bytes"),
         }
     }
 }
@@ -646,7 +644,6 @@ mod tests {
         assert_eq!(Type::Float.to_string(), "float");
         assert_eq!(Type::Str.to_string(), "str");
         assert_eq!(Type::Bool.to_string(), "bool");
-        assert_eq!(Type::Bytes.to_string(), "bytes");
     }
 
     #[test]

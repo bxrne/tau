@@ -13,9 +13,10 @@ pub use spec::{Compaction, Encryption};
 use std::path::{Path, PathBuf};
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
-use libtau::{Executor, Perm, User, parse};
+use libtau::services::auth::Perm;
+use libtau::{Kernel, User, parse};
 use tau::harness::{EphemeralServer, HarnessOpts};
 use tempfile::TempDir;
 
@@ -64,8 +65,8 @@ impl ProfileWorkspace {
 }
 
 impl ProfileSpec {
-    pub fn bootstrap_executor(&self, paths: &ProfilePaths) -> Executor {
-        match self.storage {
+    pub fn bootstrap_kernel(&self, paths: &ProfilePaths) -> Kernel {
+        let kernel = match self.storage {
             Storage::Memory => bootstrap_memory(self.compact_threshold(), self.multi_db()),
             Storage::Wal => {
                 let p = paths.wal_path.as_ref().expect("wal path");
@@ -75,34 +76,44 @@ impl ProfileSpec {
                 let d = paths.disk_dir.as_ref().expect("disk dir");
                 bootstrap_disk(d, self.compact_threshold(), self.enc_key())
             }
-        }
+        };
+        // Pin this kernel's own virtual clock to the DST epoch. Per-kernel:
+        // simulations never share clock state, so they can run in parallel.
+        kernel
+            .clock()
+            .set_fixed_now_ms(crate::oracle::DST_TX_BASE_MS);
+        kernel
     }
 
-    /// Fresh isolated reference model — never derived from executor state.
+    /// Fresh isolated reference model — never derived from kernel state.
     pub fn bootstrap_oracle(self, paths: &ProfilePaths) -> Oracle {
         bootstrap_oracle_model(self, paths)
     }
 
-    /// Reopen the disk-backed executor from its existing manifest/run files
+    /// Reopen the disk-backed kernel from its existing manifest/run files
     /// without re-issuing DDL — models a process restart for the persistence
     /// checks.
     #[cfg(test)]
-    pub fn reopen_disk_executor(&self, paths: &ProfilePaths) -> Executor {
+    pub fn reopen_disk_kernel(&self, paths: &ProfilePaths) -> Kernel {
         let d = paths.disk_dir.as_ref().expect("disk dir");
-        reopen_disk(d, self.compact_threshold(), self.enc_key())
+        let kernel = reopen_disk(d, self.compact_threshold(), self.enc_key());
+        kernel
+            .clock()
+            .set_fixed_now_ms(crate::oracle::DST_TX_BASE_MS);
+        kernel
     }
 
-    /// Shared executor + ephemeral tau server for wire transport profiles.
+    /// Shared kernel + ephemeral tau server for wire transport profiles.
     pub fn spawn_wire_stack(
         &self,
         paths: &ProfilePaths,
-    ) -> (Arc<RwLock<Executor>>, EphemeralServer, WireClient) {
+    ) -> (Arc<Kernel>, EphemeralServer, WireClient) {
         assert!(self.is_wire(), "spawn_wire_stack requires wire transport");
-        let mut ex = self.bootstrap_executor(paths);
+        let mut ex = self.bootstrap_kernel(paths);
         if matches!(self.auth, Auth::On) {
             install_dst_auth(&mut ex);
         }
-        let shared = Arc::new(RwLock::new(ex));
+        let shared = Arc::new(ex);
         let server = EphemeralServer::spawn(
             Arc::clone(&shared),
             HarnessOpts {
@@ -119,16 +130,19 @@ impl ProfileSpec {
     }
 }
 
-fn install_dst_auth(ex: &mut Executor) {
+fn install_dst_auth(ex: &mut Kernel) {
     let mut grants = HashMap::new();
     grants.insert("*".to_string(), Perm::ALL);
-    ex.users_mut()
+    ex.auth()
+        .users()
+        .lock()
+        .expect("user store lock poisoned")
         .add(User::new(DST_AUTH_USER, DST_AUTH_PASS, grants))
         .expect("dst auth user");
 }
 
-fn bootstrap_memory(threshold: usize, multi_db: bool) -> Executor {
-    let mut ex = Executor::with_threshold(threshold);
+fn bootstrap_memory(threshold: usize, multi_db: bool) -> Kernel {
+    let mut ex = Kernel::with_threshold(threshold);
     exec(&mut ex, "CREATE DATABASE default");
     for lens in INT {
         exec(&mut ex, &format!("CREATE LENS {lens} int"));
@@ -145,8 +159,8 @@ fn bootstrap_memory(threshold: usize, multi_db: bool) -> Executor {
     ex
 }
 
-fn bootstrap_wal(wal_path: &Path, threshold: usize, enc_key: Option<[u8; 32]>) -> Executor {
-    let mut ex = Executor::with_wal_threshold(wal_path, threshold, enc_key).expect("WAL open");
+fn bootstrap_wal(wal_path: &Path, threshold: usize, enc_key: Option<[u8; 32]>) -> Kernel {
+    let ex = Kernel::with_wal_threshold(wal_path, threshold, enc_key).expect("WAL open");
     for lens in INT {
         let (_, stmt) = parse(&format!("CREATE LENS {lens} int")).unwrap();
         let _ = ex.exec(&stmt);
@@ -158,11 +172,11 @@ fn bootstrap_wal(wal_path: &Path, threshold: usize, enc_key: Option<[u8; 32]>) -
     ex
 }
 
-fn bootstrap_disk(dir: &Path, threshold: usize, enc_key: Option<[u8; 32]>) -> Executor {
-    let mut ex = Executor::with_disk_backend(
+fn bootstrap_disk(dir: &Path, threshold: usize, enc_key: Option<[u8; 32]>) -> Kernel {
+    let mut ex = Kernel::with_disk_backend(
         dir,
         threshold,
-        libtau::storage::DEFAULT_ZSTD_LEVEL,
+        libtau::DEFAULT_ZSTD_LEVEL,
         enc_key,
         true,
         None,
@@ -182,16 +196,16 @@ fn bootstrap_disk(dir: &Path, threshold: usize, enc_key: Option<[u8; 32]>) -> Ex
     ex
 }
 
-/// Reopen an existing disk-backed executor **without** re-issuing schema DDL —
+/// Reopen an existing disk-backed kernel **without** re-issuing schema DDL —
 /// `CREATE DATABASE` replays each database's persisted manifest schema, so
 /// lenses and policies come back automatically. Models a real process
 /// restart (used by the disk-persistence DST coverage).
 #[cfg(test)]
-pub fn reopen_disk(dir: &Path, threshold: usize, enc_key: Option<[u8; 32]>) -> Executor {
-    let mut ex = Executor::with_disk_backend(
+pub fn reopen_disk(dir: &Path, threshold: usize, enc_key: Option<[u8; 32]>) -> Kernel {
+    let mut ex = Kernel::with_disk_backend(
         dir,
         threshold,
-        libtau::storage::DEFAULT_ZSTD_LEVEL,
+        libtau::DEFAULT_ZSTD_LEVEL,
         enc_key,
         true,
         None,

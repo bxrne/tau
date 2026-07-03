@@ -230,120 +230,202 @@
 }
 
 /* ============================================================= */
-/* landing page (content/_index.md)                             */
+/* landing page (content/_index.md)                              */
 /* Scoped under .homepage-content so nothing leaks into docs.    */
-/* --astime marks *transaction time* only — color encodes the    */
-/* second clock, it is not decoration.                           */
+/* Color is semantics, not decoration:                           */
+/*   --accent  = valid time / the current belief                 */
+/*   --astime  = transaction time / a past belief                */
 /* ============================================================= */
 
 .homepage-content {
     --astime: #6fb6a6;
+    --astime-alpha: rgba(111, 182, 166, 0.14);
+    --panel: #2b2823;
 
-    /* ---- hero ---- */
-    .hero__title {
-        font-size: clamp(2rem, 6.2vw, 3.5rem);
-        line-height: 1.04;
-        letter-spacing: -0.02em;
-        max-width: 22ch;
-        margin: 0.1em 0 0.5rem;
-        border-bottom: none;
-        padding: 0;
-    }
-    .hero__title:after { content: none; }
+    .t-valid { color: var(--accent); }
+    .t-tx    { color: var(--astime); }
 
+    /* ---- hero: the lede carries the thesis ---- */
     .hero__lede {
-        font-size: 1.2rem;
-        line-height: 1.6;
-        max-width: 62ch;
-        margin: 0 0 1.5rem;
+        margin: 1.6rem 0 0.9rem;
+        font-size: 1.15rem;
+        line-height: 1.65;
         color: var(--color);
+        b { color: var(--accent); font-weight: 600; }
+        code { color: var(--accent); }
     }
-    .hero__lede b { color: var(--accent); font-weight: 600; }
-    .hero__lede .astime { color: var(--astime); font-weight: 600; }
-    .hero__lede code { color: var(--accent); }
+    .hero__links {
+        margin: 0 0 1.8rem;
+        font-size: 1rem;
+        color: var(--footnote-color);
+        a { color: var(--accent); }
+    }
 
-    /* ---- terminal transcript (the signature) ---- */
-    .term {
-        background: #211e1a;
+    /* ---- signature: the layer stack ----------------------------- */
+    /* Appends draw as bars over one valid-time axis; the probe line */
+    /* is the query. Hovering a query lights the layer that answers. */
+    .stack {
+        border: 2px solid var(--border-color);
+        background: var(--panel);
+        padding: 1rem 1.1rem 1.15rem;
+        margin: 0 0 0.6rem;
+    }
+    .stack__head {
+        display: flex;
+        justify-content: space-between;
+        font-size: 0.8rem;
+        letter-spacing: 0.08em;
+        margin-bottom: 0.85rem;
+        opacity: 0.9;
+    }
+    .stack__lanes { position: relative; display: grid; gap: 10px; }
+    .stack__lane {
+        display: grid;
+        grid-template-columns: 4.2rem 1fr;
+        align-items: stretch;
+        gap: 10px;
+    }
+    .stack__gen {
+        font-size: 0.8rem;
+        align-self: center;
+        text-align: right;
+    }
+    .stack__bar {
+        display: block;
+        padding: 0.5rem 0.8rem;
+        font-size: 0.88rem;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
         border: 1px solid var(--border-color);
-        border-left: 3px solid var(--accent);
-        padding: 1rem 1.15rem;
-        margin: 0 0 0.85rem;
-        overflow-x: auto;
-        font-size: 0.97rem;
-        line-height: 1.95;
+        transition: border-color 0.15s ease, box-shadow 0.15s ease;
+        em {
+            display: block;
+            font-style: normal;
+            font-size: 0.78rem;
+            color: var(--footnote-color);
+            margin-top: 2px;
+        }
     }
-    .term__line { display: block; white-space: pre; }
-    .term__p    { color: var(--accent); }
-    .term__c    { color: var(--footnote-color); }
-    .term__r    { color: var(--color); opacity: 0.8; }
-    .term__now  { color: var(--accent); }
-    .term__asof { color: var(--astime); }
-    .term__cap  { color: var(--footnote-color); font-size: 0.9rem; margin: 0 0 1.4rem; }
-    .term__cap .astime { color: var(--astime); }
-
-    /* ---- call-to-action row ---- */
-    .cta-row { display: flex; flex-wrap: wrap; gap: 12px; margin: 0 0 0.25rem; }
-    .cta {
-        display: inline-block;
-        padding: 10px 18px;
-        font-size: 1.05rem;
-        text-decoration: none;
-        border: 2px solid var(--accent);
-        background: var(--accent);
-        color: #211e1a;
-        font-weight: 600;
+    /* superseded belief: teal-tinged, visually beneath */
+    .stack__bar--old {
+        color: var(--astime);
+        background: var(--astime-alpha);
+        border-color: transparent;
+        opacity: 0.85;
     }
-    .cta:hover { background: transparent; color: var(--accent); }
-    .cta--ghost { background: transparent; color: var(--accent); }
-    .cta--ghost:hover { background: var(--accent-alpha-20); }
+    /* current belief: accent, on top */
+    .stack__bar--new {
+        color: var(--accent);
+        background: var(--accent-alpha-20);
+        border-color: var(--accent);
+    }
+    /* the probe: one valid-time instant crossing every generation */
+    .stack__probe {
+        position: absolute;
+        top: -6px;
+        bottom: -6px;
+        left: calc(4.2rem + 10px + 46%);
+        border-left: 2px dashed var(--color);
+        opacity: 0.55;
+        pointer-events: none;
+        i {
+            position: absolute;
+            top: -1.05rem;
+            left: 6px;
+            font-style: normal;
+            font-size: 0.72rem;
+            color: var(--footnote-color);
+            white-space: nowrap;
+        }
+    }
 
-    /* ---- two-clocks explainer ---- */
+    .stack__queries {
+        display: grid;
+        gap: 6px;
+        margin-top: 1.15rem;
+        padding-top: 0.9rem;
+        border-top: 1px solid var(--border-color);
+        font-size: 0.9rem;
+    }
+    .q {
+        display: block;
+        padding: 4px 6px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        cursor: default;
+    }
+    .q__prompt { color: var(--footnote-color); }
+    .q__arrow  { color: var(--footnote-color); }
+    .q__asof   { color: var(--astime); }
+    .q__note {
+        display: block;
+        font-size: 0.78rem;
+        color: var(--footnote-color);
+        margin: 1px 0 0 1.4rem;
+    }
+    .q--now b  { color: var(--accent); font-weight: 600; }
+    .q--asof b { font-weight: 600; }
+    .q--now:hover  { background: var(--accent-alpha-20); }
+    .q--asof:hover { background: var(--astime-alpha); }
+
+    /* hover a query → the answering layer lights up */
+    &:has(.q--now:hover) .stack__bar--new,
+    &:has(.q--now:focus-within) .stack__bar--new {
+        box-shadow: 0 0 0 2px var(--accent);
+    }
+    &:has(.q--asof:hover) .stack__bar--old,
+    &:has(.q--asof:focus-within) .stack__bar--old {
+        border-color: var(--astime);
+        box-shadow: 0 0 0 2px var(--astime);
+        opacity: 1;
+    }
+    &:has(.q--asof:hover) .stack__bar--new { opacity: 0.45; }
+
+    .stack__cap {
+        color: var(--footnote-color);
+        font-size: 0.9rem;
+        margin: 0 0 1.6rem;
+    }
+
+    /* ---- the two clocks, side by side ---- */
     .axes {
         display: grid;
         grid-template-columns: 1fr 1fr;
         border: 1px solid var(--border-color);
-        margin: 0.75rem 0 0;
+        margin: 0.6rem 0 0;
     }
     .axes > div { padding: 0.95rem 1.15rem; }
     .axes > div + div { border-left: 1px solid var(--border-color); }
     .axes h4 {
-        margin: 0 0 0.35rem;
-        font-size: 0.78rem;
-        letter-spacing: 0.09em;
+        margin: 0 0 0.4rem;
+        font-size: 0.85rem;
+        letter-spacing: 0.14em;
         text-transform: uppercase;
     }
     .axes--valid h4 { color: var(--accent); }
     .axes--tx    h4 { color: var(--astime); }
     .axes p { margin: 0; color: var(--footnote-color); font-size: 0.98rem; line-height: 1.55; }
     .axes code { color: var(--color); }
-    @media (max-width: 620px) {
+    @media (max-width: 683px) {
         .axes { grid-template-columns: 1fr; }
         .axes > div + div { border-left: none; border-top: 1px solid var(--border-color); }
+        .stack__bar { white-space: normal; }
+        .q { white-space: normal; }
     }
 
     /* ---- pillars: labelled rows, not cards ---- */
     .pillars { list-style: none; margin: 0.4rem 0 0; padding: 0; }
     .pillars li {
-        padding: 0.75rem 0;
-        border-top: 1px solid var(--border-color);
-        list-style: none;
-        line-height: 1.5;
+        margin: 0;
+        padding: 0.7rem 0;
+        border-bottom: 1px dashed var(--border-color);
     }
+    .pillars li:last-child { border-bottom: none; }
     .pillars li:before { content: none; }
     .pillars b { color: var(--accent); font-weight: 600; }
     .pillars span { color: var(--footnote-color); }
 
-    /* ---- use-case chips ---- */
-    .chips { display: flex; flex-wrap: wrap; gap: 10px; margin: 0.5rem 0 0; }
-    .chip {
-        border: 1px solid var(--border-color);
-        padding: 6px 13px;
-        text-decoration: none;
-        color: var(--color);
-        font-size: 0.95rem;
-        white-space: nowrap;
-    }
-    .chip:hover { border-color: var(--accent); color: var(--accent); }
-    .chip b { color: var(--accent); font-weight: 600; }
+    .colophon { color: var(--footnote-color); font-size: 0.88rem; }
 }

@@ -1,11 +1,11 @@
-//! Dynamic runtime value used by the query-language executor.
+//! Dynamic runtime value stored by every base lens.
 //!
-//! A `Value` is the executor's analogue of [`crate::ql::ast::Literal`].
-//! Every base lens in an executor-managed database stores `Value`s, so a
-//! single `Database<Value>` can back any declared lens type (`int`, `float`,
-//! `str`, `bool`, `bytes`). The executor enforces, per lens, that appended
-//! values match the declared type - derived lenses are unconstrained because
-//! their type is determined by the expression they wrap.
+//! A `Value` is the runtime analogue of [`crate::ql::ast::Literal`].
+//! Every base lens stores `Value`s, so a single `Database<Value>` can back
+//! any declared lens type (`int`, `float`, `str`, `bool`). The db service
+//! enforces, per lens, that appended values match the declared type - derived
+//! lenses are unconstrained because their type is determined by the
+//! expression they wrap.
 //!
 //! `Codec` is implemented so values can flow through the WAL.  The encoding
 //! is a one-character tag followed by the payload:
@@ -25,10 +25,10 @@ use std::io::{self, Read, Write};
 use std::sync::Arc;
 
 use crate::ql::ast::{Literal, Type};
-use crate::storage::Codec;
-use crate::storage::codec::Codec as DiskCodec;
+use crate::services::store::Codec;
+use crate::services::store::codec::Codec as DiskCodec;
 
-/// Dynamic value carried by every executor lens.
+/// Dynamic value carried by every lens.
 ///
 /// `Str` uses `Arc<str>` so that cloning a value (e.g. materialising range
 /// segments) is an atomic reference-count bump rather than a heap allocation.

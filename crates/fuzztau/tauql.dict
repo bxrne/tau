@@ -55,7 +55,6 @@ ty_int="int"
 ty_float="float"
 ty_str="str"
 ty_bool="bool"
-ty_bytes="bytes"
 
 # Aggregate functions (lowercase)
 agg_min="min"

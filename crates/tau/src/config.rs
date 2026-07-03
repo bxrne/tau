@@ -92,7 +92,7 @@ impl Default for DiskConfig {
         Self {
             backend: BackendChoice::Memory,
             path: None,
-            compression_level: libtau::storage::DEFAULT_ZSTD_LEVEL,
+            compression_level: libtau::DEFAULT_ZSTD_LEVEL,
         }
     }
 }
@@ -191,10 +191,7 @@ mod tests {
         assert_eq!(config.limits.max_connections, 1024);
         assert_eq!(config.limits.idle_timeout_secs, None);
         assert_eq!(config.disk.backend, BackendChoice::Memory);
-        assert_eq!(
-            config.disk.compression_level,
-            libtau::storage::DEFAULT_ZSTD_LEVEL
-        );
+        assert_eq!(config.disk.compression_level, libtau::DEFAULT_ZSTD_LEVEL);
     }
 
     #[test]
@@ -202,10 +199,7 @@ mod tests {
         let disk_config = DiskConfig::default();
         assert_eq!(disk_config.backend, BackendChoice::Memory);
         assert_eq!(disk_config.path, None);
-        assert_eq!(
-            disk_config.compression_level,
-            libtau::storage::DEFAULT_ZSTD_LEVEL
-        );
+        assert_eq!(disk_config.compression_level, libtau::DEFAULT_ZSTD_LEVEL);
     }
 
     #[test]

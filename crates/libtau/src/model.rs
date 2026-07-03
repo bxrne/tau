@@ -10,11 +10,11 @@ pub struct Bound {
 }
 
 /// Wall-clock milliseconds since the Unix epoch, honouring the [virtual clock
-/// override](crate::wall_clock) so transaction stamps are deterministic under
+/// clock](crate::clock::Clock) so transaction stamps are deterministic under
 /// simulation.
 #[inline]
 pub(crate) fn now_ms() -> i64 {
-    crate::wall_clock::now_ms()
+    crate::clock::system_now_ms()
 }
 
 /// An atomic temporal fact: value V is true over [start, end).

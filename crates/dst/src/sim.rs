@@ -1,48 +1,46 @@
-//! Tau [`libdst::DualSimulation`] over direct executor or wire target + isolated oracle.
+//! Tau [`libdst::DualSimulation`] over direct kernel or wire target + isolated oracle.
 
 use libdst::divergence::Divergence;
 use libdst::faults::{corrupt_file, truncate_file};
 use libdst::report::RunResult;
 use libdst::sim::{CheckpointAction, DualSimulation};
 use libdst::{SequentialOpts, run_sequential};
-use libtau::{Executor, parse, wall_clock};
+use libtau::{Kernel, parse};
 use rand::Rng;
 use rand::rngs::StdRng;
 use std::cell::RefCell;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::Arc;
 use tracing::{debug, error, warn};
 
-/// Serializes every simulation that drives the **process-global** virtual write
-/// clock (`libtau::wall_clock`). Each `TauSimulation` advances that clock per op;
-/// two simulations running concurrently (e.g. `cargo test`'s threaded profile
-/// tests) would stomp each other's `now`, making the SUT and oracle stamp
-/// mismatched `written_at`. Holding this lock for a simulation's lifetime keeps
-/// the shared clock coherent. Uncontended in the `dst` binary (profiles run
-/// sequentially).
-static SIM_CLOCK_LOCK: Mutex<()> = Mutex::new(());
-
-/// Acquire the shared virtual-clock lock, ignoring poisoning (a panicking test
-/// already fails; we do not want to cascade that into every later test).
-pub(crate) fn lock_clock() -> MutexGuard<'static, ()> {
-    SIM_CLOCK_LOCK.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-use crate::apply::{apply_dual, apply_dual_executor, sync_transactions};
+use crate::apply::{apply_dual, apply_dual_kernel, sync_transactions};
 use crate::btree;
 use crate::op::Op;
 use crate::oracle::Oracle;
 use crate::profile::{CHECKPOINT_EVERY, ProfileSpec, ProfileWorkspace};
-use crate::target::{DirectExecutor, Target, WireClient};
+use crate::target::{DirectKernel, Target, WireClient};
 use tau::harness::EphemeralServer;
 
 enum RunTarget {
-    Direct(Executor),
+    Direct(Kernel),
     Wire {
+        /// The server-side kernel, kept so the simulation can drive its
+        /// virtual clock in lock-step with the oracle's.
+        kernel: Arc<Kernel>,
         server: EphemeralServer,
         client: WireClient,
     },
+}
+
+impl RunTarget {
+    /// The kernel whose virtual clock this target's writes stamp from.
+    fn kernel(&self) -> &Kernel {
+        match self {
+            RunTarget::Direct(ex) => ex,
+            RunTarget::Wire { kernel, .. } => kernel,
+        }
+    }
 }
 
 pub struct TauSimulation {
@@ -56,22 +54,21 @@ pub struct TauSimulation {
     /// Reset to `0` whenever state is rebuilt from the op log, so live execution
     /// and checkpoint replay stamp identical transaction times.
     tx_tick: RefCell<i64>,
-    /// Held for the simulation's lifetime so no other simulation mutates the
-    /// process-global virtual clock concurrently. Dropped when the simulation is.
-    _clock_guard: MutexGuard<'static, ()>,
 }
 
 impl TauSimulation {
     pub fn new(profile: ProfileSpec) -> Self {
-        let clock_guard = lock_clock();
-        wall_clock::set_fixed_now_secs(crate::oracle::DST_NOW_SECS);
         let workspace = ProfileWorkspace::new(profile);
         let model = profile.bootstrap_oracle(&workspace.paths);
         let target = if profile.is_wire() {
-            let (_shared, server, client) = profile.spawn_wire_stack(&workspace.paths);
-            RunTarget::Wire { server, client }
+            let (kernel, server, client) = profile.spawn_wire_stack(&workspace.paths);
+            RunTarget::Wire {
+                kernel,
+                server,
+                client,
+            }
         } else {
-            RunTarget::Direct(profile.bootstrap_executor(&workspace.paths))
+            RunTarget::Direct(profile.bootstrap_kernel(&workspace.paths))
         };
         Self {
             profile,
@@ -80,7 +77,6 @@ impl TauSimulation {
             model: RefCell::new(model),
             in_transaction: RefCell::new(false),
             tx_tick: RefCell::new(0),
-            _clock_guard: clock_guard,
         }
     }
 
@@ -91,11 +87,14 @@ impl TauSimulation {
         crate::oracle::DST_TX_BASE_MS + generation * crate::oracle::DST_TX_STEP_MS
     }
 
-    /// Pin the engine + oracle wall clock to the current virtual transaction
-    /// time, so an append stamps a deterministic `written_at` and reads observe
-    /// a consistent `now`.
-    fn stamp_clock(&self) {
-        wall_clock::set_fixed_now_ms(self.virtual_now_ms());
+    /// Pin the target kernel's and the oracle's virtual clocks to the current
+    /// virtual transaction time, so an append stamps a deterministic
+    /// `written_at` and reads observe a consistent `now`.  Per-kernel clocks:
+    /// no process-global state, so simulations run in parallel.
+    fn stamp_clocks(&self, kernel: &Kernel, model: &mut Oracle) {
+        let now = self.virtual_now_ms();
+        kernel.clock().set_fixed_now_ms(now);
+        model.set_now_ms(now);
     }
 
     pub fn run(&mut self, n_ops: usize, rng: &mut StdRng) -> RunResult {
@@ -109,13 +108,17 @@ impl TauSimulation {
         )
     }
 
-    fn rebuild_direct_target(&self) -> Executor {
-        self.profile.bootstrap_executor(&self.workspace.paths)
+    fn rebuild_direct_target(&self) -> Kernel {
+        self.profile.bootstrap_kernel(&self.workspace.paths)
     }
 
     fn rebuild_wire_target(&self) -> RunTarget {
-        let (_shared, server, client) = self.profile.spawn_wire_stack(&self.workspace.paths);
-        RunTarget::Wire { server, client }
+        let (kernel, server, client) = self.profile.spawn_wire_stack(&self.workspace.paths);
+        RunTarget::Wire {
+            kernel,
+            server,
+            client,
+        }
     }
 
     fn rebuild_model(&self) -> Oracle {
@@ -130,7 +133,7 @@ impl TauSimulation {
     /// file (plus WAL rotation archives) from the disk directory. Each
     /// disk-backed database persists across these paired files, so all of
     /// them must be wiped together — leaving any stale file behind would let
-    /// a freshly-created executor pick up old state and diverge from the
+    /// a freshly-created kernel pick up old state and diverge from the
     /// freshly-rebuilt oracle.
     fn wipe_disk_dir(&self) {
         if let Some(dir) = self.workspace.paths.disk_dir.as_deref()
@@ -181,7 +184,7 @@ impl TauSimulation {
 
     /// Damage the WAL file in place — a short write (`corrupt = false`) or
     /// bit-rot / torn write (`corrupt = true`) — then reopen the WAL-backed
-    /// executor. Replaying a damaged WAL must not panic: tau applies the valid
+    /// kernel. Replaying a damaged WAL must not panic: tau applies the valid
     /// entry prefix and stops at the first bad CRC. The WAL is then removed and
     /// the caller rebuilds from the authoritative op log.
     fn wal_fault(&self, rng: &mut StdRng, corrupt: bool) {
@@ -204,7 +207,7 @@ impl TauSimulation {
         debug!(profile = %self.profile.name(), "WAL removed after fault");
     }
 
-    /// Reopen the (possibly damaged) WAL-backed executor. tau replays the valid
+    /// Reopen the (possibly damaged) WAL-backed kernel. tau replays the valid
     /// entry prefix and either recovers or returns a clean error on the first
     /// bad entry — it must never panic. The result is discarded; unlike
     /// [`Self::rebuild_direct_target`] this tolerates the error path instead of
@@ -213,7 +216,7 @@ impl TauSimulation {
         let Some(wal) = self.workspace.paths.wal_path.as_deref() else {
             return;
         };
-        match Executor::with_wal_threshold(
+        match Kernel::with_wal_threshold(
             wal,
             self.profile.compact_threshold(),
             self.profile.enc_key(),
@@ -222,6 +225,45 @@ impl TauSimulation {
             Err(e) => {
                 debug!(profile = %self.profile.name(), error = %e, "wal reopen after fault: clean error")
             }
+        }
+    }
+
+    /// In-flight WAL write fault: arm the target kernel's injector so the
+    /// *next* WAL write fails mid-statement, drive a probe append, and assert
+    /// the failure surfaced as a clean `Err` (the WAL-first invariant: no
+    /// panic, no half-applied statement).  The caller rebuilds from the op
+    /// log immediately after, so even a misbehaving target cannot perturb the
+    /// oracle comparison.  This exercises the failure *during* a write —
+    /// complementing the at-rest file damage of [`Self::wal_fault`] — and is
+    /// only possible because the injector lives at the kernel's storage
+    /// boundary, not in the filesystem.
+    fn wal_inflight_fault_probe(&self, step: usize) -> Vec<Divergence> {
+        let target = self.target.borrow();
+        let RunTarget::Direct(ex) = &*target else {
+            return vec![];
+        };
+        ex.faults().arm_wal_write_failure(1);
+        let (_, stmt) = parse("APPEND LENS a 0 1 0").expect("probe parse");
+        let res = ex.exec(&stmt);
+        // If the statement was rejected before reaching the WAL (e.g. no
+        // active database after a DROP), the fault never fired and nothing is
+        // proven — disarm and move on without a divergence.
+        let fired = !ex.faults().is_armed();
+        ex.faults().disarm();
+        if !fired {
+            return vec![];
+        }
+        match res {
+            Err(libtau::ExecError::Io(msg)) if msg.contains("injected") => {
+                warn!(step, profile = %self.profile.name(), "in-flight WAL fault: clean error");
+                vec![]
+            }
+            other => vec![Divergence::new(
+                step,
+                "[db] in-flight WAL write fault",
+                "Err(Io(injected fault: WAL write failed))",
+                format!("{other:?}"),
+            )],
         }
     }
 
@@ -266,16 +308,16 @@ impl TauSimulation {
         let Some(dir) = self.workspace.paths.disk_dir.as_deref() else {
             return;
         };
-        let opened = Executor::with_disk_backend(
+        let opened = Kernel::with_disk_backend(
             dir,
             self.profile.compact_threshold(),
-            libtau::storage::DEFAULT_ZSTD_LEVEL,
+            libtau::DEFAULT_ZSTD_LEVEL,
             self.profile.enc_key(),
             true,
             None,
         );
         match opened {
-            Ok(mut ex) => {
+            Ok(ex) => {
                 // `CREATE DATABASE` replays each database's persisted schema,
                 // forcing a read of the corrupted bytes.
                 for db in ["default", "aux"] {
@@ -316,13 +358,13 @@ impl TauSimulation {
 
     /// Network fault: drop the live wire connection and reconnect a fresh client
     /// to the *same* running server. The server keeps its in-memory state (the
-    /// executor, including any open transaction, is shared and outlives the
+    /// kernel, including any open transaction, is shared and outlives the
     /// connection), so the oracle and op log are untouched — this exercises the
     /// server's abrupt-disconnect teardown and the client's reconnect + re-auth
     /// path without losing data. Returns `Continue` with no divergences.
     fn network_drop_reconnect(&self) -> CheckpointAction {
         let mut target = self.target.borrow_mut();
-        if let RunTarget::Wire { server, client } = &mut *target {
+        if let RunTarget::Wire { server, client, .. } = &mut *target {
             let addr = format!("{}", server.addr);
             let was_in_tx = client.is_in_transaction();
             // Replacing `client` drops the old socket; the server observes the
@@ -361,9 +403,9 @@ impl TauSimulation {
         if self.profile.is_wire() {
             self.set_target(self.rebuild_wire_target());
             let mut target = self.target.borrow_mut();
-            if let RunTarget::Wire { client, .. } = &mut *target {
+            if let RunTarget::Wire { kernel, client, .. } = &mut *target {
                 for (i, op) in log.iter().enumerate() {
-                    self.stamp_clock();
+                    self.stamp_clocks(kernel, &mut model);
                     divergences.extend(apply_dual(i, op, client, &mut model));
                     *self.tx_tick.borrow_mut() += 1;
                 }
@@ -371,8 +413,8 @@ impl TauSimulation {
         } else {
             let mut direct = self.rebuild_direct_target();
             for (i, op) in log.iter().enumerate() {
-                self.stamp_clock();
-                divergences.extend(apply_dual_executor(i, op, &mut direct, &mut model));
+                self.stamp_clocks(&direct, &mut model);
+                divergences.extend(apply_dual_kernel(i, op, &mut direct, &mut model));
                 *self.tx_tick.borrow_mut() += 1;
             }
             self.set_target(RunTarget::Direct(direct));
@@ -393,7 +435,7 @@ impl TauSimulation {
 fn sync_transactions_on_target(target: &mut RunTarget, model: &mut Oracle) {
     match target {
         RunTarget::Direct(ex) => {
-            sync_transactions(&mut DirectExecutor(ex), model);
+            sync_transactions(&mut DirectKernel(ex), model);
         }
         RunTarget::Wire { client, .. } => {
             sync_transactions(client, model);
@@ -415,11 +457,14 @@ impl DualSimulation for TauSimulation {
     }
 
     fn apply(&mut self, step: usize, op: &Op) -> Vec<Divergence> {
-        self.stamp_clock();
         let divs = {
             let mut model = self.model.borrow_mut();
-            match &mut *self.target.borrow_mut() {
-                RunTarget::Direct(ex) => apply_dual_executor(step, op, ex, &mut model),
+            let mut target = self.target.borrow_mut();
+            let now = self.virtual_now_ms();
+            target.kernel().clock().set_fixed_now_ms(now);
+            model.set_now_ms(now);
+            match &mut *target {
+                RunTarget::Direct(ex) => apply_dual_kernel(step, op, ex, &mut model),
                 RunTarget::Wire { client, .. } => apply_dual(step, op, client, &mut model),
             }
         };
@@ -446,7 +491,7 @@ impl DualSimulation for TauSimulation {
         if self.profile.is_wire() {
             // Alternate two network-layer faults: an abrupt connection drop the
             // server must survive (state intact), and a full server crash that
-            // loses the in-memory executor and forces a rebuild + dual-replay.
+            // loses the in-memory kernel and forces a rebuild + dual-replay.
             if checkpoint.is_multiple_of(2) {
                 return self.network_drop_reconnect();
             }
@@ -460,12 +505,14 @@ impl DualSimulation for TauSimulation {
             // from the RNG rather than the checkpoint index means both variants
             // are exercised even in short CI runs with only a couple checkpoints.
             if checkpoint.is_multiple_of(2) {
+                // First fail a write *in flight* at the kernel's storage
+                // boundary, then damage the WAL file at rest; the rebuild
+                // from the op log wipes whatever both faults left behind.
+                let divergences = self.wal_inflight_fault_probe(step);
                 let corrupt = rng.gen_bool(0.5);
                 self.wal_fault(rng, corrupt);
                 self.reset_after_wal_fault();
-                CheckpointAction::ResetLog {
-                    divergences: vec![],
-                }
+                CheckpointAction::ResetLog { divergences }
             } else {
                 self.wal_dual_replay(log)
             }
@@ -656,17 +703,17 @@ mod profile_tests {
 
     /// Faithful disk restart (no wipe, no op-log replay to target): after writes
     /// that each went through the per-database WAL (fsynced by default),
-    /// re-opening the executor over the existing manifest/run + WAL files must
+    /// re-opening the kernel over the existing manifest/run + WAL files must
     /// see the same data and schema that the oracle has. This exercises the disk
-    /// backend's append_schema + append + WAL-replay paths + executor's
+    /// backend's append_schema + append + WAL-replay paths + kernel's
     /// CREATE DATABASE schema replay for a real process restart.
     #[test]
     fn pbt_disk_persists_data_and_schema_across_reopen() {
-        use crate::apply::apply_dual_executor;
+        use crate::apply::apply_dual_kernel;
         use crate::harness;
         use crate::op::Op;
         use crate::oracle::DeriveSpec;
-        use crate::target::DirectExecutor;
+        use crate::target::DirectKernel;
 
         let disk = ProfileSpec {
             storage: Storage::Disk,
@@ -678,7 +725,7 @@ mod profile_tests {
         let workspace = crate::profile::ProfileWorkspace::new(disk);
         let paths = &workspace.paths;
 
-        let mut target = disk.bootstrap_executor(paths);
+        let mut target = disk.bootstrap_kernel(paths);
         let mut model = disk.bootstrap_oracle(paths);
 
         // A small, varied sequence exercising DDL (extra lenses, derive, drop) + DML (appends)
@@ -710,7 +757,7 @@ mod profile_tests {
         ];
 
         for (i, op) in ops.iter().enumerate() {
-            let divs = apply_dual_executor(i, op, &mut target, &mut model);
+            let divs = apply_dual_kernel(i, op, &mut target, &mut model);
             assert!(divs.is_empty(), "pre-restart divergence at {i}: {divs:?}");
             // Right after the append that populates p, the data must be visible on target (before later DDL).
             if i == 1 {
@@ -755,9 +802,9 @@ mod profile_tests {
 
         // Drop the target (ensuring last flush completed) and reopen from the on-disk files.
         drop(target);
-        let mut restarted = disk.reopen_disk_executor(paths);
+        let mut restarted = disk.reopen_disk_kernel(paths);
         // Ensure tx flags are consistent (no tx in this sequence, but keep the helper honest).
-        crate::apply::sync_transactions(&mut DirectExecutor(&mut restarted), &mut model);
+        crate::apply::sync_transactions(&mut DirectKernel(&restarted), &mut model);
 
         // Post-restart, the reopened target must match the oracle for data and names.
         // (Schema for p, the appends to p and i0, the TTL on p, and absence of p2 were all
