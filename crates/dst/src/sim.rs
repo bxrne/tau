@@ -816,28 +816,21 @@ mod profile_tests {
 }
 
 #[cfg(test)]
-mod known_issues {
+mod regression {
     use super::*;
     use crate::profile::spec::{Compaction, Encryption, Storage};
     use crate::profile::{Auth, Transport};
     use rand::SeedableRng;
 
-    /// KNOWN ISSUE (tracked, not yet root-caused): under `Compaction::Stress`
-    /// (`compact_threshold = 4`), seed 26 diverges on `REDUCE a 33 515 sum`
-    /// after ~91 ops — the SUT undercounts relative to the oracle. Traced as
-    /// far as: the memtable-local, run-count, and absorbed-run-set states all
-    /// look individually correct at the divergence point (verified against
-    /// `Oracle::history_generations`), so the remaining gap is most likely a
-    /// value or tau-content mismatch inside one of the merged (multi-run)
-    /// layers produced by `Sstable::absorb_runs_for_lens`, not a missing
-    /// merge. Reproduces only at `Compaction::Stress` or beyond ~1600 ops at
-    /// `Compaction::Default` — outside what the rest of this suite's `ci_ops`
-    /// exercises for the `Sstable` profile, so it does not currently gate CI.
-    /// `#[ignore]`d until root-caused; run explicitly with
-    /// `cargo test -p dst known_issues:: -- --ignored`.
+    /// Regression guard for a `REDUCE … USING sum` divergence under
+    /// `Compaction::Stress` (`compact_threshold = 4`), seed 26, ~91 ops: a
+    /// lens's data could go un-consolidated across a memtable/run boundary
+    /// depending on checkpoint timing. Fixed by giving `Sstable` a single
+    /// compaction trigger (`consolidate_lens`, keyed off a persisted
+    /// cross-fragment `layer_count`) instead of three overlapping partial
+    /// ones — see `storage/sstable.rs`'s module doc.
     #[test]
-    #[ignore = "known Sstable REDUCE-sum divergence under Compaction::Stress, not yet root-caused"]
-    fn sstable_stress_seed26_reduce_sum_diverges() {
+    fn sstable_stress_seed26_reduce_sum_matches() {
         let p = ProfileSpec {
             storage: Storage::Sstable,
             compaction: Compaction::Stress,
@@ -847,6 +840,23 @@ mod known_issues {
         };
         let mut rng = StdRng::seed_from_u64(26);
         let r = run_profile(p, 300, &mut rng);
+        assert_eq!(r.errors, 0, "{:?}", r.first_divergence);
+    }
+
+    /// Same class of divergence as above, reproduced under
+    /// `Compaction::Default`, seed 1, at 1600 ops — beyond what `ci_ops`
+    /// exercises for the `Sstable` profile elsewhere in this suite.
+    #[test]
+    fn sstable_default_seed1_1600ops_reduce_sum_matches() {
+        let p = ProfileSpec {
+            storage: Storage::Sstable,
+            compaction: Compaction::Default,
+            encryption: Encryption::Plain,
+            transport: Transport::Direct,
+            auth: Auth::Off,
+        };
+        let mut rng = StdRng::seed_from_u64(1);
+        let r = run_profile(p, 1600, &mut rng);
         assert_eq!(r.errors, 0, "{:?}", r.first_divergence);
     }
 }
