@@ -35,7 +35,7 @@ compact_threshold = 8
 
 [disk]
 backend = "memory"          # "memory" (default) or "disk"
-# path = "/var/lib/tau/data"  # required for backend = "disk"; one <db>.dat per database
+# path = "/var/lib/tau/data"  # required for backend = "disk"; one <db>.manifest + <db>.run.<id> set per database
 compression_level = 3       # zstd level 1–22 (disk backend)
 
 [wal]

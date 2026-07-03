@@ -37,12 +37,6 @@ path = "fuzz_targets/parse_literal.rs"
 test = false
 doc = false
 
-[[bin]]
-name = "disk_decode"
-path = "fuzz_targets/disk_decode.rs"
-test = false
-doc = false
-
 [dependencies]
 libtau = { path = "../libtau" }
 

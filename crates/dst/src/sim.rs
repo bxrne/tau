@@ -33,7 +33,7 @@ use crate::apply::{apply_dual, apply_dual_executor, sync_transactions};
 use crate::btree;
 use crate::op::Op;
 use crate::oracle::Oracle;
-use crate::profile::{CHECKPOINT_EVERY, ProfileSpec, ProfileWorkspace, Storage};
+use crate::profile::{CHECKPOINT_EVERY, ProfileSpec, ProfileWorkspace};
 use crate::target::{DirectExecutor, Target, WireClient};
 use tau::harness::EphemeralServer;
 
@@ -126,12 +126,12 @@ impl TauSimulation {
         *self.target.borrow_mut() = target;
     }
 
-    /// Remove every on-disk-backend file (`.dat` for Disk; `.manifest` +
-    /// `.run.*` for Sstable) and `.wal` file (plus WAL rotation archives) from
-    /// the disk directory. Each disk-backed database persists across these
-    /// paired files, so all of them must be wiped together — leaving any
-    /// stale file behind would let a freshly-created executor pick up old
-    /// state and diverge from the freshly-rebuilt oracle.
+    /// Remove every on-disk-backend file (`.manifest` + `.run.*`) and `.wal`
+    /// file (plus WAL rotation archives) from the disk directory. Each
+    /// disk-backed database persists across these paired files, so all of
+    /// them must be wiped together — leaving any stale file behind would let
+    /// a freshly-created executor pick up old state and diverge from the
+    /// freshly-rebuilt oracle.
     fn wipe_disk_dir(&self) {
         if let Some(dir) = self.workspace.paths.disk_dir.as_deref()
             && let Ok(entries) = fs::read_dir(dir)
@@ -139,18 +139,17 @@ impl TauSimulation {
             for entry in entries.flatten() {
                 let path = entry.path();
                 let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                let is_dat = path.extension().is_some_and(|e| e == "dat");
                 let is_wal_or_archive = name.contains(".wal");
                 let is_sstable_file =
                     path.extension().is_some_and(|e| e == "manifest") || name.contains(".run.");
-                if is_dat || is_wal_or_archive || is_sstable_file {
+                if is_wal_or_archive || is_sstable_file {
                     let _ = fs::remove_file(path);
                 }
             }
         }
     }
 
-    /// Wipe `.dat`/`.wal` files and dual-replay the log (disk-backed profiles).
+    /// Wipe `.manifest`/`.run.*`/`.wal` files and dual-replay the log (disk-backed profiles).
     fn replay_dual_log(&self, log: &[Op]) -> CheckpointAction {
         self.wipe_disk_dir();
         self.dual_replay(log, "disk")
@@ -237,10 +236,9 @@ impl TauSimulation {
         self.finish_replay_state(&mut self.target.borrow_mut());
     }
 
-    /// Pick a random on-disk-backend data file from the disk directory, if any
-    /// exist: `<db>.dat` for `Storage::Disk`, or `<db>.manifest`/`<db>.run.*`
-    /// for `Storage::Sstable`. The listing is sorted before the seeded pick so
-    /// selection is deterministic for a given seed.
+    /// Pick a random on-disk-backend data file from the disk directory
+    /// (`<db>.manifest` or `<db>.run.*`), if any exist. The listing is sorted
+    /// before the seeded pick so selection is deterministic for a given seed.
     fn random_media_file(&self, rng: &mut StdRng) -> Option<PathBuf> {
         let dir = self.workspace.paths.disk_dir.as_deref()?;
         let mut candidates: Vec<PathBuf> = fs::read_dir(dir)
@@ -249,13 +247,7 @@ impl TauSimulation {
             .map(|e| e.path())
             .filter(|p| {
                 let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                match self.profile.storage {
-                    Storage::Disk => p.extension().is_some_and(|e| e == "dat"),
-                    Storage::Sstable => {
-                        p.extension().is_some_and(|e| e == "manifest") || name.contains(".run.")
-                    }
-                    Storage::Memory | Storage::Wal => false,
-                }
+                p.extension().is_some_and(|e| e == "manifest") || name.contains(".run.")
             })
             .collect();
         if candidates.is_empty() {
@@ -274,24 +266,14 @@ impl TauSimulation {
         let Some(dir) = self.workspace.paths.disk_dir.as_deref() else {
             return;
         };
-        let opened = match self.profile.storage {
-            Storage::Sstable => Executor::with_sstable_backend(
-                dir,
-                self.profile.compact_threshold(),
-                libtau::storage::DEFAULT_ZSTD_LEVEL,
-                self.profile.enc_key(),
-                true,
-                None,
-            ),
-            _ => Executor::with_disk_backend(
-                dir,
-                self.profile.compact_threshold(),
-                libtau::storage::DEFAULT_ZSTD_LEVEL,
-                self.profile.enc_key(),
-                true,
-                None,
-            ),
-        };
+        let opened = Executor::with_disk_backend(
+            dir,
+            self.profile.compact_threshold(),
+            libtau::storage::DEFAULT_ZSTD_LEVEL,
+            self.profile.enc_key(),
+            true,
+            None,
+        );
         match opened {
             Ok(mut ex) => {
                 // `CREATE DATABASE` replays each database's persisted schema,
@@ -488,8 +470,8 @@ impl DualSimulation for TauSimulation {
                 self.wal_dual_replay(log)
             }
         } else if self.profile.uses_disk_dir() {
-            // Even checkpoints damage a random `.dat` (truncate or corrupt) and
-            // probe tau's reopen path; every checkpoint then wipes the directory
+            // Even checkpoints damage a random on-disk file (truncate or corrupt)
+            // and probe tau's reopen path; every checkpoint then wipes the directory
             // and rebuilds from the authoritative op log, so the damage never
             // perturbs the oracle comparison.
             if checkpoint.is_multiple_of(2) {
@@ -674,8 +656,8 @@ mod profile_tests {
 
     /// Faithful disk restart (no wipe, no op-log replay to target): after writes
     /// that each went through the per-database WAL (fsynced by default),
-    /// re-opening the executor over the existing .dat + .wal files must see the
-    /// same data and schema that the oracle has. This exercises the disk
+    /// re-opening the executor over the existing manifest/run + WAL files must
+    /// see the same data and schema that the oracle has. This exercises the disk
     /// backend's append_schema + append + WAL-replay paths + executor's
     /// CREATE DATABASE schema replay for a real process restart.
     #[test]
@@ -830,9 +812,9 @@ mod regression {
     /// cross-fragment `layer_count`) instead of three overlapping partial
     /// ones — see `storage/sstable.rs`'s module doc.
     #[test]
-    fn sstable_stress_seed26_reduce_sum_matches() {
+    fn disk_stress_seed26_reduce_sum_matches() {
         let p = ProfileSpec {
-            storage: Storage::Sstable,
+            storage: Storage::Disk,
             compaction: Compaction::Stress,
             encryption: Encryption::Plain,
             transport: Transport::Direct,
@@ -845,11 +827,11 @@ mod regression {
 
     /// Same class of divergence as above, reproduced under
     /// `Compaction::Default`, seed 1, at 1600 ops — beyond what `ci_ops`
-    /// exercises for the `Sstable` profile elsewhere in this suite.
+    /// exercises for the `Disk` profile elsewhere in this suite.
     #[test]
-    fn sstable_default_seed1_1600ops_reduce_sum_matches() {
+    fn disk_default_seed1_1600ops_reduce_sum_matches() {
         let p = ProfileSpec {
-            storage: Storage::Sstable,
+            storage: Storage::Disk,
             compaction: Compaction::Default,
             encryption: Encryption::Plain,
             transport: Transport::Direct,

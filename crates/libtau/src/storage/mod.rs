@@ -1,12 +1,11 @@
-pub mod disk;
+pub mod codec;
 pub mod layers;
 pub mod memory;
 pub mod sstable;
 pub mod store;
 pub mod wal;
 
-pub use disk::DEFAULT_ZSTD_LEVEL;
-pub use disk::Disk;
+pub use codec::DEFAULT_ZSTD_LEVEL;
 pub use layers::{compact_layers, sweep_range};
 pub use memory::InMemory;
 pub use sstable::Sstable;

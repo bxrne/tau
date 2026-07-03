@@ -54,10 +54,9 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-fuzz
-      # Ensure each target's seed/corpus dir exists; seeds/disk_decode is not
-      # committed (the dir is gitignored), so create it for a cold cargo-fuzz run.
+      # Ensure each target's seed/corpus dir exists for a cold cargo-fuzz run.
       - name: Prepare corpus dirs
-        run: mkdir -p crates/fuzztau/seeds/parse crates/fuzztau/seeds/wire crates/fuzztau/seeds/disk_decode
+        run: mkdir -p crates/fuzztau/seeds/parse crates/fuzztau/seeds/wire
       # Build-check every target (covers the two we don't time-box below).
       - name: Build all fuzz targets
         run: cargo +nightly fuzz check --fuzz-dir crates/fuzztau --target $FUZZ_TARGET
@@ -68,8 +67,6 @@ jobs:
         run: cargo +nightly fuzz run --fuzz-dir crates/fuzztau --target $FUZZ_TARGET parse crates/fuzztau/seeds/parse -- -max_total_time=$FUZZ_TIME -dict=crates/fuzztau/tauql.dict -rss_limit_mb=2048
       - name: Fuzz wire decoder
         run: cargo +nightly fuzz run --fuzz-dir crates/fuzztau --target $FUZZ_TARGET wire crates/fuzztau/seeds/wire -- -max_total_time=$FUZZ_TIME -dict=crates/fuzztau/tauql.dict -rss_limit_mb=2048
-      - name: Fuzz binary disk decode
-        run: cargo +nightly fuzz run --fuzz-dir crates/fuzztau --target $FUZZ_TARGET disk_decode crates/fuzztau/seeds/disk_decode -- -max_total_time=$FUZZ_TIME -rss_limit_mb=2048
       - name: Upload fuzz reproducers
         if: failure()
         uses: actions/upload-artifact@v4

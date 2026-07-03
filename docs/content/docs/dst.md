@@ -92,18 +92,18 @@ Damage kinds — a short write (truncate) vs a length-preserving bit-flip run (c
 | Memory | Rebuild target + oracle, dual-replay op log |
 | WAL (odd) | Delete WAL + oracle replay; dual-replay op log |
 | WAL (even) | Truncate **or corrupt** the WAL; reopen-probe; fresh target; reset op log |
-| Disk (odd) | Wipe target `.dat`/`.wal` files, dual-replay op log (replay equivalence). A separate `pbt_disk_persists_*_across_reopen` test exercises faithful restart over the real persisted files (no wipe). |
-| Disk (even) | Truncate **or corrupt** a random `.dat`, reopen-probe, then wipe + dual-replay |
+| Disk (odd) | Wipe target `.manifest`/`.run.*`/`.wal` files, dual-replay op log (replay equivalence). A separate `pbt_disk_persists_*_across_reopen` test exercises faithful restart over the real persisted files (no wipe). |
+| Disk (even) | Truncate **or corrupt** a random manifest/run file, reopen-probe, then wipe + dual-replay |
 | Wire (odd) | Server crash: rebuild the whole wire stack (new server, fresh executor) + dual-replay |
 | Wire (even) | Network drop: sever the TCP connection and reconnect to the same live server; state survives, op log untouched |
 
-The disk corruption probe caught a real bug: a corrupted `.dat` could decode an inverted `[start, end)` interval and panic in `Tau::new`. The loader now validates intervals and bounds untrusted length prefixes, returning `InvalidData` instead.
+The disk corruption probe caught a real bug: a corrupted on-disk file could decode an inverted `[start, end)` interval and panic in `Tau::new`. The loader now validates intervals and bounds untrusted length prefixes, returning `InvalidData` instead.
 
 **Transactions** are enabled for memory/disk/wire profiles. WAL profiles use `WAL_EXCLUDED` tags in the behavior tree to skip transaction and multi-DB ops until single-DB WAL replay semantics are fully validated.
 
 For TTL, DST pins the wall clock via [`wall_clock::set_fixed_now_secs`](https://github.com/bxrne/tau/tree/master/crates/libtau/src/wall_clock.rs) (`1_700_000_000`).
 
-The `disk` backend (when selected) pairs each `<db>.dat` with a `<db>.wal`: appends and schema DDL (`CREATE`/`DERIVE`/`SET TTL`/`DROP`) go to the WAL first (fsynced by default), and `<db>.dat` is rewritten atomically only on checkpoint (compaction or `[wal].max_size_mb`). This makes acknowledged DML and lens definitions durable across clean restarts; `CREATE DATABASE <name>` on a disk executor re-opens `<db>.dat`, replays `<db>.wal` on top, and replays the schema section to restore base/derived lenses and TTL policies. The `pbt_disk_persists_data_and_schema_across_reopen` test in `sim.rs` covers this path under the DST harness.
+The `disk` backend (when selected) is an [`Sstable`](https://github.com/bxrne/tau/tree/master/crates/libtau/src/storage/sstable.rs) store paired with a `<db>.wal`: appends and schema DDL (`CREATE`/`DERIVE`/`SET TTL`/`DROP`) go to the WAL first (fsynced by default), and the memtable is flushed into a new immutable run only on checkpoint (compaction or `[wal].max_size_mb`) — never a whole-database rewrite. This makes acknowledged DML and lens definitions durable across clean restarts; `CREATE DATABASE <name>` on a disk executor re-opens the existing manifest, replays `<db>.wal` on top, and replays the schema section to restore base/derived lenses and TTL policies. The `pbt_disk_persists_data_and_schema_across_reopen` test in `sim.rs` covers this path under the DST harness.
 
 ## Concurrent phase
 

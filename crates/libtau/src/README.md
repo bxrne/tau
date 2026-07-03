@@ -12,7 +12,8 @@ The core engine library. All binaries depend only on this crate.
 | `ql/parser` | `nom`-based parser; entry point `parse()`, scalar helper `parse_literal()` |
 | `storage/store` | `Store<V>` trait; per-generation sweep-line compaction (`compact_layers`) — compacts within each `written_at` transaction-time generation so `AS OF`/`HISTORY` survive |
 | `storage/memory` | `InMemory<V>` — `FxHashMap`-backed, zero I/O |
-| `storage/disk` | `Disk<V>` — compressed binary file persisting layer data **and** schema DDL; optional AES-256-GCM encryption |
+| `storage/sstable` | `Sstable<V>` — the on-disk backend: immutable compressed run files + a small manifest, read-time MVCC, one compaction trigger; optional AES-256-GCM encryption |
+| `storage/codec` | Binary `Codec` trait (`write_encoded`/`read_encoded`) shared by on-disk formats |
 | `storage/wal` | `Wal` — write-ahead log with schema DDL replay |
 | `database` | `Database<V>` — owns a `Store` + optional `Wal`; clone-free `Arc<[Layer]>` (RCU) snapshots |
 | `executor` | `Executor` — registry of named databases + dispatch + permissions |

@@ -83,24 +83,47 @@ Cycle detection runs at `DERIVE` time by walking the dependency graph (`would_cy
 
 **`InMemory`**: a `HashMap<name, Arc<[Layer<V>]>>` with no I/O. Reads snapshot the per-lens stack with a pointer bump; appends rebuild it copy-on-write (RCU). Used for tests and ephemeral workloads.
 
-**`Disk`**: one compressed binary file per database (`<name>.dat`):
+**`Sstable`** (the `disk` backend): a memtable (the same RCU `Arc<[Layer]>` shape as `InMemory`) absorbs appends; on checkpoint it flushes into a new **immutable run file** instead of rewriting anything that already exists on disk, and a small atomically-rewritten **manifest** (`<name>.manifest`) tracks the live run ids:
 
 ```
+run file (<name>.run.<id>)
 header
-  magic   "TAUZ" (4 bytes)
-  version u8         # 2 (v1 files still readable; v2 adds a per-tau axis count)
+  magic   "TAUR" (4 bytes)
+  version u8
   flags   u8         # bit 0 = encrypted body
   crc32   u32 LE     # over magic+version+flags
-body  zstd-compressed payload, AES-256-GCM-encrypted after compression when flagged
-  payload
-    schema_count u32 LE        # persisted DDL statements
-    [ len u32 LE, utf8 bytes ] # CREATE LENS / DERIVE LENS / SET TTL / DROP LENS
-    [ DiskEntry... ]           # layer_id, written_at_ms, lens name, taus — until EOF
+body  zstd-compressed, AES-256-GCM-encrypted after compression when flagged
+  entry_count u32 LE
+  entries, sorted by (lens, coords[0].lo, coords[1..], written_at desc):
+    lens (len + utf8), layer_id u64 LE, written_at i64 LE, epoch u64 LE,
+    arity u8, arity × (lo i64 LE, hi i64 LE), value (encoded)
+footer  uncompressed (so a skip-check never decompresses the body), encrypted when flagged
+  per lens: name, min_start i64 LE, max_end i64 LE, count u32 LE,
+            a range-bucketed bloom filter over covered points
+trailer footer_len u32 LE (last 4 bytes — lets a reader seek from EOF to find the footer)
 ```
 
-On open, the header is integrity-checked, the body decompressed (and decrypted when flagged), the schema section read, then layer entries replayed into the in-memory layer stack with their original `written_at` timestamps — so `AT … AS OF` keeps working across a restart. The file is rewritten atomically (`.tmp` + rename) only on a checkpoint — not on every append, and not on every compaction either: a checkpoint fires when `[wal] max_size_mb` is reached, or every `CHECKPOINT_COMPACTION_INTERVAL` (8) compactions, whichever comes first. Durability for individual appends comes from the per-database WAL described below.
+A run is skipped **without decoding its body** when the footer proves the queried lens is
+absent, out of range, or (for a point query) the bloom filter rules the point out; a decoded
+run body is cached in memory, since a run is immutable once written. Reads merge the memtable
+with the runs and resolve newest-wins / `AS OF` **at read time** (stab the covering versions,
+`argmax written_at`, optionally `<= as_of`) instead of at write time.
 
-Encryption is AES-256-GCM with a random 12-byte nonce. The key is never stored; it must be supplied via `TAU_ENCRYPTION_KEY` at startup. The `FLAG_ENCRYPTED` bit prevents accidentally opening an encrypted file without a key.
+Compaction has exactly one trigger: a per-lens `layer_count` — the total across the memtable
+*and* every run, persisted in the manifest so it survives a restart — crossing
+`compact_threshold`, at which point every not-yet-absorbed run plus the memtable is merged into
+the canonical per-generation result (bumping the lens's epoch so the now-redundant run entries
+are ignored on read). This mirrors `InMemory`'s own threshold condition exactly. A separate,
+purely space-driven pass merges run *files* (not lens data) once their count grows too large;
+correctness never depends on that pass running.
+
+`DROP LENS` bumps a per-lens epoch (persisted in the manifest) so pre-drop run data is shadowed
+without touching old run files. Durability for individual appends comes from the per-database
+WAL described below; the manifest and run files are the checkpoint-time durability mechanism.
+
+Encryption is AES-256-GCM with a random 12-byte nonce, applied separately to the run body and
+footer. The key is never stored; it must be supplied via `TAU_ENCRYPTION_KEY` at startup. The
+encrypted-body flag prevents accidentally opening an encrypted file without a key.
 
 ### Write-Ahead Log
 
@@ -118,11 +141,11 @@ SE:<base64>                                             # encrypted schema DDL
 
 Schema entries carry the raw TauQL text of the DDL that defines a lens (`CREATE LENS`, `DERIVE LENS`, `SET TTL`, `UNSET TTL`, `DROP LENS`). On replay, these are re-parsed and executed with `in_replay = true`, which suppresses re-appending them to the WAL.
 
-The WAL is checkpointed when `[wal] max_size_mb` is reached, or every `CHECKPOINT_COMPACTION_INTERVAL` (8) compactions, whichever comes first: for the in-memory backend, a fresh snapshot of in-memory state is written to a new WAL file and swapped in, bounding disk usage. For the disk backend, the checkpoint instead rewrites the `.dat` file with the current live layers and truncates the WAL to just its schema lines — the `.dat` file and WAL together always hold exactly the live state, with the WAL covering everything appended since the last `.dat` rewrite. Compactions between checkpoints still shrink each lens to one layer per transaction-time generation in memory and in the WAL's logical replay (replaying an already-compacted layer plus its predecessors reproduces the same compacted result); they just don't each force a full `.dat` rewrite.
+The WAL is checkpointed when `[wal] max_size_mb` is reached, or every `CHECKPOINT_COMPACTION_INTERVAL` (8) compactions, whichever comes first: for the in-memory backend, a fresh snapshot of in-memory state is written to a new WAL file and swapped in, bounding disk usage. For the disk backend, the checkpoint instead flushes the `Sstable` memtable into a new run file and truncates the WAL to just its schema lines — the manifest/run files and WAL together always hold exactly the live state, with the WAL covering everything appended since the last flush. Compactions between checkpoints still shrink each lens to one canonical set of layers per transaction-time generation (in memory, in the runs, and in the WAL's logical replay); they just don't each force a run rewrite — only `consolidate_lens`'s cross-fragment merge does that, and only when a lens's total layer count crosses `compact_threshold`.
 
 ### Disk backend + WAL
 
-The `disk` backend pairs every `<name>.dat` file with a `<name>.wal` file in the same directory. `APPEND` writes go to the WAL first (fsynced by default) and only update the in-memory layer stack; the `.dat` file is rewritten in full only on checkpoint, as above. On startup, `<name>.dat` is loaded and then `<name>.wal` is replayed on top, recovering any appends made since the last checkpoint. Schema DDL persisted in an older `<name>.dat` (pre-WAL format) is migrated into `<name>.wal` the first time the database is opened under this scheme. The `[wal]` config's `no_fsync_each` and `max_size_mb` settings apply to these per-database WAL files.
+The `disk` backend pairs every database's `Sstable` store (`<name>.manifest` + `<name>.run.<id>` files) with a `<name>.wal` file in the same directory. `APPEND` writes go to the WAL first (fsynced by default) and only update the in-memory memtable; the memtable is flushed into a new run file only on checkpoint, as above — never a whole-database rewrite. On startup, the existing manifest is opened and then `<name>.wal` is replayed on top, recovering any appends made since the last checkpoint. The `[wal]` config's `no_fsync_each` and `max_size_mb` settings apply to these per-database WAL files.
 
 ### Compaction
 
