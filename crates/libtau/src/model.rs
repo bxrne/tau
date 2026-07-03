@@ -36,16 +36,6 @@ impl<V> Tau<V> {
         }
     }
 
-    /// Fallible constructor for untrusted input (decoding a persisted file or
-    /// WAL entry that may be corrupted). Returns `None` for a degenerate or
-    /// inverted interval instead of panicking like [`Tau::new`].
-    pub fn try_new(start: Timestamp, end: Timestamp, value: V) -> Option<Self> {
-        (start < end).then(|| Self {
-            coords: Arc::from([Bound { hi: end, lo: start }]),
-            value,
-        })
-    }
-
     /// Fallible N-dimensional constructor: one half-open `[lo, hi)` interval
     /// per axis, axis 0 being valid time. Returns `None` when `coords` is empty
     /// or any interval is degenerate or inverted.
@@ -329,10 +319,13 @@ mod tests {
     }
 
     #[test]
-    fn tau_try_new_returns_none_for_empty_or_inverted() {
-        assert!(Tau::try_new(0, 10, 1i32).is_some());
-        assert!(Tau::try_new(5, 5, 1i32).is_none(), "empty interval");
-        assert!(Tau::try_new(10, 5, 1i32).is_none(), "inverted interval");
+    fn tau_try_new_nd_returns_none_for_empty_or_inverted() {
+        assert!(Tau::try_new_nd(&[(0, 10)], 1i32).is_some());
+        assert!(Tau::try_new_nd(&[(5, 5)], 1i32).is_none(), "empty interval");
+        assert!(
+            Tau::try_new_nd(&[(10, 5)], 1i32).is_none(),
+            "inverted interval"
+        );
     }
 
     #[test]
