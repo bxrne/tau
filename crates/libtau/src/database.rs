@@ -3,7 +3,7 @@ use crate::model::{Layer, LayerId, Timestamp};
 use crate::storage::{Store, Wal, WalEntry, wal::Codec};
 use std::io;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 use tracing::{debug, info, instrument, warn};
@@ -45,12 +45,6 @@ where
     /// mutually exclusive. Query paths (`at_name`, range/reduce reads) do not
     /// take this lock and remain fully concurrent.
     write_lock: Arc<Mutex<()>>,
-    /// When `true` (default), `append` calls `checkpoint()` immediately after a
-    /// store-side compaction so the WAL never holds superseded entries.  Set to
-    /// `false` to defer that work to an explicit caller - useful in bulk-load
-    /// paths where many compactions fire and a single trailing checkpoint
-    /// suffices.
-    auto_checkpoint: AtomicBool,
     /// Compactions since the last checkpoint. Reset to 0 whenever a
     /// checkpoint runs; once it reaches [`CHECKPOINT_COMPACTION_INTERVAL`]
     /// a compaction-triggered checkpoint fires.
@@ -69,7 +63,6 @@ where
             store: self.store.clone(),
             wal: self.wal.clone(),
             write_lock: self.write_lock.clone(),
-            auto_checkpoint: AtomicBool::new(self.auto_checkpoint.load(Ordering::Relaxed)),
             compactions_since_checkpoint: AtomicUsize::new(
                 self.compactions_since_checkpoint.load(Ordering::Relaxed),
             ),
@@ -89,7 +82,6 @@ where
             store: Arc::new(RwLock::new(Box::new(store))),
             wal: None,
             write_lock: Arc::new(Mutex::new(())),
-            auto_checkpoint: AtomicBool::new(true),
             compactions_since_checkpoint: AtomicUsize::new(0),
             metrics: None,
         }
@@ -107,18 +99,9 @@ where
             store: Arc::new(RwLock::new(Box::new(store))),
             wal: Some(Arc::new(Mutex::new(wal))),
             write_lock: Arc::new(Mutex::new(())),
-            auto_checkpoint: AtomicBool::new(true),
             compactions_since_checkpoint: AtomicUsize::new(0),
             metrics: None,
         }
-    }
-
-    /// Control whether `append` automatically rewrites the WAL after a
-    /// compaction.  When disabled, the WAL grows past the live layer set but
-    /// each `append` avoids the rewrite cost (full read of every live layer
-    /// + atomic rename).  Call `Database::checkpoint` manually to compact.
-    pub fn set_auto_checkpoint(&self, on: bool) {
-        self.auto_checkpoint.store(on, Ordering::Relaxed);
     }
 
     /// Control per-record `flush + sync_data` on the WAL.  When `false` the
@@ -246,7 +229,7 @@ where
                 checkpoint_due = true;
             }
         }
-        if checkpoint_due && self.auto_checkpoint.load(Ordering::Relaxed) {
+        if checkpoint_due {
             debug!("checkpoint due; rewriting WAL");
             self.checkpoint_locked()?;
         }
@@ -618,7 +601,6 @@ mod tests {
 
         let store = InMemory::<i64>::new();
         let db = Database::open(store, &wal_path, None).unwrap();
-        db.set_auto_checkpoint(false); // isolate the explicit checkpoint below
 
         const N: i64 = 50;
         let db_appender = db.clone();
