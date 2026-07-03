@@ -6,9 +6,8 @@ template = "index.html"
 page_template = "page.html"
 +++
 
-<h1 class="hero__title">A database that never forgets what it used to believe.</h1>
 
-<p class="hero__lede">Tau is <b>bitemporal</b>: every fact records when it was true <span class="astime">and when you learned it</span>. Corrections are just appends — nothing is overwritten — and <code>AT … AS OF</code> replays any past belief, exactly.</p>
+<p class="hero__lede">Tau is <b>bitemporal</b>: every fact records when it was true and when you learned it. Corrections are just appends, nothing is overwritten and <code>AT … AS OF</code> replays any past belief, exactly.</p>
 
 <div class="term">
 <span class="term__line"><span class="term__p">τ:</span> APPEND LENS px 0 3600 100.4         <span class="term__c"># the 09:00 bar prints</span></span>
@@ -27,7 +26,6 @@ page_template = "page.html"
 <a class="cta cta--ghost" href="/docs/examples/">Browse examples</a>
 </div>
 
----
 
 ## Two clocks, one fact
 
@@ -44,7 +42,6 @@ Most stores have one axis of time and mutate in place. Tau keeps both axes and m
 </div>
 </div>
 
----
 
 ## What that buys you
 
@@ -61,7 +58,6 @@ Most stores have one axis of time and mutate in place. Tau keeps both axes and m
 <a class="chip" href="/docs/examples/#backtesting-point-in-time-correctness"><b>Backtesting</b> · point-in-time prices</a>
 </div>
 
----
 
 ## Quickstart
 
