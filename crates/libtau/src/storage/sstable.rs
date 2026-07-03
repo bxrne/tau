@@ -10,27 +10,33 @@
 //! already a naive LSM tree — this backend makes that explicit and on-disk:
 //!
 //! - a **memtable** (the same `Arc<[Layer]>` RCU stack `InMemory` uses) absorbs
-//!   appends and runs the existing in-memory `compact_layers` as before;
+//!   appends;
 //! - `checkpoint_flush` moves the memtable into a new **immutable run file**
 //!   instead of rewriting anything that already exists on disk;
 //! - a **manifest** (small, atomically rewritten) lists the live run ids;
 //! - reads merge the memtable with the runs, resolving newest-wins and
 //!   `AS OF` **at read time**: stab the covering versions, take
-//!   `argmax written_at` (optionally `<= as_of`). `compact_layers`'s orthotope
-//!   subtraction remains valid — it is now an optional space optimisation
-//!   (garbage-collecting versions no live generation can observe), not a
-//!   correctness dependency;
-//! - **run compaction** merges every live run into one on every checkpoint,
-//!   replaying `compact_layers` per lens (still per-transaction-generation,
-//!   still lossless) over entries reconstructed from all merged runs. This is
-//!   not just a space optimisation: per-lens compaction inside `Store::append`
-//!   only ever sees the memtable, so an occluding layer appended after an
-//!   older layer was already flushed to a run cannot be merged in memory —
-//!   only a full run merge closes that gap. Without it, a consumer that reads
-//!   raw layer structure without merging (`REDUCE … USING sum`/`avg`, which
-//!   deliberately does not collapse adjacent same-value segments) would see
-//!   extra, already-occluded segments that a single unified stack (`InMemory`,
-//!   `Disk`) never would.
+//!   `argmax written_at` (optionally `<= as_of`).
+//!
+//! # Compaction trigger
+//!
+//! A lens's data can be split across the memtable and any number of runs, but
+//! there is exactly **one** place that decides when to compact it:
+//! [`Sstable::consolidate_lens`], fired from [`Store::append`] whenever
+//! `layer_count[lens]` (a running total spanning memtable *and* every run,
+//! persisted in the manifest) exceeds `compact_threshold` — the identical
+//! condition and identical scope `InMemory::append` uses on its single
+//! unified `Vec<Layer>`. This one-trigger design replaces an earlier version
+//! with three overlapping, partial triggers (memtable-local count, an
+//! unconditional per-checkpoint absorb loop, and a run-count threshold reusing
+//! the same field for a different unit) whose gaps let a lens's data go
+//! un-consolidated in specific interleavings — invisible to `AT`/`RANGE`/
+//! `AS OF` (newest-wins doesn't care how many redundant older entries exist)
+//! but not to `REDUCE … USING sum`/`avg`, which deliberately counts raw,
+//! unmerged segments and so is directly sensitive to how many physical layers
+//! survive. `gc_runs` (merging run *files*, not lens data) is a separate,
+//! purely space-driven optimisation gated by its own `run_gc_threshold` — it
+//! never needs to run for `consolidate_lens`'s guarantee to hold.
 //!
 //! # Run file format
 //!
@@ -62,8 +68,10 @@
 //! A relevant run's body is decoded in full (all lenses it contains), not just
 //! the queried lens — there is no intra-run block index yet, only run-level
 //! skipping via the footer. That is the natural next optimisation; it was left
-//! out here to keep this landing reviewable. See `crates/libtau/src/storage/nd_index_eval.rs`
-//! for the sibling evaluation of intra-layer indexing.
+//! out here to keep this landing reviewable. A prior evaluation of intra-layer
+//! indexing (interval tree vs. linear fast-skip) reached the same conclusion
+//! for this backend's runs as it did for in-memory layers — see
+//! `storage/README.md`.
 
 use crate::crypto;
 use crate::model::{Layer, LayerId, Tau, Timestamp};
@@ -80,7 +88,7 @@ use std::sync::{Arc, RwLock};
 const RUN_MAGIC: &[u8] = b"TAUR";
 const RUN_VERSION: u8 = 1;
 const MANIFEST_MAGIC: &[u8] = b"TAUM";
-const MANIFEST_VERSION: u8 = 1;
+const MANIFEST_VERSION: u8 = 2;
 const FLAG_ENCRYPTED: u8 = 0x01;
 const HEADER_LEN: usize = 4 + 1 + 1 + 4; // magic + version + flags + crc32
 const MAX_AXES: usize = 64;
@@ -563,6 +571,13 @@ struct ManifestData {
     epochs: Vec<(String, u64)>,
     run_ids: Vec<u64>,
     next_run_id: u64,
+    /// Per-lens total layer count spanning memtable + every run — the
+    /// `consolidate_lens` trigger's state. Must be persisted: it is not
+    /// derivable cheaply from the manifest's other fields (run footers only
+    /// carry tau counts, not layer counts), and starting it at 0 after a
+    /// restart would undercount a lens's pre-restart backlog, silently
+    /// raising its effective compaction threshold.
+    layer_counts: Vec<(String, usize)>,
 }
 
 fn write_manifest(path: &Path, data: &ManifestData, key: Option<[u8; 32]>) -> io::Result<()> {
@@ -585,6 +600,11 @@ fn write_manifest(path: &Path, data: &ManifestData, key: Option<[u8; 32]>) -> io
         body.extend_from_slice(&id.to_le_bytes());
     }
     body.extend_from_slice(&data.next_run_id.to_le_bytes());
+    body.extend_from_slice(&(data.layer_counts.len() as u32).to_le_bytes());
+    for (name, count) in &data.layer_counts {
+        write_str(&mut body, name)?;
+        body.extend_from_slice(&(*count as u64).to_le_bytes());
+    }
     body.extend_from_slice(&checksum(&body).to_le_bytes());
 
     let flags = if key.is_some() { FLAG_ENCRYPTED } else { 0 };
@@ -642,12 +662,20 @@ fn read_manifest(path: &Path, key: Option<[u8; 32]>) -> io::Result<ManifestData>
         run_ids.push(read_u64(&mut cur)?);
     }
     let next_run_id = read_u64(&mut cur)?;
+    let layer_count_n = read_u32(&mut cur)? as usize;
+    let mut layer_counts = Vec::with_capacity(layer_count_n.min(1 << 16));
+    for _ in 0..layer_count_n {
+        let name = read_str(&mut cur)?;
+        let count = read_u64(&mut cur)? as usize;
+        layer_counts.push((name, count));
+    }
     Ok(ManifestData {
         schema,
         live_lenses,
         epochs,
         run_ids,
         next_run_id,
+        layer_counts,
     })
 }
 
@@ -687,12 +715,15 @@ struct SstableInner<V> {
     lens_epoch: HashMap<String, u64>,
     next_run_id: u64,
     /// Run ids already folded into the memtable per lens by
-    /// [`Sstable::absorb_runs_for_lens`] (or known to hold nothing at that
-    /// lens's current epoch) — an in-memory-only cache so repeated
-    /// threshold-crossings for the same lens don't repeatedly decode a run
-    /// that has nothing new to contribute. Not persisted: on reopen it starts
-    /// empty and the first absorb for each lens simply rebuilds it.
+    /// [`Sstable::consolidate_lens`] (or known to hold nothing at that lens's
+    /// current epoch) — an in-memory-only cache so a run already accounted
+    /// for is never decoded twice. Not persisted: on reopen it starts empty
+    /// and the first consolidation for each lens simply rebuilds it.
     absorbed: HashMap<String, HashSet<u64>>,
+    /// Total layer count per lens spanning memtable + every run — the single
+    /// signal `Store::append` checks against `compact_threshold`. See the
+    /// module doc's "Compaction trigger" section. Persisted (manifest).
+    layer_count: HashMap<String, usize>,
 }
 
 /// On-disk SSTable + MVCC store. See the module docs for the format and design.
@@ -700,9 +731,13 @@ pub struct Sstable<V> {
     base: PathBuf,
     key: Option<[u8; 32]>,
     compression_level: i32,
-    /// Memtable per-lens layer count that triggers in-memory `compact_layers`
-    /// (same knob and semantics as `InMemory`/`Disk`).
+    /// Per-lens layer-count threshold that triggers `consolidate_lens` (same
+    /// knob and semantics as `InMemory`/`Disk`'s `compact_threshold`).
     compact_threshold: usize,
+    /// Live run *file* count threshold that triggers `gc_runs` — a purely
+    /// space-driven optimisation, independent of `compact_threshold` and not
+    /// required for `consolidate_lens`'s correctness guarantee to hold.
+    run_gc_threshold: usize,
     inner: RwLock<SstableInner<V>>,
 }
 
@@ -745,6 +780,7 @@ impl<V: Clone + PartialEq + Codec> Sstable<V> {
                 lens_epoch: data.epochs.into_iter().collect(),
                 next_run_id: data.next_run_id.max(1),
                 absorbed: HashMap::default(),
+                layer_count: data.layer_counts.into_iter().collect(),
             }
         } else {
             SstableInner {
@@ -755,6 +791,7 @@ impl<V: Clone + PartialEq + Codec> Sstable<V> {
                 lens_epoch: HashMap::default(),
                 next_run_id: 1,
                 absorbed: HashMap::default(),
+                layer_count: HashMap::default(),
             }
         };
         let store = Self {
@@ -762,6 +799,7 @@ impl<V: Clone + PartialEq + Codec> Sstable<V> {
             key,
             compression_level: DEFAULT_ZSTD_LEVEL,
             compact_threshold: crate::storage::store::COMPACT_THRESHOLD,
+            run_gc_threshold: crate::storage::store::COMPACT_THRESHOLD,
             inner: RwLock::new(inner),
         };
         if !manifest_path.exists() {
@@ -773,6 +811,10 @@ impl<V: Clone + PartialEq + Codec> Sstable<V> {
 
     pub fn set_compact_threshold(&mut self, n: usize) {
         self.compact_threshold = n;
+    }
+
+    pub fn set_run_gc_threshold(&mut self, n: usize) {
+        self.run_gc_threshold = n;
     }
 
     pub fn set_compression_level(&mut self, level: i32) {
@@ -790,6 +832,11 @@ impl<V: Clone + PartialEq + Codec> Sstable<V> {
                 .collect(),
             run_ids: inner.runs.iter().map(|r| r.id).collect(),
             next_run_id: inner.next_run_id,
+            layer_counts: inner
+                .layer_count
+                .iter()
+                .map(|(k, v)| (k.clone(), *v))
+                .collect(),
         };
         write_manifest(&Self::manifest_path(&self.base), &data, self.key)
     }
@@ -842,30 +889,79 @@ impl<V: Clone + PartialEq + Codec> Sstable<V> {
         )
     }
 
-    /// Flush the memtable into a new run (no-op when empty), then
-    /// unconditionally merge every live run into one.
+    /// The sole compaction trigger (see the module doc's "Compaction trigger"
+    /// section): merge *every* physical fragment of `lens` — every
+    /// not-yet-absorbed run plus the current memtable — into the canonical
+    /// per-generation result, replace the memtable entry with it, and record
+    /// the new total in `layer_count[lens]`. Runs actually pulled in have
+    /// their ids recorded in `absorbed[lens]` and the lens's epoch bumped, so
+    /// their now-redundant physical entries are ignored on read (reusing the
+    /// same epoch mechanism `drop_lens` uses to shadow pre-drop data); a pure
+    /// memtable-only consolidation (no runs yet, or all already absorbed)
+    /// does neither, since there is nothing to invalidate.
     ///
-    /// Consolidation runs on **every** call, not just past a run-count
-    /// threshold: a lens flushed to a run here might already have older,
-    /// now-occluded run data from an earlier flush — `RANGE`/`AT`/`AS OF` don't
-    /// care (newest-wins resolution works regardless of how many redundant
-    /// older entries exist), but `REDUCE … USING sum`/`avg` deliberately counts
-    /// raw, unmerged boundary segments, so it is directly sensitive to that
-    /// gap. [`Self::absorb_runs_for_lens`] closes it per lens, cheaply (its own
-    /// `absorbed` cache means a run already folded in is never re-decoded);
-    /// calling it here for every lens about to flush guarantees no lens can
-    /// accumulate cross-run duplication just because its own memtable count
-    /// never happened to cross `compact_threshold` between two flushes. Full
-    /// multi-run consolidation ([`Self::compact_runs`]) stays a throttled,
-    /// run-count-gated space optimisation — merging *every* run's *every*
-    /// lens on every flush would mean decoding the whole database each time,
-    /// defeating the point of an LSM. Caller must hold `inner` for writing.
-    fn flush_and_maybe_compact(&self, inner: &mut SstableInner<V>) -> io::Result<()> {
-        if !inner.memtable.is_empty() {
-            let lenses: Vec<String> = inner.memtable.keys().cloned().collect();
-            for lens in &lenses {
-                self.absorb_runs_for_lens(inner, lens)?;
+    /// Called from exactly one place — [`Store::append`], when
+    /// `layer_count[lens]` crosses `compact_threshold` — so a lens's
+    /// cross-fragment correctness is enforced under the identical condition
+    /// and identical scope `InMemory::append` gets automatically from its one
+    /// unified `Vec<Layer>`. Caller must hold `inner` for writing.
+    fn consolidate_lens(&self, inner: &mut SstableInner<V>, lens: &str) -> io::Result<()> {
+        let epoch = *inner.lens_epoch.get(lens).unwrap_or(&0);
+        let mut layers: Vec<Layer<V>> = Vec::new();
+        let mut absorbed_ids: Vec<u64> = Vec::new();
+
+        if !inner.runs.is_empty() {
+            // Prune ids for runs that no longer exist (deleted by a prior
+            // `gc_runs`) so this set stays bounded by the current run count
+            // instead of growing with the total number of runs ever created.
+            let live_ids: HashSet<u64> = inner.runs.iter().map(|r| r.id).collect();
+            if let Some(set) = inner.absorbed.get_mut(lens) {
+                set.retain(|id| live_ids.contains(id));
             }
+            let already = inner.absorbed.get(lens);
+            let pending: Vec<u64> = inner
+                .runs
+                .iter()
+                .filter(|run| {
+                    run.stats.contains_key(lens) && !already.is_some_and(|s| s.contains(&run.id))
+                })
+                .map(|run| run.id)
+                .collect();
+            for run in inner.runs.iter().filter(|r| pending.contains(&r.id)) {
+                layers.extend(Self::run_layers_for(run, self.key, lens, epoch)?);
+            }
+            absorbed_ids = pending;
+        }
+        if let Some(mem) = inner.memtable.get(lens) {
+            layers.extend(mem.iter().cloned());
+        }
+        // compact_layers requires equal-written_at layers to be contiguous;
+        // concatenating multiple runs' reconstructions does not guarantee
+        // that on its own.
+        layers.sort_by_key(|l| (l.written_at, l.id));
+        compact_layers(&mut layers);
+
+        if !absorbed_ids.is_empty() {
+            inner
+                .absorbed
+                .entry(lens.to_string())
+                .or_default()
+                .extend(absorbed_ids);
+            *inner.lens_epoch.entry(lens.to_string()).or_insert(0) += 1;
+        }
+        inner.layer_count.insert(lens.to_string(), layers.len());
+        inner.memtable.insert(lens.to_string(), Arc::from(layers));
+        self.persist_manifest_locked(inner)
+    }
+
+    /// Flush the current memtable into a new run file (no-op when empty),
+    /// then GC old run files once their count crosses `run_gc_threshold`.
+    /// Purely a durability/space operation: correctness never depends on
+    /// this running, since [`Self::consolidate_lens`] already guarantees a
+    /// lens's cross-fragment state whenever it matters. Caller must hold
+    /// `inner` for writing.
+    fn flush_memtable_to_run(&self, inner: &mut SstableInner<V>) -> io::Result<()> {
+        if !inner.memtable.is_empty() {
             let mut entries: Vec<RunEntry<V>> = Vec::new();
             for (lens, layers) in inner.memtable.iter() {
                 let epoch = *inner.lens_epoch.get(lens).unwrap_or(&0);
@@ -897,8 +993,8 @@ impl<V: Clone + PartialEq + Codec> Sstable<V> {
             }
             inner.memtable.clear();
         }
-        if inner.runs.len() > self.compact_threshold {
-            self.compact_runs(inner)?;
+        if inner.runs.len() > self.run_gc_threshold {
+            self.gc_runs(inner)?;
         }
         Ok(())
     }
@@ -906,10 +1002,11 @@ impl<V: Clone + PartialEq + Codec> Sstable<V> {
     /// Merge every live run into one, replaying the existing per-generation
     /// lossless `compact_layers` per lens so `AS OF`/`HISTORY` stay exact.
     /// Old run files are deleted only after the merged run is durably written
-    /// and the manifest no longer references them, so a crash mid-compaction
-    /// never loses data (worst case: an orphaned run file next to a manifest
-    /// that already ignores it).
-    fn compact_runs(&self, inner: &mut SstableInner<V>) -> io::Result<()> {
+    /// and the manifest no longer references them, so a crash mid-GC never
+    /// loses data (worst case: an orphaned run file next to a manifest that
+    /// already ignores it). Purely a space optimisation — see
+    /// [`Self::consolidate_lens`] for the actual correctness mechanism.
+    fn gc_runs(&self, inner: &mut SstableInner<V>) -> io::Result<()> {
         if inner.runs.len() <= 1 {
             return Ok(());
         }
@@ -971,72 +1068,6 @@ impl<V: Clone + PartialEq + Codec> Sstable<V> {
         }
         Ok(())
     }
-
-    /// Merge `lens`'s existing on-disk run data into its (already
-    /// memtable-compacted) layer set, replacing the memtable entry with the
-    /// fully consolidated result and bumping the lens's epoch so the
-    /// now-redundant, still-physically-present run entries are ignored on
-    /// read (reusing the same epoch mechanism `drop_lens` uses to shadow
-    /// pre-drop data).
-    ///
-    /// Per-lens compaction inside [`Store::append`] only ever sees the
-    /// memtable — it cannot merge away a layer that already sits in a run. If
-    /// nothing closed that gap, a lens could cross `compact_threshold`
-    /// (triggering memtable-only compaction) many times between two
-    /// `checkpoint_flush` calls (`Database` throttles those independently, for
-    /// WAL-trimming purposes) while an occluding layer and the run layer it
-    /// occludes both stay physically distinct. `RANGE`/`AT`/`AS OF` are
-    /// unaffected either way (newest-wins resolution does not care how many
-    /// redundant older entries exist), but `REDUCE … USING sum`/`avg`
-    /// deliberately counts raw, unmerged boundary segments, so it is directly
-    /// sensitive to that gap. Called whenever memtable compaction fires, so
-    /// this lens's overall layer count (not just its memtable slice) tracks
-    /// the same threshold-crossing cadence a single unified stack would.
-    fn absorb_runs_for_lens(&self, inner: &mut SstableInner<V>, lens: &str) -> io::Result<()> {
-        if inner.runs.is_empty() {
-            return Ok(());
-        }
-        // Prune ids for runs that no longer exist (deleted by a prior
-        // `compact_runs`) so this set stays bounded by the current run count
-        // instead of growing with the total number of runs ever created.
-        let live_ids: HashSet<u64> = inner.runs.iter().map(|r| r.id).collect();
-        if let Some(set) = inner.absorbed.get_mut(lens) {
-            set.retain(|id| live_ids.contains(id));
-        }
-        let already = inner.absorbed.get(lens);
-        let pending: Vec<u64> = inner
-            .runs
-            .iter()
-            .filter(|run| {
-                run.stats.contains_key(lens) && !already.is_some_and(|s| s.contains(&run.id))
-            })
-            .map(|run| run.id)
-            .collect();
-        if pending.is_empty() {
-            return Ok(());
-        }
-        let epoch = *inner.lens_epoch.get(lens).unwrap_or(&0);
-        let mut layers: Vec<Layer<V>> = Vec::new();
-        for run in inner.runs.iter().filter(|r| pending.contains(&r.id)) {
-            layers.extend(Self::run_layers_for(run, self.key, lens, epoch)?);
-        }
-        if let Some(mem) = inner.memtable.get(lens) {
-            layers.extend(mem.iter().cloned());
-        }
-        // compact_layers requires equal-written_at layers to be contiguous;
-        // concatenating multiple runs' reconstructions does not guarantee
-        // that on its own.
-        layers.sort_by_key(|l| (l.written_at, l.id));
-        compact_layers(&mut layers);
-        inner
-            .absorbed
-            .entry(lens.to_string())
-            .or_default()
-            .extend(pending);
-        inner.memtable.insert(lens.to_string(), Arc::from(layers));
-        *inner.lens_epoch.entry(lens.to_string()).or_insert(0) += 1;
-        self.persist_manifest_locked(inner)
-    }
 }
 
 impl<V: Clone + PartialEq + Codec + Send + Sync + 'static> Store<V> for Sstable<V> {
@@ -1045,21 +1076,20 @@ impl<V: Clone + PartialEq + Codec + Send + Sync + 'static> Store<V> for Sstable<
             .inner
             .write()
             .map_err(|_| io::Error::other("sstable lock poisoned"))?;
-        let mut layers: Vec<Layer<V>> = inner
+        let mut mem: Vec<Layer<V>> = inner
             .memtable
             .get(lens)
             .map(|a| a.to_vec())
             .unwrap_or_default();
-        let before = layers.len();
-        layers.push(layer);
+        mem.push(layer);
+        inner.memtable.insert(lens.to_string(), Arc::from(mem));
+        let before = inner.layer_count.get(lens).copied().unwrap_or(0) + 1;
+        inner.layer_count.insert(lens.to_string(), before);
         let mut did_compact = false;
-        if layers.len() > self.compact_threshold {
-            compact_layers(&mut layers);
-            did_compact = layers.len() < before + 1;
-            inner.memtable.insert(lens.to_string(), Arc::from(layers));
-            self.absorb_runs_for_lens(&mut inner, lens)?;
-        } else {
-            inner.memtable.insert(lens.to_string(), Arc::from(layers));
+        if before > self.compact_threshold {
+            self.consolidate_lens(&mut inner, lens)?;
+            let after = inner.layer_count.get(lens).copied().unwrap_or(0);
+            did_compact = after < before;
         }
         inner.live_lenses.insert(lens.to_string());
         Ok(did_compact)
@@ -1162,6 +1192,7 @@ impl<V: Clone + PartialEq + Codec + Send + Sync + 'static> Store<V> for Sstable<
         };
         inner.memtable.remove(lens);
         inner.live_lenses.remove(lens);
+        inner.layer_count.remove(lens);
         *inner.lens_epoch.entry(lens.to_string()).or_insert(0) += 1;
         let _ = self.persist_manifest_locked(&inner);
     }
@@ -1194,7 +1225,7 @@ impl<V: Clone + PartialEq + Codec + Send + Sync + 'static> Store<V> for Sstable<
             .inner
             .write()
             .map_err(|_| io::Error::other("sstable lock poisoned"))?;
-        self.flush_and_maybe_compact(&mut inner)?;
+        self.flush_memtable_to_run(&mut inner)?;
         self.persist_manifest_locked(&inner)?;
         Ok(true)
     }
@@ -1204,6 +1235,7 @@ impl<V: Clone + PartialEq + Codec + Send + Sync + 'static> Store<V> for Sstable<
 mod tests {
     use super::*;
     use crate::model::Tau;
+    use crate::storage::InMemory;
     use hegel::TestCase;
     use hegel::generators as gs;
     use pretty_assertions::assert_eq;
@@ -1288,10 +1320,10 @@ mod tests {
     }
 
     #[test]
-    fn run_compaction_preserves_generations_and_values() {
-        let base = tmp_base("run-compact");
+    fn run_gc_preserves_generations_and_values() {
+        let base = tmp_base("run-gc");
         let mut store: Sstable<i32> = Sstable::open(&base, None).unwrap();
-        store.set_compact_threshold(2); // also gates compact_runs's run-count trigger
+        store.set_run_gc_threshold(2);
         for i in 0..5i64 {
             store
                 .append(
@@ -1382,5 +1414,94 @@ mod tests {
             .find(|&&(s, e, _, _)| s <= probe && probe < e)
             .map(|&(_, _, v, _)| v);
         assert_eq!(store.at("x", probe), expected);
+    }
+
+    /// Un-merged, boundary-decomposed sum over `[start, end)` — mirrors
+    /// `query::collect_agg_segments`/`agg_sum`'s "no adjacent-equal-value
+    /// merge" semantics, which is what makes `REDUCE … USING sum`/`avg`
+    /// directly sensitive to how many physical layers survive compaction
+    /// (unlike `AT`/`RANGE`/`AS OF`, which only care about the newest-wins
+    /// *result*). Used below to compare `Sstable` against `InMemory` — the
+    /// single-unified-stack reference — without needing the full executor/
+    /// TauQL/wall-clock stack.
+    fn raw_reduce_sum(layers: &[Layer<i32>], start: i64, end: i64) -> i64 {
+        if start >= end {
+            return 0;
+        }
+        let mut bounds = vec![start, end];
+        for l in layers {
+            for t in l.taus.iter() {
+                if t.start() > start && t.start() < end {
+                    bounds.push(t.start());
+                }
+                if t.end() > start && t.end() < end {
+                    bounds.push(t.end());
+                }
+            }
+        }
+        bounds.sort_unstable();
+        bounds.dedup();
+        bounds
+            .windows(2)
+            .filter_map(|w| layers_get(layers, &[w[0]], None))
+            .map(i64::from)
+            .sum()
+    }
+
+    /// `Sstable` must match `InMemory` (the single-unified-stack reference)
+    /// on `REDUCE`'s raw, unmerged segment sum after *every* op — not just
+    /// once state has settled — across randomised appends whose `written_at`
+    /// is drawn from a small pool so appends sometimes share a generation
+    /// (exercising same-generation merges) and sometimes don't (exercising
+    /// preserved-generation boundaries), interleaved with random
+    /// `checkpoint_flush` calls that force memtable/run-boundary crossings at
+    /// arbitrary points relative to `compact_threshold`. This is the direct
+    /// regression test for the class of bug the "one authoritative
+    /// consolidation trigger" design (see the module doc) exists to prevent:
+    /// any gap that leaves a lens's data fragmented across memtable/runs
+    /// shows up here as a sum mismatch, immediately, without needing DST.
+    #[hegel::test]
+    fn pbt_sstable_matches_inmemory_reduce_sum(tc: TestCase) {
+        let base = tmp_base(&format!("cmp-{}", tc.draw(gs::integers::<u64>())));
+        let compact_threshold = tc.draw(gs::integers::<usize>().min_value(1).max_value(4));
+        let mut sst: Sstable<i32> = Sstable::open(&base, None).unwrap();
+        sst.set_compact_threshold(compact_threshold);
+        let mut mem: InMemory<i32> = InMemory::with_threshold(compact_threshold);
+
+        let gens = [0i64, 100, 100, 200, 300, 300, 300];
+        let n = tc.draw(gs::integers::<usize>().min_value(1).max_value(30));
+        let mut cursor: i64 = 0;
+        for i in 0..n {
+            let gap = tc.draw(gs::integers::<i64>().min_value(0).max_value(15));
+            let width = tc.draw(gs::integers::<i64>().min_value(1).max_value(30));
+            let value = tc.draw(gs::integers::<i32>());
+            let start = cursor + gap;
+            let end = start + width;
+            cursor = end;
+            let gi = tc.draw(
+                gs::integers::<usize>()
+                    .min_value(0)
+                    .max_value(gens.len() - 1),
+            );
+            let written_at = gens[gi];
+            let id = i as u64 + 1;
+            sst.append("x", layer(id, &[(start, end, value)], written_at))
+                .unwrap();
+            mem.append("x", layer(id, &[(start, end, value)], written_at))
+                .unwrap();
+            if tc.draw(gs::booleans()) {
+                sst.checkpoint_flush().unwrap();
+            }
+
+            let probe_end = cursor.max(1);
+            let sst_layers = sst.layers("x").unwrap();
+            let mem_layers = mem.layers("x").unwrap();
+            let sst_sum = raw_reduce_sum(&sst_layers, 0, probe_end);
+            let mem_sum = raw_reduce_sum(&mem_layers, 0, probe_end);
+            assert_eq!(
+                sst_sum, mem_sum,
+                "op {i}: REDUCE x 0 {probe_end} USING sum diverged (sstable={sst_sum} inmemory={mem_sum})"
+            );
+        }
     }
 }
