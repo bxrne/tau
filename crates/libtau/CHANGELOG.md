@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.6.0](https://github.com/bxrne/tau/compare/libtau-v0.5.0...libtau-v0.6.0) (2026-07-03)
+
+
+### Features
+
+* **libtau, dst:** N-dimensional lenses via AXES ([e660311](https://github.com/bxrne/tau/commit/e660311ba723a50839e0af0c6164dbc609db98fc))
+* **libtau:** Arc&lt;[Layer]&gt; snapshots for clone-free reads ([ad8964d](https://github.com/bxrne/tau/commit/ad8964d2989f78ed43e779abfcc4ff958ee6c1c0))
+* **libtau:** lossless compaction for N-dimensional lenses ([e26a521](https://github.com/bxrne/tau/commit/e26a521cfd24c206212a34250baffd5e46b35344))
+* **libtau:** preserve tx-generations through compaction ([aeb3552](https://github.com/bxrne/tau/commit/aeb35526a29129ace2e43d679de34b3d9ffc2ed3))
+* **libtau:** Sstable backend (immutable runs + manifest, read-time MVCC) ([02fa68c](https://github.com/bxrne/tau/commit/02fa68cffa81802b3766ef322b2837c13a29538a))
+
+
+### Bug Fixes
+
+* **libtau, dst:** close two Sstable REDUCE-correctness gaps, cut Sstable DST profile in ([27eee81](https://github.com/bxrne/tau/commit/27eee81e4e3f8e66549e021d70c9c16ebb44fe12))
+* **libtau, dst:** replace Sstable's three overlapping compaction triggers with one ([7fe2ed4](https://github.com/bxrne/tau/commit/7fe2ed4bba9635f36f2a71ebeb45a70d1722cadb))
+* **libtau:** compile the n-orthotope Tau representation ([dbadb19](https://github.com/bxrne/tau/commit/dbadb19fa298ff968dc9f7673e8c34b6a1835b4e))
+
 ## [0.5.0](https://github.com/bxrne/tau/compare/libtau-v0.4.1...libtau-v0.5.0) (2026-06-23)
 
 

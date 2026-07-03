@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.4.0](https://github.com/bxrne/tau/compare/dst-v0.3.0...dst-v0.4.0) (2026-07-03)
+
+
+### Features
+
+* **dst:** cover AT AS OF and HISTORY across compaction ([3dc3364](https://github.com/bxrne/tau/commit/3dc3364fa8bfaed81d00a2844e0b4097140d544d))
+* **libtau, dst:** N-dimensional lenses via AXES ([e660311](https://github.com/bxrne/tau/commit/e660311ba723a50839e0af0c6164dbc609db98fc))
+
+
+### Bug Fixes
+
+* **dst:** serialize the global virtual clock across simulations ([89bf4b8](https://github.com/bxrne/tau/commit/89bf4b818fd5053fef9056857e456b8e3c4bdc8f))
+* **libtau, dst:** close two Sstable REDUCE-correctness gaps, cut Sstable DST profile in ([27eee81](https://github.com/bxrne/tau/commit/27eee81e4e3f8e66549e021d70c9c16ebb44fe12))
+* **libtau, dst:** replace Sstable's three overlapping compaction triggers with one ([7fe2ed4](https://github.com/bxrne/tau/commit/7fe2ed4bba9635f36f2a71ebeb45a70d1722cadb))
+
 ## [0.3.0](https://github.com/bxrne/tau/compare/dst-v0.2.0...dst-v0.3.0) (2026-06-23)
 
 
