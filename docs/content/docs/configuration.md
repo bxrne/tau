@@ -34,7 +34,7 @@ log_level = "info"         # error | warn | info | debug | trace
 compact_threshold = 8      # layers per lens before auto-compaction fires
 
 [disk]
-backend = "memory"         # "memory" (default) or "disk" (persist to <path>/<db>.dat)
+backend = "memory"         # "memory" (default) or "disk" (persist to <path>/<db>.manifest + runs)
 # path = "/var/lib/tau/data"  # required when backend = "disk"
 compression_level = 3      # zstd level 1–22; higher = better ratio, slower writes
 
@@ -79,26 +79,25 @@ idle_timeout_secs = 300     # omit to disable (default: no timeout)
 
 | field | default | description |
 |-------|---------|-------------|
-| `backend` | `memory` | Storage backend. `memory` keeps layers in RAM (pair with `[wal]` for durability). `disk` gives every database its own compressed `<path>/<name>.dat` file. |
-| `path` | (none) | Directory for the per-database `.dat` files — required when `backend = "disk"`. |
-| `compression_level` | `3` | zstd compression level applied when the disk store flushes. Range 1–22: 1 is fastest with least compression, 22 is best ratio but slowest. |
+| `backend` | `memory` | Storage backend. `memory` keeps layers in RAM (pair with `[wal]` for durability). `disk` gives every database its own [`Sstable`](/docs/how-it-works/#storage) store: a `<name>.manifest` file plus a set of immutable, compressed `<name>.run.<id>` files under `<path>`. |
+| `path` | (none) | Directory for the per-database manifest/run files — required when `backend = "disk"`. |
+| `compression_level` | `3` | zstd compression level applied when a run is written. Range 1–22: 1 is fastest with least compression, 22 is best ratio but slowest. |
 
-`compression_level` and `compact_threshold` trade write throughput against on-disk size: a
-checkpoint on the disk backend flushes and recompresses the file, and checkpoints fire at most
-every 8 compactions (or sooner if `[wal].max_size_mb` is reached).
+`compression_level` and `compact_threshold` trade write throughput against on-disk size:
+`compact_threshold` is the per-lens layer count (spanning the in-memory memtable *and* every
+on-disk run) that triggers consolidating a lens's data into one canonical set per
+transaction-time generation; a checkpoint (every 8 compactions, or sooner if
+`[wal].max_size_mb` is reached) then flushes the memtable into a new run file — never a
+whole-database rewrite.
 
-With `backend = "disk"`, each database gets a `<name>.dat` file plus a
-`<name>.wal` file in `[disk].path`. `APPEND` writes go to the WAL first
-(fsynced by default) and update the in-memory layer stack; the `.dat` file —
-which holds both layer data and schema DDL (`CREATE LENS`, `DERIVE LENS`,
-`SET TTL`, `DROP LENS`) — is rewritten atomically only on a checkpoint (every
-8 compactions, or `[wal].max_size_mb`, whichever comes first). Issuing `CREATE DATABASE <name>` re-opens
-an existing `<name>.dat`, replays `<name>.wal` on top of it, and replays the
-schema, so lenses, policies, and any appends since the last checkpoint survive
-a restart without re-issuing DDL. `[wal].no_fsync_each` and
-`[wal].max_size_mb` apply to these per-database WAL files; `[wal].enabled` and
-`[wal].path` are not used by the disk backend — a WAL is always attached per
-database, colocated with its `.dat` file.
+With `backend = "disk"`, each database gets a `<name>.manifest` file, its `<name>.run.<id>`
+files, and a `<name>.wal` file in `[disk].path`. `APPEND` writes go to the WAL first (fsynced
+by default) and update the in-memory memtable; the memtable is flushed into a new immutable
+run only on a checkpoint. Issuing `CREATE DATABASE <name>` re-opens the existing manifest,
+replays `<name>.wal` on top of it, and replays the schema, so lenses, policies, and any
+appends since the last checkpoint survive a restart without re-issuing DDL. `[wal].no_fsync_each`
+and `[wal].max_size_mb` apply to these per-database WAL files; `[wal].enabled` and `[wal].path`
+are not used by the disk backend — a WAL is always attached per database.
 
 ---
 

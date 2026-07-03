@@ -26,7 +26,7 @@ use std::sync::Arc;
 
 use crate::ql::ast::{Literal, Type};
 use crate::storage::Codec;
-use crate::storage::disk::Codec as DiskCodec;
+use crate::storage::codec::Codec as DiskCodec;
 
 /// Dynamic value carried by every executor lens.
 ///

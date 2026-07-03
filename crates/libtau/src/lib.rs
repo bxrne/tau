@@ -17,7 +17,7 @@ pub use metrics::Metrics;
 pub use model::{Layer, LayerId, Tau, Timestamp};
 pub use ql::{AggFunc, Stmt, format_parse_error, needs_registry_lock, parse, parse_literal};
 pub use query::{at_layers, collect_bounds_from_layers};
-pub use storage::{Disk, InMemory, Wal};
+pub use storage::{InMemory, Sstable, Wal};
 pub use users::{Perm, User, UserStore};
 pub use value::Value;
 pub use wire::{Response, WireError};

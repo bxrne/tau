@@ -84,9 +84,9 @@ Compaction fires automatically when a lens accumulates more layers than the conf
 
 **In-memory:** a `HashMap<lens, Arc<[Layer]>>` with no I/O. Reads snapshot the per-lens stack with a pointer bump; appends rebuild it copy-on-write (RCU) so in-flight readers keep a consistent view. State is lost on process exit. Used for tests, ephemeral workloads, and embedded use.
 
-**Disk:** one zstd-compressed binary file per database (`TAUZ` magic + a version byte; layer data **and** schema DDL), rewritten atomically on checkpoint. On open, entries are replayed into the in-memory layer stack with their original `written_at`, so `AT … AS OF` keeps working across a restart. The current format is version 2 (a per-tau axis count for multi-dimensional lenses); version 1 files remain readable.
+**Disk (`Sstable`):** a memtable (same `Arc<[Layer]>` shape as in-memory) absorbs appends; on checkpoint it flushes into a new immutable, zstd-compressed run file per database (`TAUR` magic) instead of rewriting anything already on disk, and a small atomically-rewritten manifest (`TAUM` magic) tracks the live runs. Reads merge the memtable with the runs and resolve newest-wins/`AS OF` at read time (MVCC), so `AT … AS OF` keeps working across a restart. Compaction has one trigger — a per-lens layer count spanning memtable and every run, persisted in the manifest — that merges a lens's data into one canonical set per transaction-time generation once it crosses the configured threshold.
 
-Encryption is AES-256-GCM with a random 12-byte nonce, keyed by `TAU_ENCRYPTION_KEY` (compress-then-encrypt). A flag in the header prevents accidentally opening an encrypted file without the key.
+Encryption is AES-256-GCM with a random 12-byte nonce, keyed by `TAU_ENCRYPTION_KEY` (compress-then-encrypt), applied separately to each run's body and footer. A flag in the header prevents accidentally opening an encrypted file without the key.
 
 **Write-ahead log (WAL):** sits between the caller and the store. Every mutation writes to the WAL, fsyncs, then writes to the store. A crash between the two leaves an entry that replays on the next startup, completing the write.
 

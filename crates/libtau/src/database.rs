@@ -13,9 +13,9 @@ use tracing::{debug, info, instrument, warn};
 /// Compaction collapses a lens's layers down to one, so for a steady stream
 /// of appends it fires roughly every `compact_threshold` appends - far more
 /// often than the WAL actually needs rotating. Checkpointing on every
-/// compaction means `Store::checkpoint_flush` (a full compress + optionally
-/// encrypt + atomic rename for `Disk`) runs at that same high frequency,
-/// which dominates write cost for the disk backend. Only checkpointing every
+/// compaction means `Store::checkpoint_flush` (flushing the memtable to a new
+/// run for `Sstable`) runs at that same high frequency, which dominates write
+/// cost for the disk backend. Only checkpointing every
 /// `CHECKPOINT_COMPACTION_INTERVAL`th compaction amortises that cost while
 /// still bounding WAL growth.
 const CHECKPOINT_COMPACTION_INTERVAL: usize = 8;
@@ -169,11 +169,9 @@ where
     /// write fails; the in-memory store is **not** updated in that case.
     ///
     /// After the store update, a WAL checkpoint (rewriting the WAL to contain
-    /// only the live layers, and flushing `Disk`-backed stores) is triggered
-    /// when the WAL size cap is reached, or every
-    /// [`CHECKPOINT_COMPACTION_INTERVAL`] compactions - whichever comes
-    /// first. This bounds WAL growth without paying the full `Disk::flush`
-    /// cost on every compaction.
+    /// only the live layers, and flushing the on-disk store's memtable to a new
+    /// run) is triggered when the WAL size cap is reached, or every
+    /// [`CHECKPOINT_COMPACTION_INTERVAL`] compactions - whichever comes first.
     pub fn append(&self, name: &str, layer: Layer<V>) -> io::Result<()>
     where
         V: Codec,
@@ -458,7 +456,7 @@ where
 mod tests {
     use super::*;
     use crate::model::Tau;
-    use crate::storage::{Disk, InMemory, Wal};
+    use crate::storage::{InMemory, Sstable, Wal};
 
     fn db() -> Database<i64> {
         Database::new(InMemory::new())
@@ -550,10 +548,10 @@ mod tests {
     #[test]
     fn wal_with_disk_backend() {
         let tmp_dir = tempfile::tempdir().unwrap();
-        let disk_path = tmp_dir.path().join("store.dat");
+        let disk_base = tmp_dir.path().join("store");
         let wal_path = tmp_dir.path().join("test.wal");
 
-        let disk_store = Disk::<i64>::create(&disk_path, None).unwrap();
+        let disk_store = Sstable::<i64>::open(&disk_base, None).unwrap();
         let wal = Wal::open(&wal_path, None).unwrap();
         let db = Database::with_wal(disk_store, wal);
 

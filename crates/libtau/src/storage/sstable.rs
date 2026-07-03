@@ -75,7 +75,7 @@
 
 use crate::crypto;
 use crate::model::{Layer, LayerId, Tau, Timestamp};
-use crate::storage::disk::{Codec, DEFAULT_ZSTD_LEVEL};
+use crate::storage::codec::{Codec, DEFAULT_ZSTD_LEVEL};
 use crate::storage::layers::compact_layers;
 use crate::storage::store::{Store, layers_get, scan_layers};
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
@@ -88,7 +88,7 @@ use std::sync::{Arc, RwLock};
 const RUN_MAGIC: &[u8] = b"TAUR";
 const RUN_VERSION: u8 = 1;
 const MANIFEST_MAGIC: &[u8] = b"TAUM";
-const MANIFEST_VERSION: u8 = 2;
+const MANIFEST_VERSION: u8 = 1;
 const FLAG_ENCRYPTED: u8 = 0x01;
 const HEADER_LEN: usize = 4 + 1 + 1 + 4; // magic + version + flags + crc32
 const MAX_AXES: usize = 64;

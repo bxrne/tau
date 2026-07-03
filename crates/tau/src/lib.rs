@@ -46,7 +46,7 @@ pub fn build_executor(
             if config.wal.enabled && config.wal.path.is_some() {
                 warn!(
                     "disk backend is active; [wal].path is ignored - each database gets its own \
-                     <dir>/<name>.wal alongside its .dat file"
+                     <dir>/<name>.wal alongside its manifest/run files"
                 );
             }
             info!(

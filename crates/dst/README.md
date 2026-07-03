@@ -64,12 +64,12 @@ Sequential profiles checkpoint every 200 ops. The injected fault depends on stor
 | Memory | every | Rebuild target + oracle; dual-replay op log |
 | WAL (odd) | dual-replay | Dual-replay op log after deleting the WAL file |
 | WAL (even) | **disk media fault** | Truncate **or corrupt** the WAL; reopen-probe it (must not panic); rebuild fresh; reset op log |
-| Disk (odd) | restart | Wipe `.dat` files; rebuild target + oracle; dual-replay op log |
-| Disk (even) | **disk media fault** | Truncate **or corrupt** a random `.dat`, probe that tau reopens without panicking, then wipe + dual-replay |
+| Disk (odd) | restart | Wipe `.manifest`/`.run.*` files; rebuild target + oracle; dual-replay op log |
+| Disk (even) | **disk media fault** | Truncate **or corrupt** a random manifest/run file, probe that tau reopens without panicking, then wipe + dual-replay |
 | Wire (odd) | server crash | Rebuild the whole wire stack (new server, fresh executor) + dual-replay |
 | Wire (even) | **network fault** | Drop the live TCP connection and reconnect to the same server; state survives, op log untouched |
 
-The damage probes assert tau **recovers or returns a clean error — never panics or hangs**. This is what caught a real bug: reading a corrupted `.dat` could decode an inverted `[start, end)` interval and panic in `Tau::new`; the disk loader now validates intervals (and bounds untrusted length prefixes) and returns `InvalidData` instead. Because a damaged file is always followed by a rebuild from the authoritative op log, the fault never perturbs the oracle comparison.
+The damage probes assert tau **recovers or returns a clean error — never panics or hangs**. This is what caught a real bug: reading a corrupted on-disk file could decode an inverted `[start, end)` interval and panic in `Tau::new`; the loader now validates intervals (and bounds untrusted length prefixes) and returns `InvalidData` instead. Because a damaged file is always followed by a rebuild from the authoritative op log, the fault never perturbs the oracle comparison.
 
 ### Concurrent phase (`src/harness.rs`)
 

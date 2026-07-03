@@ -42,7 +42,7 @@ use crate::query::{
     build_range_segments, collect_range_bounds, eval_agg, eval_lens, ttl_cutoff, would_cycle,
 };
 use crate::storage::{
-    Disk, InMemory, Sstable, Store,
+    InMemory, Sstable, Store,
     wal::{Wal, WalEntry},
 };
 use crate::users::{Perm, User, UserStore};
@@ -137,27 +137,18 @@ pub enum StorageBackend {
     /// In-memory only. WAL (if configured) provides crash recovery; data is
     /// lost on clean shutdown without a WAL.
     Memory,
-    /// Every database gets its own `<dir>/<name>.dat` compressed disk file.
-    /// Both layer data and schema DDL (CREATE LENS / DERIVE LENS / SET TTL) are
-    /// persisted; `CREATE DATABASE <name>` re-opens an existing file and replays
-    /// its schema, so lenses survive a restart.
-    Disk {
-        dir: std::path::PathBuf,
-        compression_level: i32,
-        enc_key: Option<[u8; 32]>,
-        /// Applied to each database's per-file WAL (`<dir>/<name>.wal`).
-        wal_fsync_each: bool,
-        wal_max_bytes: Option<u64>,
-    },
     /// Every database gets its own `<dir>/<name>.manifest` + `<dir>/<name>.run.<id>`
     /// SSTable files (see [`crate::storage::Sstable`]): an in-memory memtable
     /// absorbs appends, and checkpoints flush it into a new immutable run
     /// instead of rewriting the whole database, with newest-wins/`AS OF`
     /// resolved at read time (MVCC) across the memtable and runs.
-    Sstable {
+    /// `CREATE DATABASE <name>` re-opens an existing manifest and replays its
+    /// schema, so lenses survive a restart.
+    Disk {
         dir: std::path::PathBuf,
         compression_level: i32,
         enc_key: Option<[u8; 32]>,
+        /// Applied to each database's per-file WAL (`<dir>/<name>.wal`).
         wal_fsync_each: bool,
         wal_max_bytes: Option<u64>,
     },
@@ -225,55 +216,17 @@ impl DbState {
         )))
     }
 
-    /// Open (or create) a disk-backed database paired with a per-database WAL,
-    /// returning the fresh state plus any schema DDL persisted so the executor
-    /// can replay it.
+    /// Open (or create) a disk-backed database — an [`Sstable`] store paired
+    /// with a per-database WAL — returning the fresh state plus any schema
+    /// DDL persisted so the executor can replay it.
     ///
-    /// The WAL (`<dir>/<name>.wal`, alongside the `.dat` file) is the
-    /// durability mechanism for every `append`: writes hit the WAL first and
-    /// the disk file's full compress+rewrite only happens on
-    /// compaction/checkpoint. On restart, any WAL entries written since the
-    /// last checkpoint are replayed on top of the loaded disk file.
+    /// The WAL (`<dir>/<name>.wal`, alongside the `.manifest`/`.run.*` files)
+    /// is the durability mechanism for every `append`: writes hit the WAL
+    /// first, and the store's own checkpoint (flush memtable to a new run,
+    /// never a whole-database rewrite) only happens on compaction/checkpoint.
+    /// On restart, any WAL entries written since the last checkpoint are
+    /// replayed on top of the loaded store.
     fn with_disk(
-        path: impl AsRef<Path>,
-        compact_threshold: usize,
-        compression_level: i32,
-        enc_key: Option<[u8; 32]>,
-        wal_fsync_each: bool,
-        wal_max_bytes: Option<u64>,
-    ) -> io::Result<(Self, Vec<String>)> {
-        let path = path.as_ref();
-        let mut store = if path.exists() {
-            Disk::open(path, enc_key)?
-        } else {
-            Disk::create(path, enc_key)?
-        };
-        store.set_compact_threshold(compact_threshold);
-        store.set_compression_level(compression_level);
-
-        let wal_path = path.with_extension("wal");
-        let mut wal = Wal::open(&wal_path, enc_key)?;
-        wal.replay(&mut store)?;
-
-        // Migrate schema DDL embedded in older disk files (pre-WAL format)
-        // into the WAL, which is now the source of truth for schema.
-        if wal.replay_schemas()?.is_empty() {
-            for stmt in store.schema_stmts() {
-                wal.append_schema(&stmt)?;
-            }
-        }
-
-        wal.set_fsync_each(wal_fsync_each);
-        if let Some(bytes) = wal_max_bytes {
-            wal.set_max_bytes(bytes);
-        }
-
-        let db = Database::with_wal(store, wal);
-        let schema_stmts = db.schema_stmts()?;
-        Ok((Self::from_db(db), schema_stmts))
-    }
-
-    fn with_sstable(
         base: impl AsRef<Path>,
         compact_threshold: usize,
         compression_level: i32,
@@ -459,8 +412,9 @@ impl Executor {
         }
     }
 
-    /// Create a disk-backed executor. Each `CREATE DATABASE` allocates a
-    /// `<dir>/<name>.dat` compressed disk file paired with a `<dir>/<name>.wal`
+    /// Create a disk-backed executor (see [`crate::storage::Sstable`]). Each
+    /// `CREATE DATABASE` allocates `<dir>/<name>.manifest` +
+    /// `<dir>/<name>.run.<id>` files paired with a `<dir>/<name>.wal`
     /// write-ahead log, which is the durability mechanism for every append.
     /// `wal_fsync_each` and `wal_max_bytes` (from `[wal]` config) are applied
     /// to each database's WAL.
@@ -476,30 +430,6 @@ impl Executor {
         fs::create_dir_all(&dir)?;
         let mut executor = Self::with_threshold(compact_threshold);
         executor.backend = StorageBackend::Disk {
-            dir,
-            compression_level,
-            enc_key,
-            wal_fsync_each,
-            wal_max_bytes,
-        };
-        Ok(executor)
-    }
-
-    /// Create an SSTable-backed executor (see [`crate::storage::Sstable`]).
-    /// Each `CREATE DATABASE` allocates `<dir>/<name>.manifest` +
-    /// `<dir>/<name>.run.<id>` files paired with a `<dir>/<name>.wal` WAL.
-    pub fn with_sstable_backend(
-        dir: impl AsRef<Path>,
-        compact_threshold: usize,
-        compression_level: i32,
-        enc_key: Option<[u8; 32]>,
-        wal_fsync_each: bool,
-        wal_max_bytes: Option<u64>,
-    ) -> io::Result<Self> {
-        let dir = dir.as_ref().to_path_buf();
-        fs::create_dir_all(&dir)?;
-        let mut executor = Self::with_threshold(compact_threshold);
-        executor.backend = StorageBackend::Sstable {
             dir,
             compression_level,
             enc_key,
@@ -980,25 +910,8 @@ impl Executor {
                 wal_fsync_each,
                 wal_max_bytes,
             } => {
-                let path = dir.join(format!("{name}.dat"));
-                DbState::with_disk(
-                    &path,
-                    self.compact_threshold,
-                    *compression_level,
-                    *enc_key,
-                    *wal_fsync_each,
-                    *wal_max_bytes,
-                )?
-            }
-            StorageBackend::Sstable {
-                dir,
-                compression_level,
-                enc_key,
-                wal_fsync_each,
-                wal_max_bytes,
-            } => {
                 let base = dir.join(name);
-                DbState::with_sstable(
+                DbState::with_disk(
                     &base,
                     self.compact_threshold,
                     *compression_level,
