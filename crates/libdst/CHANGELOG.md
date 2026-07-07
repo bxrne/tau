@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/bxrne/tau/compare/libdst-v0.2.0...libdst-v0.3.0) (2026-07-07)
+
+
+### Features
+
+* **dst, libdst, libtau, tau, tauctl:** microkernel architecture refactoring and dst redesign, fuzzing improvements ([c3aac46](https://github.com/bxrne/tau/commit/c3aac4608d1155679caa76bbdfa8780d538e6fcc))
+
 ## [0.2.0](https://github.com/bxrne/tau/compare/libdst-v0.1.1...libdst-v0.2.0) (2026-06-23)
 
 
