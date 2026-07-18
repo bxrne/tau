@@ -186,6 +186,10 @@ pub(crate) struct DbState {
     /// Axis names for multi-dimensional lenses (axis 0 is valid time).  A lens
     /// absent from this map has the default single valid-time axis.
     pub(crate) axes: HashMap<String, Vec<String>>,
+    /// Per-lens compaction threshold overrides.  A lens with an entry here
+    /// uses that value instead of the server-wide default; 0 disables
+    /// compaction.  Persisted in the schema WAL so it survives restarts.
+    pub(crate) compact_overrides: HashMap<String, usize>,
     /// The kernel's virtual clock: transaction stamps and TTL cutoffs read it.
     pub(crate) clock: Arc<Clock>,
 }
@@ -204,6 +208,7 @@ impl DbState {
             xderived: HashMap::default(),
             ttl_secs: HashMap::default(),
             axes: HashMap::default(),
+            compact_overrides: HashMap::default(),
             clock,
         }
     }
@@ -550,6 +555,10 @@ impl DbService {
             Stmt::Drop { name } => self.drop_lens(db_arc, name, in_replay),
             Stmt::SetTtl { name, secs } => self.update_ttl(db_arc, name, Some(*secs), in_replay),
             Stmt::UnsetTtl { name } => self.update_ttl(db_arc, name, None, in_replay),
+            Stmt::SetCompact { name, threshold } => {
+                self.update_compact(db_arc, name, Some(*threshold), in_replay)
+            }
+            Stmt::UnsetCompact { name } => self.update_compact(db_arc, name, None, in_replay),
             _ => Err(ExecError::InvalidExpr(
                 "db service: not a lens statement".into(),
             )),
@@ -998,6 +1007,35 @@ impl DbService {
         Ok(Output::Empty)
     }
 
+    /// `SET COMPACT` (`Some(n)`) / `UNSET COMPACT` (`None`), persisted to the
+    /// schema log unless replaying.
+    fn update_compact(
+        &self,
+        db_arc: &Arc<RwLock<DbState>>,
+        name: &str,
+        threshold: Option<usize>,
+        in_replay: bool,
+    ) -> Result<Output, ExecError> {
+        let mut state = db_arc.write().expect("db lock poisoned");
+        ensure_lens_exists(&state, name)?;
+        let stmt_text = match threshold {
+            Some(n) => {
+                state.db.set_lens_compact_threshold(name, Some(n))?;
+                state.compact_overrides.insert(name.into(), n);
+                format!("SET COMPACT LENS {name} {n}")
+            }
+            None => {
+                state.db.set_lens_compact_threshold(name, None)?;
+                state.compact_overrides.remove(name);
+                format!("UNSET COMPACT LENS {name}")
+            }
+        };
+        if !in_replay {
+            state.db.append_schema(&stmt_text)?;
+        }
+        Ok(Output::Empty)
+    }
+
     fn drop_lens(
         &self,
         db_arc: &Arc<RwLock<DbState>>,
@@ -1009,6 +1047,7 @@ impl DbService {
         let in_derived = state.derived.remove(name).is_some();
         state.derived_ranges.remove(name);
         state.axes.remove(name);
+        state.compact_overrides.remove(name);
         let in_xderived = state.xderived.remove(name).is_some();
         if in_types || in_derived || in_xderived {
             state.db.drop_lens(name);
@@ -1054,6 +1093,15 @@ impl DbService {
                 range: def.range,
             };
             schema_stmts.push(stmt.to_string());
+        }
+        for (lens_name, &threshold) in &state.compact_overrides {
+            schema_stmts.push(
+                Stmt::SetCompact {
+                    name: lens_name.clone(),
+                    threshold,
+                }
+                .to_string(),
+            );
         }
 
         let bk_path = Path::new(path);
@@ -1211,5 +1259,7 @@ pub(crate) fn is_transactable(stmt: &Stmt) -> bool {
             | Stmt::Drop { .. }
             | Stmt::SetTtl { .. }
             | Stmt::UnsetTtl { .. }
+            | Stmt::SetCompact { .. }
+            | Stmt::UnsetCompact { .. }
     )
 }

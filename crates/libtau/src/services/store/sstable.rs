@@ -738,6 +738,10 @@ pub struct Sstable<V> {
     /// space-driven optimisation, independent of `compact_threshold` and not
     /// required for `consolidate_lens`'s correctness guarantee to hold.
     run_gc_threshold: usize,
+    /// Per-lens compaction threshold overrides.  `Some(n)` means this lens
+    /// compacts when it exceeds `n` layers (0 = never); absent means use the
+    /// server-wide `compact_threshold`.
+    lens_compact: HashMap<String, usize>,
     inner: RwLock<SstableInner<V>>,
 }
 
@@ -800,6 +804,7 @@ impl<V: Clone + PartialEq + Codec> Sstable<V> {
             compression_level: DEFAULT_ZSTD_LEVEL,
             compact_threshold: crate::services::store::store::COMPACT_THRESHOLD,
             run_gc_threshold: crate::services::store::store::COMPACT_THRESHOLD,
+            lens_compact: HashMap::default(),
             inner: RwLock::new(inner),
         };
         if !manifest_path.exists() {
@@ -1085,8 +1090,13 @@ impl<V: Clone + PartialEq + Codec + Send + Sync + 'static> Store<V> for Sstable<
         inner.memtable.insert(lens.to_string(), Arc::from(mem));
         let before = inner.layer_count.get(lens).copied().unwrap_or(0) + 1;
         inner.layer_count.insert(lens.to_string(), before);
+        let effective = self
+            .lens_compact
+            .get(lens)
+            .copied()
+            .unwrap_or(self.compact_threshold);
         let mut did_compact = false;
-        if before > self.compact_threshold {
+        if effective > 0 && before > effective {
             self.consolidate_lens(&mut inner, lens)?;
             let after = inner.layer_count.get(lens).copied().unwrap_or(0);
             did_compact = after < before;
@@ -1193,6 +1203,7 @@ impl<V: Clone + PartialEq + Codec + Send + Sync + 'static> Store<V> for Sstable<
         inner.memtable.remove(lens);
         inner.live_lenses.remove(lens);
         inner.layer_count.remove(lens);
+        self.lens_compact.remove(lens);
         *inner.lens_epoch.entry(lens.to_string()).or_insert(0) += 1;
         let _ = self.persist_manifest_locked(&inner);
     }
@@ -1228,6 +1239,13 @@ impl<V: Clone + PartialEq + Codec + Send + Sync + 'static> Store<V> for Sstable<
         self.flush_memtable_to_run(&mut inner)?;
         self.persist_manifest_locked(&inner)?;
         Ok(true)
+    }
+
+    fn set_lens_compact_threshold(&mut self, lens: &str, threshold: Option<usize>) {
+        match threshold {
+            Some(n) => self.lens_compact.insert(lens.to_string(), n),
+            None => self.lens_compact.remove(lens),
+        };
     }
 }
 

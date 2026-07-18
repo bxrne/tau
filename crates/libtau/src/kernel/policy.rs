@@ -90,6 +90,7 @@ pub(crate) fn check_permission(
             require(require_active()?, Perm::R)
         }
         Stmt::SetTtl { .. } | Stmt::UnsetTtl { .. } => require(require_active()?, Perm::C),
+        Stmt::SetCompact { .. } | Stmt::UnsetCompact { .. } => require(require_active()?, Perm::C),
         Stmt::ShowStatus => Ok(()),
         Stmt::BackupDatabase { name, .. } => require(name, Perm::R),
         Stmt::RestoreDatabase { .. } => require_global_admin(),
@@ -140,6 +141,7 @@ fn stmt_to_op(stmt: &Stmt) -> Op {
             Op::Database
         }
         Stmt::SetTtl { .. } | Stmt::UnsetTtl { .. } => Op::CreateLens,
+        Stmt::SetCompact { .. } | Stmt::UnsetCompact { .. } => Op::CreateLens,
         Stmt::CreateUser { .. }
         | Stmt::DropUser { .. }
         | Stmt::Grant { .. }

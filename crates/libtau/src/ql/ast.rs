@@ -33,6 +33,8 @@
 //! rollback := ROLLBACK
 //! set_ttl  := SET TTL LENS <ident> <int>
 //! unset_ttl := UNSET TTL LENS <ident>
+//! set_compact  := SET COMPACT LENS <ident> <int>
+//! unset_compact := UNSET COMPACT LENS <ident>
 //! status := SHOW STATUS
 //! backup := BACKUP DATABASE <ident> TO "<path>"
 //! restore := RESTORE DATABASE <ident> FROM "<path>"
@@ -328,6 +330,18 @@ pub enum Stmt {
     UnsetTtl {
         name: String,
     },
+    /// `SET COMPACT LENS <name> <n>` — per-lens compaction threshold override.
+    /// When a lens accumulates more than `n` layers, compaction fires.  `0`
+    /// disables compaction entirely for that lens.
+    SetCompact {
+        name: String,
+        threshold: usize,
+    },
+    /// `UNSET COMPACT LENS <name>` — remove the per-lens compaction threshold
+    /// override, reverting to the server-wide default.
+    UnsetCompact {
+        name: String,
+    },
     /// `SHOW STATUS` — return key-value server metrics: uptime, database count,
     /// total lens count, and total WAL bytes.  Read-only; requires no active
     /// database.
@@ -512,6 +526,10 @@ impl std::fmt::Display for Stmt {
             }
             Stmt::SetTtl { name, secs } => write!(f, "SET TTL LENS {name} {secs}"),
             Stmt::UnsetTtl { name } => write!(f, "UNSET TTL LENS {name}"),
+            Stmt::SetCompact { name, threshold } => {
+                write!(f, "SET COMPACT LENS {name} {threshold}")
+            }
+            Stmt::UnsetCompact { name } => write!(f, "UNSET COMPACT LENS {name}"),
             _ => unreachable!("Stmt::Display is only implemented for WAL-persisted DDL variants"),
         }
     }

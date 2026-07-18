@@ -72,7 +72,12 @@ pub fn parse(input: &str) -> IResult<&str, Stmt> {
         stmt_history,
         stmt_backup,
         stmt_restore,
-        alt((stmt_set_ttl, stmt_unset_ttl)),
+        alt((
+            stmt_set_ttl,
+            stmt_unset_ttl,
+            stmt_set_compact,
+            stmt_unset_compact,
+        )),
     ))
     .parse(input)?;
     let (input, _) = multispace0(input)?;
@@ -514,6 +519,35 @@ fn stmt_unset_ttl(i: &str) -> IResult<&str, Stmt> {
     let (i, _) = kw("LENS").parse(i)?;
     let (i, name) = ident(i)?;
     Ok((i, Stmt::UnsetTtl { name }))
+}
+
+/// `SET COMPACT LENS <name> <n>` — per-lens compaction threshold override.
+fn stmt_set_compact(i: &str) -> IResult<&str, Stmt> {
+    let (i, _) = kw("SET").parse(i)?;
+    let (i, _) = kw("COMPACT").parse(i)?;
+    let (i, _) = kw("LENS").parse(i)?;
+    let (i, name) = ident(i)?;
+    let (i, _) = multispace1(i)?;
+    let (i, threshold) = integer(i)?;
+    let threshold = match usize::try_from(threshold) {
+        Ok(n) => n,
+        Err(_) => {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                i,
+                nom::error::ErrorKind::Tag,
+            )));
+        }
+    };
+    Ok((i, Stmt::SetCompact { name, threshold }))
+}
+
+/// `UNSET COMPACT LENS <name>` — remove the per-lens compaction threshold override.
+fn stmt_unset_compact(i: &str) -> IResult<&str, Stmt> {
+    let (i, _) = kw("UNSET").parse(i)?;
+    let (i, _) = kw("COMPACT").parse(i)?;
+    let (i, _) = kw("LENS").parse(i)?;
+    let (i, name) = ident(i)?;
+    Ok((i, Stmt::UnsetCompact { name }))
 }
 
 /// `USE DATABASE <name>` - switches the active database.

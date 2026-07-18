@@ -14,6 +14,10 @@ use std::sync::Arc;
 pub struct InMemory<V> {
     lenses: HashMap<String, Arc<[Layer<V>]>>,
     compact_threshold: usize,
+    /// Per-lens compaction threshold overrides.  `Some(n)` means this lens
+    /// compacts when it exceeds `n` layers (0 = never); absent means use the
+    /// server-wide `compact_threshold`.
+    lens_compact: HashMap<String, usize>,
 }
 
 impl<V> Default for InMemory<V> {
@@ -31,6 +35,7 @@ impl<V> InMemory<V> {
         Self {
             lenses: HashMap::default(),
             compact_threshold,
+            lens_compact: HashMap::default(),
         }
     }
 }
@@ -40,9 +45,6 @@ where
     V: Clone + PartialEq + Send + Sync + 'static,
 {
     fn append(&mut self, lens: &str, layer: Layer<V>) -> io::Result<bool> {
-        // RCU: copy the current stack, mutate the copy, then swap the Arc in.
-        // Readers holding an earlier snapshot are unaffected. Layer clones are
-        // pointer bumps (tau slices are Arc-backed), so the copy is cheap.
         let mut layers: Vec<Layer<V>> = self
             .lenses
             .get(lens)
@@ -50,8 +52,13 @@ where
             .unwrap_or_default();
         let before = layers.len();
         layers.push(layer);
+        let effective = self
+            .lens_compact
+            .get(lens)
+            .copied()
+            .unwrap_or(self.compact_threshold);
         let mut did_compact = false;
-        if layers.len() > self.compact_threshold {
+        if effective > 0 && layers.len() > effective {
             compact_layers(&mut layers);
             did_compact = layers.len() < before + 1;
         }
@@ -61,6 +68,7 @@ where
 
     fn drop_lens(&mut self, lens: &str) {
         self.lenses.remove(lens);
+        self.lens_compact.remove(lens);
     }
 
     fn layers(&self, lens: &str) -> Option<Arc<[Layer<V>]>> {
@@ -69,6 +77,13 @@ where
 
     fn lens_names(&self) -> Vec<String> {
         self.lenses.keys().cloned().collect()
+    }
+
+    fn set_lens_compact_threshold(&mut self, lens: &str, threshold: Option<usize>) {
+        match threshold {
+            Some(n) => self.lens_compact.insert(lens.to_string(), n),
+            None => self.lens_compact.remove(lens),
+        };
     }
 }
 

@@ -226,6 +226,28 @@ UNSET TTL LENS sensor
 
 Requires `C` permission on the active database.
 
+### `SET COMPACT LENS <name> <n>`
+
+Sets a per-lens compaction threshold override. When a lens accumulates more than `n` layers, compaction fires. `0` disables compaction entirely for that lens.
+
+```
+SET COMPACT LENS cpu 4
+→ OK
+```
+
+The setting survives restarts (persisted in the schema WAL). Requires `C` permission on the active database.
+
+### `UNSET COMPACT LENS <name>`
+
+Removes the per-lens compaction threshold override, reverting to the server-wide default.
+
+```
+UNSET COMPACT LENS cpu
+→ OK
+```
+
+Requires `C` permission on the active database.
+
 ---
 
 ## Writes
@@ -649,6 +671,8 @@ statement :=
   | DERIVE LENS name AS expr
   | SET TTL LENS name secs
   | UNSET TTL LENS name
+  | SET COMPACT LENS name n
+  | UNSET COMPACT LENS name
   | APPEND LENS name tau_list
   | BATCH APPEND LENS name { tau_block }
   | COPY LENS name FROM "path"

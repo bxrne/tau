@@ -256,6 +256,21 @@ where
         }
     }
 
+    /// Override the compaction threshold for a single lens.  Forwards to
+    /// the underlying store.
+    pub fn set_lens_compact_threshold(
+        &self,
+        lens: &str,
+        threshold: Option<usize>,
+    ) -> io::Result<()> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| io::Error::other("store lock poisoned"))?;
+        store.set_lens_compact_threshold(lens, threshold);
+        Ok(())
+    }
+
     /// Write a schema DDL statement (e.g. `CREATE LENS temp int`) to durable
     /// storage.  Persisted in the WAL when one is attached, otherwise in the
     /// store's own file (the disk backend).  No-op for a pure in-memory store.

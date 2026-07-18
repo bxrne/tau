@@ -667,6 +667,7 @@ mod tests {
             xderived: HashMap::default(),
             ttl_secs: HashMap::default(),
             axes: HashMap::default(),
+            compact_overrides: HashMap::default(),
             clock: std::sync::Arc::new(crate::clock::Clock::system()),
         }
     }

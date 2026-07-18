@@ -71,7 +71,7 @@ idle_timeout_secs = 300     # omit to disable (default: no timeout)
 |-------|---------|-------------|
 | `bind` | `127.0.0.1:7070` | TCP address to listen on |
 | `log_level` | `info` | `error` \| `warn` \| `info` \| `debug` \| `trace` |
-| `compact_threshold` | `8` | Number of layers per lens before automatic compaction fires |
+| `compact_threshold` | `8` | Number of layers per lens before automatic compaction fires. This is the default for all lenses; individual lenses can override it with `SET COMPACT LENS <name> <n>`. `0` disables compaction entirely for that lens. |
 
 ---
 

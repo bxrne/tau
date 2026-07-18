@@ -121,6 +121,11 @@ where
     fn checkpoint_flush(&self) -> io::Result<bool> {
         Ok(false)
     }
+
+    /// Override the compaction threshold for a single lens.  `Some(n)` sets
+    /// the per-lens override (0 disables compaction); `None` reverts to the
+    /// server-wide default.
+    fn set_lens_compact_threshold(&mut self, _lens: &str, _threshold: Option<usize>) {}
 }
 
 /// Newest-wins (optionally `as_of`-scoped) point lookup over an explicit,
