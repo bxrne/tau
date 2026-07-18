@@ -114,6 +114,10 @@ struct OracleDb {
     lenses: HashMap<String, LensData>,
     next_layer_id: u64,
     compact_threshold: usize,
+    /// Per-lens compaction threshold overrides.  A lens with an entry here
+    /// uses that value instead of the server-wide default; 0 disables
+    /// compaction.  Persisted in the schema WAL so it survives restarts.
+    compact_overrides: HashMap<String, usize>,
 }
 
 impl OracleDb {
@@ -122,6 +126,7 @@ impl OracleDb {
             lenses: HashMap::new(),
             next_layer_id: 1,
             compact_threshold,
+            compact_overrides: HashMap::new(),
         }
     }
 
@@ -528,7 +533,12 @@ impl OracleDb {
                 written_at,
                 intervals: valid,
             });
-            if layers.len() > self.compact_threshold {
+            let effective_threshold = self
+                .compact_overrides
+                .get(name)
+                .copied()
+                .unwrap_or(self.compact_threshold);
+            if effective_threshold > 0 && layers.len() > effective_threshold {
                 Self::compact_layers(layers, &mut self.next_layer_id);
             }
         }
@@ -710,6 +720,14 @@ impl Oracle {
         self.dbs
             .entry(name.to_string())
             .or_insert_with(|| OracleDb::with_threshold(threshold));
+    }
+
+    pub fn set_compact(&mut self, name: &str, threshold: usize) {
+        let db = self.db_mut();
+        if !db.lenses.contains_key(name) {
+            return;
+        }
+        db.compact_overrides.insert(name.to_string(), threshold);
     }
 
     pub fn use_db(&mut self, name: &str) {
