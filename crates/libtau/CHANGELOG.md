@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/bxrne/tau/compare/libtau-v0.7.0...libtau-v0.8.0) (2026-07-18)
+
+
+### Features
+
+* **libtau, fuzztau:** compaction now per-lens and configurable via TauQL also ([1b1a70a](https://github.com/bxrne/tau/commit/1b1a70a14a9db2f45cd0c4c67abe3b158ad375ed))
+
 ## [0.7.0](https://github.com/bxrne/tau/compare/libtau-v0.6.0...libtau-v0.7.0) (2026-07-07)
 
 
