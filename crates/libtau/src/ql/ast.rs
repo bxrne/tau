@@ -411,7 +411,10 @@ impl std::fmt::Display for Literal {
             // Keep a decimal point so the text re-parses as a float, not an int.
             Literal::Float(v) if v.fract() == 0.0 && v.is_finite() => write!(f, "{v:.1}"),
             Literal::Float(v) => write!(f, "{}", v),
-            Literal::Str(s) => write!(f, "\"{}\"", s),
+            Literal::Str(s) => {
+                let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
+                write!(f, "\"{escaped}\"")
+            }
             Literal::Bool(b) => write!(f, "{}", b),
             Literal::Null => write!(f, "null"),
         }

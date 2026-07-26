@@ -16,7 +16,7 @@ show_author = false
 show_categories = true
 show_tags = true
 theme_color = "orange"
-show_menu_items = 3
+show_menu_items = 4
 custom_css = true
 
 full_width = false
@@ -33,6 +33,7 @@ main_menu = [
           {url="/docs/overview/", name="Overview"},
           {url="/docs/how-it-works/", name="How it works"},
           {url="/docs/tauql/", name="TauQL"},
+          {url="/docs/scripting/", name="Scripting"},
           {url="/docs/examples/", name="Examples"},
           {url="/docs/dst/", name="DST"},
           {url="/docs/testing/", name="Testing"},

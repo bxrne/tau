@@ -147,6 +147,55 @@ Spreads and signals compose as derived lenses; a cross-instrument grid uses axes
 
 ---
 
+## Finance — Lua triggers for rolling stats
+
+Bitemporality gives you point-in-time-correct prices. Lua triggers give you computation that fires automatically on write — Sharpe ratios, rolling stddev, position-keeping — without an external pipeline.
+
+```
+τ: CREATE DATABASE market
+τ: CREATE LENS returns float
+τ: CREATE LENS sharpe float
+
+# A 24h rolling Sharpe ratio, recomputed on every write to returns.
+τ: CREATE FUNCTION sharpe_24h ON WRITE LENS returns CAPS exec, range, clock
+AS "
+  local s, e = tau.clock_window(86400000)
+  local rows = tau.range('returns', s, e)
+  local n, sum, sum2 = 0, 0.0, 0.0
+  for _, r in ipairs(rows) do
+    n = n + 1; sum = sum + r.v; sum2 = sum2 + r.v * r.v
+  end
+  if n < 2 then return end
+  local mean = sum / n
+  local sd = math.sqrt(math.max(sum2 / n - mean * mean, 0))
+  local sh = (sd > 0) and (mean / sd) or 0.0
+  tau.exec(('APPEND LENS sharpe %d %d %f'):format(s, e, sh))
+"
+→ OK
+
+# Append a return — the trigger fires, Sharpe is appended automatically.
+τ: APPEND LENS returns 0 3600 0.0012
+→ OK
+
+τ: AT LENS sharpe 1800
+→ VAL f0.012
+
+# Correct the return — the trigger re-fires against the latest data.
+τ: APPEND LENS returns 0 3600 0.0021
+→ OK
+
+τ: AT LENS sharpe 1800
+→ VAL f0.021
+
+# What did Sharpe look like before the correction?
+τ: AT LENS sharpe 1800 AS OF <before-correction-ts>
+→ VAL f0.012
+```
+
+The Sharpe lens is itself bitemporal — corrections to `returns` produce new layers in `sharpe`, and `AS OF` reconstructs what the risk system believed at any past moment. See [Lua Scripting](/docs/scripting/) for the full reference.
+
+---
+
 ## Cheatsheet
 
 | Goal | Statement |
@@ -165,3 +214,7 @@ Spreads and signals compose as derived lenses; a cross-instrument grid uses axes
 | Audit provenance | `HISTORY LENS x` |
 | Retention | `SET TTL LENS x secs` / `UNSET TTL LENS x` |
 | Multi-dimensional lens | `CREATE LENS g t AXES (time, k)` → `APPEND LENS g [s e] [a b] v`, `AT LENS g t k`, `RANGE LENS g s e AT (k)` |
+| Lua trigger on write | `CREATE FUNCTION f ON WRITE LENS x CAPS exec AS "…"` |
+| Scheduled function | `CREATE FUNCTION f SCHEDULE EVERY 86400 CAPS exec AS "…"` |
+| Call a function | `CALL FUNCTION f(args)` |
+| List functions | `SHOW FUNCTIONS` |

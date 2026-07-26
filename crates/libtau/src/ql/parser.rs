@@ -16,7 +16,7 @@ use std::sync::Arc;
 use nom::{
     IResult, Parser,
     branch::alt,
-    bytes::complete::{is_not, tag, take_while1},
+    bytes::complete::{tag, take_while1},
     character::complete::{alpha1, alphanumeric1, char, digit1, multispace0, multispace1},
     combinator::{map, map_res, opt, recognize, value},
     multi::{many0, separated_list0, separated_list1},
@@ -795,17 +795,45 @@ fn float_lit(i: &str) -> IResult<&str, f64> {
     .parse(i)
 }
 
-/// A string literal: a sequence of characters enclosed in double quotes.  No escape sequences are
-/// supported, and the string cannot contain unescaped double quotes.  An empty string is `""`.
+/// A string literal: a sequence of characters enclosed in double quotes.
+/// Supports `\"` (escaped double-quote) and `\\` (escaped backslash) escape
+/// sequences so that Lua source code containing `"` can be embedded as a
+/// `CREATE FUNCTION` body. An empty string is `""`.
 fn string_lit(i: &str) -> IResult<&str, String> {
-    delimited(
-        char('"'),
-        map(opt(is_not("\"")), |s: Option<&str>| {
-            s.unwrap_or("").to_string()
-        }),
-        char('"'),
-    )
-    .parse(i)
+    let (i, _) = char('"')(i)?;
+    let mut result = String::new();
+    let mut rest = i;
+    loop {
+        match rest.chars().next() {
+            None => {
+                return Err(nom::Err::Error(nom::error::Error::new(
+                    rest,
+                    nom::error::ErrorKind::Char,
+                )));
+            }
+            Some('"') => {
+                return Ok((&rest[1..], result));
+            }
+            Some('\\') => {
+                let after = &rest[1..];
+                match after.chars().next() {
+                    Some('"') => result.push('"'),
+                    Some('\\') => result.push('\\'),
+                    _ => {
+                        return Err(nom::Err::Error(nom::error::Error::new(
+                            rest,
+                            nom::error::ErrorKind::Char,
+                        )));
+                    }
+                }
+                rest = &rest[2..];
+            }
+            Some(c) => {
+                result.push(c);
+                rest = &rest[c.len_utf8()..];
+            }
+        }
+    }
 }
 
 /// A boolean literal: lowercase `true` or `false`.
@@ -1465,5 +1493,43 @@ mod tests {
             }
             .is_read_only()
         );
+    }
+
+    #[test]
+    fn string_literal_supports_escaped_quotes_and_backslashes() {
+        // Escaped double-quote inside a string — the primary use case is
+        // embedding Lua source (which uses " for string literals) as a
+        // CREATE FUNCTION body.
+        let (_, lit) = string_lit(r#""hello \"world\"""#).unwrap();
+        assert_eq!(lit, "hello \"world\"");
+
+        // Escaped backslash.
+        let (_, lit) = string_lit(r#""a\\b""#).unwrap();
+        assert_eq!(lit, "a\\b");
+
+        // Empty string still works.
+        let (_, lit) = string_lit(r#""""#).unwrap();
+        assert_eq!(lit, "");
+
+        // Plain string without escapes (backward compat).
+        let (_, lit) = string_lit(r#""plain""#).unwrap();
+        assert_eq!(lit, "plain");
+
+        // Unterminated string fails.
+        assert!(string_lit(r#""unterminated"#).is_err());
+
+        // Invalid escape (\n is not supported) fails.
+        assert!(string_lit(r#""bad\n""#).is_err());
+    }
+
+    #[test]
+    fn string_literal_display_roundtrips_with_escapes() {
+        use std::sync::Arc;
+        // A literal containing double-quote and backslash must Display to
+        // something the parser re-parses to the same value.
+        let lit = Literal::Str(Arc::from("say \"hi\" and \\ path"));
+        let rendered = lit.to_string();
+        let (_, reparsed) = literal(&rendered).unwrap();
+        assert_eq!(reparsed, lit, "Display → parse round-trip failed: {rendered}");
     }
 }
