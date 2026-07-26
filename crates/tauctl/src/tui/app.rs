@@ -204,6 +204,32 @@ impl App {
                     self.push_log(msg, true);
                 }
             },
+            ["loadf", path, name, rest @ ..] => {
+                let clause = if rest.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {}", rest.join(" "))
+                };
+                match std::fs::read_to_string(path) {
+                    Ok(source) => {
+                        let escaped = source
+                            .replace('\\', "\\\\")
+                            .replace('"', "\\\"")
+                            .replace(['\n', '\r'], " ");
+                        let stmt = format!(
+                            "CREATE FUNCTION {name}{clause} AS \"{escaped}\""
+                        );
+                        self.pending = true;
+                        self.status = "sending…".into();
+                        self.send_io(IoRequest::Query(stmt));
+                    }
+                    Err(e) => {
+                        let msg = format!("open {path}: {e}");
+                        self.status = msg.clone();
+                        self.push_log(msg, true);
+                    }
+                }
+            }
             ["exit"] | ["quit"] => {
                 self.should_quit = true;
             }
@@ -360,6 +386,66 @@ mod tests {
         app.submit("AT LENS x 42".to_string());
         assert!(app.pending);
         assert_eq!(app.status, "sending…");
+    }
+
+    #[test]
+    fn submit_loadf_reads_file_and_constructs_create_function() {
+        let (tx_req, rx_req) = mpsc::channel::<IoRequest>();
+        let (_tx_resp, rx_resp) = mpsc::channel::<IoResponse>();
+        let mut app = App {
+            net: NetHandle::test_pair(tx_req, rx_resp),
+            connections: vec![],
+            log: vec![],
+            last_response: None,
+            pending: false,
+            status: "Ready".into(),
+            should_quit: false,
+            focus: Focus::Input,
+            conn_sel: 0,
+            log_scroll: 0,
+        };
+
+        let path =
+            format!("/tmp/tauctl-loadf-test-{}.lua", std::process::id());
+        std::fs::write(&path, "local x = 1\nreturn x * 2\n").unwrap();
+
+        app.submit(format!(
+            "loadf {path} double ON WRITE LENS returns CAPS exec,range"
+        ));
+
+        std::fs::remove_file(&path).ok();
+
+        assert!(app.pending);
+        assert_eq!(app.status, "sending…");
+
+        let req = rx_req
+            .try_recv()
+            .expect("IoRequest should have been sent");
+        match req {
+            IoRequest::Query(stmt) => {
+                assert!(
+                    stmt.starts_with("CREATE FUNCTION double ON WRITE LENS returns CAPS exec,range AS \""),
+                    "unexpected stmt: {stmt}"
+                );
+                assert!(
+                    stmt.contains("local x = 1 return x * 2"),
+                    "newlines should be joined with spaces: {stmt}"
+                );
+                assert!(
+                    stmt.ends_with('"'),
+                    "stmt should end with closing quote: {stmt}"
+                );
+            }
+            other => panic!("expected Query, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn submit_loadf_missing_file_logs_error() {
+        let (mut app, _tx) = test_app();
+        app.submit("loadf /nonexistent.lua fn1".to_string());
+        assert!(!app.pending);
+        assert!(app.log.last().unwrap().is_err);
     }
 
     #[test]

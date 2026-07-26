@@ -14,6 +14,7 @@
 
 pub mod clock;
 pub mod crypto;
+pub(crate) mod func;
 pub mod kernel;
 pub(crate) mod model;
 pub(crate) mod ql;

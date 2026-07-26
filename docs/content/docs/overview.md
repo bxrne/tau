@@ -4,7 +4,7 @@ date = 2026-05-28
 template = "page.html"
 +++
 
-Tau is a time-series database for workloads where data changes over time — not just grows. Sensor readings get corrected. Financial prices get restated. Audit records get amended. Tau handles this with a data model grounded in algebraic structure: half-open intervals that tile precisely, layers that form a total order, and a normalisation algorithm (compaction) that provably preserves all query results.
+Tau is a bitemporal time-series database for workloads where data changes over time — not just grows. Financial prices get restated. Corporate actions amend history. Risk signals need rolling computation over corrected data. Tau handles this with a data model grounded in algebraic structure: half-open intervals that tile precisely, layers that form a total order, and a normalisation algorithm (compaction) that provably preserves all query results. **Lua triggers** let you compute Sharpe ratios, rolling stats, and risk metrics on write or on a schedule, sandboxed inside the kernel.
 
 ---
 
@@ -48,10 +48,11 @@ A `Lens` is a named temporal function. It is either:
 
 - **`Base`**: backed by a stack of layers in the store.
 - **`Derived(f)`**: a lazy closure compiled from a TauQL expression at `DERIVE` time.
+- **`Materialised`**: an `XDERIVE` lens — the result is computed and stored eagerly, auto-refreshing whenever a source lens is corrected.
 
-Derived lenses compose. `DERIVE LENS smooth AS avg(cpu, -600, 0)` compiles into a closure that calls `cpu`'s closure for every evaluation. The composition graph is a DAG — cycle detection runs at `DERIVE` time, not at query time.
+Derived lenses compose. `DERIVE LENS spread AS aapl - msft` compiles into a closure that calls both lenses for every evaluation. The composition graph is a DAG — cycle detection runs at `DERIVE` time, not at query time. Stack as many transformations as you need over the same base data: a raw price lens feeds a returns lens feeds a rolling-mean lens feeds a signal lens — all re-evaluated against the latest corrections, all time-travel-aware.
 
-A base lens may also be **multi-dimensional**: `CREATE LENS grid float AXES (valid, region)` declares extra filter axes (axis 0 is always valid time). Its taus are boxes appended as `APPEND LENS grid [0 100] [0 50] 1`, queried with one coordinate per axis (`AT LENS grid 10 25`), and swept along valid time with the other axes fixed (`RANGE LENS grid 0 100 AT (25)`). See the [TauQL reference](/docs/tauql/).
+A base lens may also be **multi-dimensional**: `CREATE LENS quote float AXES (time, instrument, venue)` declares extra filter axes (axis 0 is always valid time). Its taus are boxes appended as `APPEND LENS quote [0 3600] [1 2] [10 20] 100.0`, queried with one coordinate per axis (`AT LENS quote 1800 1 10`), and swept along valid time with the other axes fixed (`RANGE LENS quote 0 7200 AT (1, 10)`). See the [TauQL reference](/docs/tauql/).
 
 ---
 
@@ -61,7 +62,64 @@ Every layer has a monotonically increasing ID assigned at append time. When mult
 
 This makes concurrent appends trivially composable: two writers both succeed; query results reflect both writes, with the later one taking precedence at any overlap.
 
-Because each layer also carries its `written_at` transaction time, you can wind the clock back: `AT LENS x t AS OF <ts>` resolves newest-wins **restricted to layers written at or before `ts`**, and `HISTORY LENS x` lists the surviving write-times. Corrections never destroy the belief that was current before them.
+Because each layer also carries its `written_at` transaction time, you can wind the clock back: `AT LENS px t AS OF <ts>` resolves newest-wins **restricted to layers written at or before `ts`**, and `HISTORY LENS px` lists the surviving write-times. Corrections never destroy the belief that was current before them — the foundation of point-in-time-correct backtesting.
+
+---
+
+## Lua scripting
+
+Tau embeds **LuaJIT** via `mlua`. You write functions in Lua, register them with `CREATE FUNCTION`, and they fire on triggers, on a schedule, or on demand. The host API is capability-gated: each function declares which `tau.*` calls it may use.
+
+```sql
+-- A rolling Sharpe ratio computed on every write to the returns lens.
+CREATE FUNCTION sharpe ON WRITE LENS returns CAPS exec, range, clock
+AS "
+  local s, e = tau.clock_window(86400000)   -- last 24h in ms
+  local n, sum, sum2 = 0, 0.0, 0.0
+  for _, row in ipairs(tau.range('returns', s, e)) do
+    local r = row.v; n = n + 1; sum = sum + r; sum2 = sum2 + r*r
+  end
+  if n == 0 then return end
+  local mean = sum / n
+  local sd = (sum2 / n - mean*mean) ^ 0.5
+  local sh = (sd > 0) and (mean / sd) or 0.0
+  tau.exec(('APPEND LENS sharpe 0 %d %f'):format(e, sh))
+"
+```
+
+### Trigger kinds
+
+| Kind | Fires when | Use case |
+|------|-----------|----------|
+| `ON WRITE [LENS x]` | After an `APPEND` to a matching lens | Recompute a derived signal, update a position, fire an alert |
+| `SCHEDULE EVERY <secs>` | Periodically from the host loop | End-of-day rollups, TTL sweeps, scheduled risk refreshes |
+| `ON PERMISSION` | Before a statement executes | Custom access control, compliance gates, trade limits |
+| On-demand | `CALL FUNCTION name(args)` | Ad-hoc computation, parameterised queries |
+
+### Host API (`tau.*`)
+
+| Call | Capability | Description |
+|------|-----------|-------------|
+| `tau.exec(stmt)` | `exec` | Run a TauQL statement (mutation or read) |
+| `tau.at(lens, t)` | `at` | Point lookup — read-only fast path |
+| `tau.range(lens, s, e)` | `range` | Range scan — returns `{s, e, v}` triples |
+| `tau.reduce(lens, s, e, func)` | `range` | Aggregate (`min`/`max`/`avg`/`sum`/`count`) |
+| `tau.log(msg)` | `log` | Structured log into the kernel's tracing sink |
+| `tau.metric(name, val)` | `metric` | Record a custom metric |
+| `tau.clock()` | `clock` | Current virtual time (ms) |
+| `tau.clock_window(ms)` | `clock` | `[now-ms, now)` — rolling window bounds |
+| `tau.last_write_span()` | `clock` | `[lo, hi)` of the taus that fired an `ON WRITE` trigger |
+| `tau.faults()` | `faults` | Armed fault-injection state (read-only) |
+
+### Sandboxing
+
+The Lua environment is **sandboxed**: `os`, `io`, `loadfile`, `dofile`, `require`, `debug`, and `package` are stripped from `_G`. The only I/O a function can do is through the `tau.*` host API, gated by declared capabilities. A function that tries `os.execute(...)` gets a clean error, not a shell.
+
+### Persistence
+
+`CREATE FUNCTION` and `DROP FUNCTION` persist in the schema WAL (like `DERIVE`/`XDERIVE`), so functions survive restarts. The Lua source is stored as text and recompiled on replay.
+
+See [Lua Scripting](/docs/scripting/) for the full reference.
 
 ---
 
@@ -100,4 +158,4 @@ Locking tiers, transaction semantics, and design rationale live in [How it works
 
 ---
 
-*For design rationale see [How it works](/docs/how-it-works/). For the query language see [TauQL Reference](/docs/tauql/).*
+*For design rationale see [How it works](/docs/how-it-works/). For the query language see [TauQL Reference](/docs/tauql/). For Lua scripting see [Scripting](/docs/scripting/).*
