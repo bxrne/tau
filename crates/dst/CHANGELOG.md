@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/bxrne/tau/compare/dst-v0.5.0...dst-v0.6.0) (2026-07-26)
+
+
+### Features
+
+* **dst:** handles new compaction methods ([f9900c7](https://github.com/bxrne/tau/commit/f9900c7ec2732e20fd2162c63535bb1e973c8571))
+
 ## [0.5.0](https://github.com/bxrne/tau/compare/dst-v0.4.0...dst-v0.5.0) (2026-07-07)
 
 
