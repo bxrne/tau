@@ -511,6 +511,26 @@ fn build_tree() -> Tree<SimCtx, Op> {
                 }
             },
         ))
+        // SET COMPACT on a base int lens (low weight — compaction path only).
+        .leaf(Leaf::new(
+            1,
+            0,
+            |c: &SimCtx| !c.in_transaction && c.oracle().active_db() == "default",
+            |rng, c| Op::SetCompact {
+                lens: op::int_lens_for_db(c.oracle(), rng),
+                threshold: Some(rng.gen_range(1..=16)),
+            },
+        ))
+        // SET TTL far in the future so dual-sim stays aligned on AT/RANGE.
+        .leaf(Leaf::new(
+            1,
+            0,
+            |c: &SimCtx| !c.in_transaction && c.oracle().active_db() == "default",
+            |rng, c| Op::Ttl {
+                lens: op::int_lens_for_db(c.oracle(), rng),
+                secs: Some(9_999_999_999),
+            },
+        ))
 }
 
 /// Pick the next Tau operation using the weighted behavior tree.

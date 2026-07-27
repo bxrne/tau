@@ -5,7 +5,8 @@
 //! ```text
 //! stmt   := create | append | batch_append | copy | derive | xderive | show | at | range
 //!         | reduce | drop | use | create_user | drop_user | grant | revoke
-//!         | history | backup | restore
+//!         | history | backup | restore | create_function | drop_function
+//!         | call_function | show_functions
 //!
 //! create := CREATE DATABASE <ident>
 //!         | CREATE LENS <ident> <type>
@@ -43,6 +44,16 @@
 //! grant       := GRANT  <perm-letters> ON <db-or-star> TO   <ident>
 //! revoke      := REVOKE <perm-letters> ON <db-or-star> FROM <ident>
 //!
+//! create_function := CREATE FUNCTION <ident> [trigger] [CAPS <cap>+]
+//!                    AS "<lua-source>"
+//! drop_function   := DROP FUNCTION <ident>
+//! call_function   := CALL FUNCTION <ident> [(<literal> …)]
+//! show_functions  := SHOW FUNCTIONS
+//! trigger         := ON WRITE [LENS <ident>]
+//!                 | SCHEDULE EVERY <int>
+//!                 | ON PERMISSION
+//! cap             := exec | at | range | log | metric | clock | faults
+//!
 //! type      := int | float | str | bool
 //! func      := min | max | avg | sum | count
 //! literal   := int | float | string | bool | null
@@ -56,6 +67,8 @@
 //! are lowercase-only. Identifiers are case-sensitive.
 
 use std::sync::Arc;
+
+use bitflags::bitflags;
 
 /// Declared value type for a base lens. Used only as a creation hint;
 /// the storage engine itself is generic over `V`.
@@ -138,6 +151,38 @@ pub enum Expr {
         rel_start: i64,
         rel_end: i64,
     },
+}
+
+/// What fires a Lua function.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TriggerKind {
+    /// `CALL FUNCTION name(args)` — on demand.
+    OnDemand,
+    /// `ON WRITE [LENS x]` — after an append to any lens or a specific one.
+    OnWrite { lens: Option<String> },
+    /// `SCHEDULE EVERY <secs>` — periodically from the host loop.
+    Cron { every_secs: i64 },
+    /// `ON PERMISSION` — consultative hook before statement execution.
+    OnPermission,
+}
+
+// Capability flags gating which `tau.*` host API calls a function may use.
+bitflags! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Cap: u16 {
+        const EXEC    = 1 << 0;
+        const AT      = 1 << 1;
+        const RANGE   = 1 << 2;
+        const LOG     = 1 << 3;
+        const METRIC  = 1 << 4;
+        const CLOCK   = 1 << 5;
+        const FAULTS  = 1 << 6;
+    }
+}
+
+impl Cap {
+    /// The default capability set when `CAPS` is omitted: `log` only.
+    pub const DEFAULT: Cap = Cap::LOG;
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -361,6 +406,25 @@ pub enum Stmt {
         name: String,
         path: String,
     },
+    /// `CREATE FUNCTION <name> [trigger] [CAPS <cap>+] AS "<lua>"` — register a
+    /// Lua function.  Persisted in the schema WAL and replayed on restart.
+    CreateFunction {
+        name: String,
+        kind: TriggerKind,
+        caps: Cap,
+        body: String,
+    },
+    /// `DROP FUNCTION <name>` — remove a registered function.
+    DropFunction {
+        name: String,
+    },
+    /// `CALL FUNCTION <name> [(<literal> …)]` — invoke an on-demand function.
+    CallFunction {
+        name: String,
+        args: Vec<Literal>,
+    },
+    /// `SHOW FUNCTIONS` — list registered function names.
+    ShowFunctions,
 }
 
 impl Stmt {
@@ -385,6 +449,7 @@ impl Stmt {
                 | Stmt::ShowUsers
                 | Stmt::ShowGrants { .. }
                 | Stmt::ShowStatus
+                | Stmt::ShowFunctions
                 | Stmt::BackupDatabase { .. }
         )
     }
@@ -500,6 +565,8 @@ pub fn needs_registry_lock(stmt: &Stmt) -> bool {
             | Stmt::Commit
             | Stmt::Rollback
             | Stmt::RestoreDatabase { .. }
+            | Stmt::CreateFunction { .. }
+            | Stmt::DropFunction { .. }
     )
 }
 
@@ -533,6 +600,45 @@ impl std::fmt::Display for Stmt {
                 write!(f, "SET COMPACT LENS {name} {threshold}")
             }
             Stmt::UnsetCompact { name } => write!(f, "UNSET COMPACT LENS {name}"),
+            Stmt::CreateFunction {
+                name,
+                kind,
+                caps,
+                body,
+            } => {
+                write!(f, "CREATE FUNCTION {name}")?;
+                match kind {
+                    TriggerKind::OnDemand => {}
+                    TriggerKind::OnWrite { lens: None } => write!(f, " ON WRITE")?,
+                    TriggerKind::OnWrite { lens: Some(l) } => write!(f, " ON WRITE LENS {l}")?,
+                    TriggerKind::Cron { every_secs } => write!(f, " SCHEDULE EVERY {every_secs}")?,
+                    TriggerKind::OnPermission => write!(f, " ON PERMISSION")?,
+                }
+                if *caps != Cap::DEFAULT {
+                    write!(f, " CAPS")?;
+                    let mut first = true;
+                    for (name, flag) in [
+                        ("exec", Cap::EXEC),
+                        ("at", Cap::AT),
+                        ("range", Cap::RANGE),
+                        ("log", Cap::LOG),
+                        ("metric", Cap::METRIC),
+                        ("clock", Cap::CLOCK),
+                        ("faults", Cap::FAULTS),
+                    ] {
+                        if caps.contains(flag) {
+                            if !first {
+                                write!(f, ",")?;
+                            }
+                            write!(f, " {name}")?;
+                            first = false;
+                        }
+                    }
+                }
+                let escaped = body.replace('\\', "\\\\").replace('"', "\\\"");
+                write!(f, " AS \"{escaped}\"")
+            }
+            Stmt::DropFunction { name } => write!(f, "DROP FUNCTION {name}"),
             _ => unreachable!("Stmt::Display is only implemented for WAL-persisted DDL variants"),
         }
     }

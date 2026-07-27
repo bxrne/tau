@@ -118,10 +118,14 @@ pub enum Op {
         spec: DeriveSpec,
         range: Option<(Ts, Ts)>,
     },
-    #[allow(dead_code)]
     Ttl {
         lens: String,
         secs: Option<i64>,
+    },
+    /// `SET COMPACT LENS` (`Some`) / `UNSET COMPACT LENS` (`None`).
+    SetCompact {
+        lens: String,
+        threshold: Option<usize>,
     },
     UseDb(&'static str),
     StartTransaction,
@@ -198,6 +202,14 @@ impl Op {
                 secs: Some(s),
             } => format!("SET TTL LENS {lens} {s}"),
             Op::Ttl { lens, secs: None } => format!("UNSET TTL LENS {lens}"),
+            Op::SetCompact {
+                lens,
+                threshold: Some(n),
+            } => format!("SET COMPACT LENS {lens} {n}"),
+            Op::SetCompact {
+                lens,
+                threshold: None,
+            } => format!("UNSET COMPACT LENS {lens}"),
             Op::UseDb(db) => format!("USE DATABASE {db}"),
             Op::StartTransaction => "START TRANSACTION".into(),
             Op::Commit => "COMMIT".into(),

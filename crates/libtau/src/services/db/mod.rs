@@ -440,6 +440,22 @@ impl DbService {
             .clone()
     }
 
+    /// Persist a schema DDL statement to the active database's WAL.  Used by
+    /// the kernel for function DDL (CREATE/DROP FUNCTION) which is routed
+    /// inline rather than through `db.exec`.
+    pub fn append_schema_active(&self, ddl: &str) -> Result<(), ExecError> {
+        let reg = self.registry.read().expect("registry lock poisoned");
+        let name = reg.active.as_deref().ok_or(ExecError::NoActiveDatabase)?;
+        let db_arc = reg
+            .databases
+            .get(name)
+            .ok_or_else(|| ExecError::UnknownDatabase(name.into()))?
+            .clone();
+        drop(reg);
+        let state = db_arc.read().expect("db lock poisoned");
+        state.db.append_schema(ddl).map_err(ExecError::from)
+    }
+
     /// Whether a transaction is currently buffering mutations.
     pub fn is_in_transaction(&self) -> bool {
         self.pending

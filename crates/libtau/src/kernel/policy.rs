@@ -94,6 +94,9 @@ pub(crate) fn check_permission(
         Stmt::ShowStatus => Ok(()),
         Stmt::BackupDatabase { name, .. } => require(name, Perm::R),
         Stmt::RestoreDatabase { .. } => require_global_admin(),
+        Stmt::CreateFunction { .. } | Stmt::DropFunction { .. } => require_global_admin(),
+        Stmt::CallFunction { .. } => require(require_active()?, Perm::U),
+        Stmt::ShowFunctions => Ok(()),
     }
 }
 
@@ -148,5 +151,9 @@ fn stmt_to_op(stmt: &Stmt) -> Op {
         | Stmt::Revoke { .. } => Op::User,
         Stmt::BackupDatabase { .. } | Stmt::RestoreDatabase { .. } => Op::Backup,
         Stmt::StartTransaction | Stmt::Commit | Stmt::Rollback => Op::Transaction,
+        Stmt::CreateFunction { .. }
+        | Stmt::DropFunction { .. }
+        | Stmt::CallFunction { .. }
+        | Stmt::ShowFunctions => Op::User,
     }
 }

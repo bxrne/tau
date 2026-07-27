@@ -653,6 +653,13 @@ enum PendingMutation {
     UnsetTtl {
         lens: String,
     },
+    SetCompact {
+        lens: String,
+        threshold: usize,
+    },
+    UnsetCompact {
+        lens: String,
+    },
     CreateNdLens {
         name: String,
         arity: usize,
@@ -722,12 +729,18 @@ impl Oracle {
             .or_insert_with(|| OracleDb::with_threshold(threshold));
     }
 
+    /// Per-lens compact threshold override (`SET COMPACT LENS`).
     pub fn set_compact(&mut self, name: &str, threshold: usize) {
         let db = self.db_mut();
         if !db.lenses.contains_key(name) {
             return;
         }
         db.compact_overrides.insert(name.to_string(), threshold);
+    }
+
+    /// Clear a per-lens compact threshold (`UNSET COMPACT LENS`).
+    pub fn unset_compact(&mut self, name: &str) {
+        self.db_mut().compact_overrides.remove(name);
     }
 
     pub fn use_db(&mut self, name: &str) {
@@ -819,6 +832,8 @@ impl Oracle {
             PendingMutation::Xderive { name, spec, range } => self.xderive_lens(&name, spec, range),
             PendingMutation::SetTtl { lens, secs } => self.set_ttl(&lens, secs),
             PendingMutation::UnsetTtl { lens } => self.unset_ttl(&lens),
+            PendingMutation::SetCompact { lens, threshold } => self.set_compact(&lens, threshold),
+            PendingMutation::UnsetCompact { lens } => self.unset_compact(&lens),
             PendingMutation::CreateNdLens { name, arity } => {
                 self.db_mut().create_nd_lens(&name, arity);
             }
@@ -963,6 +978,21 @@ impl Oracle {
             }
             Op::Ttl { lens, secs: None } => {
                 self.buffer_mutation(PendingMutation::UnsetTtl { lens: lens.clone() });
+            }
+            Op::SetCompact {
+                lens,
+                threshold: Some(n),
+            } => {
+                self.buffer_mutation(PendingMutation::SetCompact {
+                    lens: lens.clone(),
+                    threshold: *n,
+                });
+            }
+            Op::SetCompact {
+                lens,
+                threshold: None,
+            } => {
+                self.buffer_mutation(PendingMutation::UnsetCompact { lens: lens.clone() });
             }
             Op::UseDb(db) => self.use_db(db),
             Op::StartTransaction => self.start_transaction(),

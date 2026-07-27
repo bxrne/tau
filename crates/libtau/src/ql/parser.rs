@@ -23,7 +23,7 @@ use nom::{
     sequence::{delimited, pair, preceded},
 };
 
-use super::ast::{AggFunc, BinOp, Expr, Literal, Stmt, Type, UnOp};
+use super::ast::{AggFunc, BinOp, Cap, Expr, Literal, Stmt, TriggerKind, Type, UnOp};
 use crate::services::auth::Perm;
 
 /// Turn a `nom` parse failure into a human-readable, single-line message that
@@ -52,31 +52,38 @@ pub fn format_parse_error(query: &str, err: nom::Err<nom::error::Error<&str>>) -
 pub fn parse(input: &str) -> IResult<&str, Stmt> {
     let (input, _) = multispace0(input)?;
     let (input, s) = alt((
-        stmt_create,
-        stmt_batch_append,
-        stmt_append,
-        stmt_copy,
-        stmt_xderive,
-        stmt_derive,
-        stmt_at,
-        stmt_range,
-        stmt_reduce,
-        stmt_drop,
-        stmt_use,
-        stmt_show,
-        stmt_grant,
-        stmt_revoke,
-        stmt_start_tx,
-        stmt_commit,
-        stmt_rollback,
-        stmt_history,
-        stmt_backup,
-        stmt_restore,
         alt((
-            stmt_set_ttl,
-            stmt_unset_ttl,
-            stmt_set_compact,
-            stmt_unset_compact,
+            stmt_create,
+            stmt_create_function,
+            stmt_batch_append,
+            stmt_append,
+            stmt_copy,
+            stmt_xderive,
+            stmt_derive,
+            stmt_at,
+            stmt_range,
+            stmt_reduce,
+            stmt_drop,
+            stmt_drop_function,
+            stmt_call_function,
+            stmt_use,
+            stmt_show,
+            stmt_grant,
+            stmt_revoke,
+        )),
+        alt((
+            stmt_start_tx,
+            stmt_commit,
+            stmt_rollback,
+            stmt_history,
+            stmt_backup,
+            stmt_restore,
+            alt((
+                stmt_set_ttl,
+                stmt_unset_ttl,
+                stmt_set_compact,
+                stmt_unset_compact,
+            )),
         )),
     ))
     .parse(input)?;
@@ -233,6 +240,7 @@ fn stmt_show(i: &str) -> IResult<&str, Stmt> {
         value(Stmt::ShowLenses, tag("LENSES")),
         value(Stmt::ShowUsers, tag("USERS")),
         value(Stmt::ShowStatus, tag("STATUS")),
+        value(Stmt::ShowFunctions, tag("FUNCTIONS")),
         stmt_show_grants,
     ))
     .parse(i)
@@ -921,6 +929,111 @@ fn stmt_restore(i: &str) -> IResult<&str, Stmt> {
     Ok((i, Stmt::RestoreDatabase { name, path }))
 }
 
+/// Parse one capability name into its `Cap` bit.
+fn cap_name(i: &str) -> IResult<&str, Cap> {
+    alt((
+        value(Cap::EXEC, tag("exec")),
+        value(Cap::AT, tag("at")),
+        value(Cap::RANGE, tag("range")),
+        value(Cap::LOG, tag("log")),
+        value(Cap::METRIC, tag("metric")),
+        value(Cap::CLOCK, tag("clock")),
+        value(Cap::FAULTS, tag("faults")),
+    ))
+    .parse(i)
+}
+
+/// `CAPS <cap>[, <cap>]*`
+fn caps_clause(i: &str) -> IResult<&str, Cap> {
+    let (i, _) = (multispace1, tag("CAPS"), multispace1).parse(i)?;
+    let (i, caps) =
+        separated_list1(delimited(multispace0, char(','), multispace0), cap_name).parse(i)?;
+    let mut flags = Cap::empty();
+    for c in caps {
+        flags |= c;
+    }
+    Ok((i, flags))
+}
+
+/// Trigger clause: `ON WRITE [LENS <ident>]`, `SCHEDULE EVERY <secs>`, or `ON PERMISSION`.
+fn trigger_clause(i: &str) -> IResult<&str, TriggerKind> {
+    alt((
+        map(
+            preceded(
+                (multispace1, tag("ON"), multispace1, tag("WRITE")),
+                opt(preceded((multispace1, tag("LENS"), multispace1), ident)),
+            ),
+            |lens| TriggerKind::OnWrite { lens },
+        ),
+        map(
+            preceded(
+                (
+                    multispace1,
+                    tag("SCHEDULE"),
+                    multispace1,
+                    tag("EVERY"),
+                    multispace1,
+                ),
+                integer,
+            ),
+            |secs| TriggerKind::Cron { every_secs: secs },
+        ),
+        value(
+            TriggerKind::OnPermission,
+            (multispace1, tag("ON"), multispace1, tag("PERMISSION")),
+        ),
+    ))
+    .parse(i)
+}
+
+/// `CREATE FUNCTION <name> [trigger] [CAPS <cap>+] AS "<lua>"`
+fn stmt_create_function(i: &str) -> IResult<&str, Stmt> {
+    let (i, _) = kw("CREATE").parse(i)?;
+    let (i, _) = kw("FUNCTION").parse(i)?;
+    let (i, name) = ident(i)?;
+    let (i, kind) = opt(trigger_clause).parse(i)?;
+    let (i, caps) = opt(caps_clause).parse(i)?;
+    let (i, _) = (multispace1, tag("AS"), multispace1).parse(i)?;
+    let (i, body) = string_lit(i)?;
+    Ok((
+        i,
+        Stmt::CreateFunction {
+            name,
+            kind: kind.unwrap_or(TriggerKind::OnDemand),
+            caps: caps.unwrap_or(Cap::DEFAULT),
+            body,
+        },
+    ))
+}
+
+/// `DROP FUNCTION <name>`
+fn stmt_drop_function(i: &str) -> IResult<&str, Stmt> {
+    let (i, _) = kw("DROP").parse(i)?;
+    let (i, _) = kw("FUNCTION").parse(i)?;
+    let (i, name) = ident(i)?;
+    Ok((i, Stmt::DropFunction { name }))
+}
+
+/// `CALL FUNCTION <name> [(<literal> …)]`
+fn stmt_call_function(i: &str) -> IResult<&str, Stmt> {
+    let (i, _) = kw("CALL").parse(i)?;
+    let (i, _) = kw("FUNCTION").parse(i)?;
+    let (i, name) = ident(i)?;
+    let (i, args) = opt(delimited(
+        (multispace0, char('('), multispace0),
+        separated_list0(delimited(multispace0, char(','), multispace0), literal),
+        (multispace0, char(')')),
+    ))
+    .parse(i)?;
+    Ok((
+        i,
+        Stmt::CallFunction {
+            name,
+            args: args.unwrap_or_default(),
+        },
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1530,6 +1643,9 @@ mod tests {
         let lit = Literal::Str(Arc::from("say \"hi\" and \\ path"));
         let rendered = lit.to_string();
         let (_, reparsed) = literal(&rendered).unwrap();
-        assert_eq!(reparsed, lit, "Display → parse round-trip failed: {rendered}");
+        assert_eq!(
+            reparsed, lit,
+            "Display → parse round-trip failed: {rendered}"
+        );
     }
 }

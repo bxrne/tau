@@ -216,9 +216,7 @@ impl App {
                             .replace('\\', "\\\\")
                             .replace('"', "\\\"")
                             .replace(['\n', '\r'], " ");
-                        let stmt = format!(
-                            "CREATE FUNCTION {name}{clause} AS \"{escaped}\""
-                        );
+                        let stmt = format!("CREATE FUNCTION {name}{clause} AS \"{escaped}\"");
                         self.pending = true;
                         self.status = "sending…".into();
                         self.send_io(IoRequest::Query(stmt));
@@ -405,8 +403,7 @@ mod tests {
             log_scroll: 0,
         };
 
-        let path =
-            format!("/tmp/tauctl-import-lua-test-{}.lua", std::process::id());
+        let path = format!("/tmp/tauctl-import-lua-test-{}.lua", std::process::id());
         std::fs::write(&path, "local x = 1\nreturn x * 2\n").unwrap();
 
         app.submit(format!(
@@ -418,13 +415,13 @@ mod tests {
         assert!(app.pending);
         assert_eq!(app.status, "sending…");
 
-        let req = rx_req
-            .try_recv()
-            .expect("IoRequest should have been sent");
+        let req = rx_req.try_recv().expect("IoRequest should have been sent");
         match req {
             IoRequest::Query(stmt) => {
                 assert!(
-                    stmt.starts_with("CREATE FUNCTION double ON WRITE LENS returns CAPS exec,range AS \""),
+                    stmt.starts_with(
+                        "CREATE FUNCTION double ON WRITE LENS returns CAPS exec,range AS \""
+                    ),
                     "unexpected stmt: {stmt}"
                 );
                 assert!(

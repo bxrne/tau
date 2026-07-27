@@ -23,18 +23,22 @@ use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
 use crate::clock::Clock;
+use crate::func::Registry;
 use crate::kernel::policy::{check_permission, filter_show_databases, record_metrics};
 use crate::kernel::types::{AuthEvent, AuthResult, MetricEvent};
 use crate::ql::Stmt;
+use crate::ql::ast::{Cap, TriggerKind};
 use crate::services::auth::{AuthService, Perm, User, UserStore};
 use crate::services::db::{DbService, ExecError, Output, StorageBackend};
 use crate::services::metrics::Metrics;
 use crate::services::query::QueryService;
 use crate::services::store::{COMPACT_THRESHOLD, FaultInjector};
+use crate::value::Value;
 
 use super::handle::{Handle, RawHandle};
 
@@ -72,12 +76,19 @@ pub struct SyscallCtx<'a> {
     /// Current logical time.
     now: Tick,
     /// Access to kernel resources (slab, external handlers).
-    kernel: &'a mut KernelInner,
+    kernel: &'a KernelInner,
 }
 
 impl<'a> SyscallCtx<'a> {
-    fn new(me: RawHandle, now: Tick, kernel: &'a mut KernelInner) -> Self {
+    fn new(me: RawHandle, now: Tick, kernel: &'a KernelInner) -> Self {
         Self { me, now, kernel }
+    }
+
+    /// Create a syscall context from an immutable kernel reference.  Used by
+    /// `call_function` and `fire_on_write_triggers` which run inside
+    /// `exec_stmt` (taking `&self`).  All mutations use internal locking.
+    fn from_ref(me: RawHandle, now: Tick, kernel: &'a KernelInner) -> Self {
+        Self::new(me, now, kernel)
     }
 
     /// This subsystem's own handle identity.
@@ -141,13 +152,13 @@ impl<'a> SyscallCtx<'a> {
     }
 
     /// Allocate a new resource.
-    pub fn allocate(&mut self) -> Result<RawHandle, SyscallError> {
+    pub fn allocate(&self) -> Result<RawHandle, SyscallError> {
         self.kernel.syscall_allocate()
     }
 
     /// Deallocate a resource.
-    pub fn deallocate(&mut self, handle: RawHandle) -> Result<(), SyscallError> {
-        if self.kernel.slab.remove(handle) {
+    pub fn deallocate(&self, handle: RawHandle) -> Result<(), SyscallError> {
+        if self.kernel.slab.lock().expect("slab lock").remove(handle) {
             Ok(())
         } else {
             Err(SyscallError::InvalidHandle)
@@ -167,18 +178,18 @@ impl<'a> SyscallCtx<'a> {
 
     // NOTE: Metrics operations
     /// Record a metric event.
-    pub fn metric_record(&mut self, metric: MetricEvent) -> Result<(), SyscallError> {
+    pub fn metric_record(&self, metric: MetricEvent) -> Result<(), SyscallError> {
         self.kernel.metric_record(metric)
     }
 
     /// Collect all metrics as prometheus format.
-    pub fn metric_collect(&mut self) -> Result<String, SyscallError> {
+    pub fn metric_collect(&self) -> Result<String, SyscallError> {
         self.kernel.metric_collect()
     }
 
     // NOTE: Minimal auth operations
     /// Perform an authentication/authorization operation.
-    pub fn auth(&mut self, event: AuthEvent) -> Result<AuthResult, SyscallError> {
+    pub fn auth(&self, event: AuthEvent) -> Result<AuthResult, SyscallError> {
         self.kernel.auth(event)
     }
 }
@@ -186,7 +197,7 @@ impl<'a> SyscallCtx<'a> {
 /// Internal kernel state shared across syscalls.
 struct KernelInner {
     /// Resource slab with capabilities.
-    slab: Slab,
+    slab: Mutex<Slab>,
     /// External I/O handlers (host-backed resources).
     external: HashMap<RawHandle, Arc<dyn ExternalHandler>>,
     /// Current logical time.
@@ -203,6 +214,10 @@ struct KernelInner {
     db: Arc<DbService>,
     /// Query (read) service.
     query: Arc<QueryService>,
+    /// User-defined Lua function registry.
+    func: RwLock<Registry>,
+    /// Reentrancy guard: triggers don't fire inside other triggers.
+    trigger_depth: AtomicU32,
     /// Slab handles of the four built-in services (metrics, auth, db, query),
     /// in registration order.
     service_handles: [RawHandle; 4],
@@ -233,7 +248,7 @@ impl KernelInner {
         // kernel-issued handle, so all capabilities trace back to the slab.
         let service_handles = [(); 4].map(|_| Handle::<()>::new(slab.insert(Slot::Service)).raw());
         Self {
-            slab,
+            slab: Mutex::new(slab),
             external: HashMap::new(),
             now: 0,
             clock,
@@ -242,17 +257,19 @@ impl KernelInner {
             auth,
             db,
             query,
+            func: RwLock::new(Registry::new()),
+            trigger_depth: AtomicU32::new(0),
             service_handles,
         }
     }
 
-    fn syscall_allocate(&mut self) -> Result<RawHandle, SyscallError> {
-        let raw_handle = self.slab.insert(Slot::Service);
+    fn syscall_allocate(&self) -> Result<RawHandle, SyscallError> {
+        let raw_handle = self.slab.lock().expect("slab lock").insert(Slot::Service);
         Ok(raw_handle)
     }
 
     fn register_external(&mut self, handler: Arc<dyn ExternalHandler>) -> RawHandle {
-        let raw_handle = self.slab.insert(Slot::External);
+        let raw_handle = self.slab.lock().expect("slab lock").insert(Slot::External);
         self.external.insert(raw_handle, handler);
         raw_handle
     }
@@ -260,7 +277,7 @@ impl KernelInner {
     /// Resolve an external-resource capability: the handle must be live in
     /// the slab, of the external kind, and have a registered handler.
     fn external_handler(&self, h: RawHandle) -> Result<&Arc<dyn ExternalHandler>, SyscallError> {
-        match self.slab.get(h) {
+        match self.slab.lock().expect("slab lock").get(h) {
             Some(Slot::External) => self.external.get(&h).ok_or(SyscallError::InvalidHandle),
             Some(Slot::Service) => Err(SyscallError::NotSupported),
             None => Err(SyscallError::InvalidHandle),
@@ -285,11 +302,29 @@ impl KernelInner {
                 database,
                 user,
             } => self.revoke(*perms, database, user),
+            Stmt::ShowFunctions => Ok(Output::Names(self.func.read().expect("func lock").list())),
+            Stmt::CreateFunction {
+                name,
+                kind,
+                caps,
+                body,
+            } => self.create_function(name, kind, *caps, body),
+            Stmt::DropFunction { name } => self.drop_function(name),
+            Stmt::CallFunction { name, args } => self.call_function(name, args),
             // Classified read-only (it doesn't mutate database state) but it
             // writes a backup file, which is the db service's job.
             Stmt::BackupDatabase { .. } => self.db.exec(stmt),
             _ if stmt.is_read_only() => self.query.exec_read(stmt),
-            _ => self.db.exec(stmt),
+            _ => {
+                let out = self.db.exec(stmt)?;
+                // Fire ON WRITE triggers after a successful append (top-level only).
+                if self.trigger_depth.load(Ordering::Relaxed) == 0
+                    && let Some((lens, taus)) = extract_write_info(stmt)
+                {
+                    self.fire_on_write_triggers(lens, &taus);
+                }
+                Ok(out)
+            }
         };
         record_metrics(
             &self.metrics,
@@ -307,6 +342,20 @@ impl KernelInner {
             .lookup_user(caller)
             .ok_or_else(|| ExecError::UnknownUser(caller.into()))?;
         check_permission(stmt, &user, self.db.active().as_deref())?;
+
+        // Check permission hooks (consultative — both must pass).
+        // Hooks run without kernel access: they evaluate caller/stmt globals
+        // and return a verdict. If a hook needs tau.exec, it should be an
+        // ON WRITE trigger instead.
+        {
+            let stmt_text = format!("{stmt:?}");
+            let func = self.func.read().expect("func lock");
+            let verdict = func.check_permission_hooks_simple(caller, &stmt_text);
+            if let crate::func::PermissionVerdict::Deny(reason) = verdict {
+                return Err(ExecError::PermissionDenied(reason));
+            }
+        }
+
         let out = self.exec_stmt(stmt)?;
         Ok(filter_show_databases(out, stmt, &user))
     }
@@ -382,7 +431,102 @@ impl KernelInner {
         Ok(Output::Grants(out))
     }
 
-    pub fn metric_record(&mut self, metric: MetricEvent) -> Result<(), SyscallError> {
+    fn create_function(
+        &self,
+        name: &str,
+        kind: &TriggerKind,
+        caps: Cap,
+        body: &str,
+    ) -> Result<Output, ExecError> {
+        // Persist to schema WAL (like CREATE LENS / DERIVE).
+        let stmt = Stmt::CreateFunction {
+            name: name.to_string(),
+            kind: kind.clone(),
+            caps,
+            body: body.to_string(),
+        };
+        let _ = self.db.append_schema_active(&stmt.to_string());
+        let now_ms = self.clock.now_ms();
+        self.func
+            .write()
+            .expect("func lock")
+            .register(name, kind.clone(), caps, body, now_ms)
+            .map_err(ExecError::Io)?;
+        Ok(Output::Empty)
+    }
+
+    fn drop_function(&self, name: &str) -> Result<Output, ExecError> {
+        let mut func = self.func.write().expect("func lock");
+        if !func.has(name) {
+            return Err(ExecError::InvalidExpr(format!("unknown function: {name}")));
+        }
+        func.drop_fn(name);
+        drop(func);
+        let stmt = Stmt::DropFunction {
+            name: name.to_string(),
+        };
+        let _ = self.db.append_schema_active(&stmt.to_string());
+        Ok(Output::Empty)
+    }
+
+    fn call_function(
+        &self,
+        name: &str,
+        args: &[crate::ql::ast::Literal],
+    ) -> Result<Output, ExecError> {
+        let func = self.func.read().expect("func lock");
+        if !func.has(name) {
+            return Err(ExecError::InvalidExpr(format!("unknown function: {name}")));
+        }
+        let mut ctx = SyscallCtx::from_ref(
+            RawHandle {
+                index: 0,
+                generation: 0,
+            },
+            self.now,
+            self,
+        );
+        func.invoke_call(name, args, &mut ctx)
+    }
+
+    /// Fire ON WRITE triggers after a successful append.  Sets the
+    /// reentrancy guard so triggers don't fire inside other triggers.
+    fn fire_on_write_triggers(&self, lens: &str, taus: &[(i64, i64, Value)]) {
+        self.trigger_depth.fetch_add(1, Ordering::Relaxed);
+        let func = self.func.read().expect("func lock");
+        let mut ctx = SyscallCtx::from_ref(
+            RawHandle {
+                index: 0,
+                generation: 0,
+            },
+            self.now,
+            self,
+        );
+        if let Err(e) = func.invoke_on_write(lens, taus, &mut ctx) {
+            tracing::warn!(lens = %lens, error = ?e, "on_write trigger error");
+        }
+        self.trigger_depth.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    /// Fire all due `SCHEDULE EVERY` functions using the virtual clock.
+    fn tick_cron(&self) -> Result<usize, ExecError> {
+        self.trigger_depth.fetch_add(1, Ordering::Relaxed);
+        let mut func = self.func.write().expect("func lock");
+        let mut ctx = SyscallCtx::from_ref(
+            RawHandle {
+                index: 0,
+                generation: 0,
+            },
+            self.now,
+            self,
+        );
+        let now_ms = self.clock.now_ms();
+        let result = func.invoke_due_cron(now_ms, &mut ctx);
+        self.trigger_depth.fetch_sub(1, Ordering::Relaxed);
+        result
+    }
+
+    pub fn metric_record(&self, metric: MetricEvent) -> Result<(), SyscallError> {
         match metric {
             MetricEvent::Op { op, ns } => {
                 self.metrics.record_op(op, ns);
@@ -418,11 +562,11 @@ impl KernelInner {
         Ok(())
     }
 
-    pub fn metric_collect(&mut self) -> Result<String, SyscallError> {
+    pub fn metric_collect(&self) -> Result<String, SyscallError> {
         Ok(self.metrics.prometheus_text())
     }
 
-    pub fn auth(&mut self, event: AuthEvent) -> Result<AuthResult, SyscallError> {
+    pub fn auth(&self, event: AuthEvent) -> Result<AuthResult, SyscallError> {
         let auth = &self.auth;
         match event {
             AuthEvent::Authenticate { username, password } => {
@@ -739,7 +883,7 @@ impl Kernel {
         let handle = Handle::new(raw_handle);
 
         // Call boot with syscall context
-        let mut ctx = SyscallCtx::new(raw_handle, self.inner.now, &mut self.inner);
+        let mut ctx = SyscallCtx::new(raw_handle, self.inner.now, &self.inner);
         let _ = subsystem.boot(&mut ctx);
 
         handle
@@ -759,15 +903,21 @@ impl Kernel {
         self.inner.now
     }
 
+    /// Fire due `SCHEDULE EVERY` Lua functions. Intended for the server tick
+    /// loop (~100ms) and deterministic simulation.
+    pub fn tick_cron(&self) -> Result<usize, ExecError> {
+        self.inner.tick_cron()
+    }
+
     /// Create a syscall context for testing/manual intervention.
     pub fn syscall_ctx(&mut self) -> SyscallCtx<'_> {
         SyscallCtx::new(
             RawHandle {
                 index: 0,
                 generation: 0,
-            }, // dummy handle
+            },
             self.inner.now,
-            &mut self.inner,
+            &self.inner,
         )
     }
 }
@@ -775,6 +925,31 @@ impl Kernel {
 impl Default for Kernel {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Lens name plus the taus written by an append statement.
+type WriteInfo<'a> = (&'a str, Vec<(i64, i64, Value)>);
+
+/// Extract the lens name and written taus from an append statement, for
+/// firing ON WRITE triggers.  Returns `None` for non-append statements.
+fn extract_write_info(stmt: &Stmt) -> Option<WriteInfo<'_>> {
+    match stmt {
+        Stmt::Append { name, taus } => {
+            let vals = taus
+                .iter()
+                .map(|(s, e, v)| (*s, *e, crate::value::Value::from(v)))
+                .collect();
+            Some((name, vals))
+        }
+        Stmt::BatchAppend { name, taus } => {
+            let vals = taus
+                .iter()
+                .map(|(s, e, v)| (*s, *e, crate::value::Value::from(v)))
+                .collect();
+            Some((name, vals))
+        }
+        _ => None,
     }
 }
 

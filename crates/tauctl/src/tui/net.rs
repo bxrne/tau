@@ -275,7 +275,9 @@ fn io_thread(rx: Receiver<IoRequest>, tx: Sender<IoResponse>) {
             IoRequest::Disconnect(name) => handle_disconnect(&mut mgr, name, &tx),
             IoRequest::Use(name) => handle_use(&mut mgr, name, &tx),
             IoRequest::Query(line) => handle_query(&mut mgr, line, &tx),
-            IoRequest::ImportCsv { lens, path, chunk } => handle_import_csv(&mut mgr, lens, path, chunk, &tx),
+            IoRequest::ImportCsv { lens, path, chunk } => {
+                handle_import_csv(&mut mgr, lens, path, chunk, &tx)
+            }
         }
     }
 }
