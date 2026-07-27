@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.0](https://github.com/bxrne/tau/compare/tauctl-v0.3.0...tauctl-v0.4.0) (2026-07-27)
+
+
+### Features
+
+* **libtau:** instroducing func calls to lua from tauql ([54bcad0](https://github.com/bxrne/tau/commit/54bcad02aef18709563936e1144e8b5eb693ff7a))
+
+
+### Bug Fixes
+
+* **tauctl:** better client side importing naming ([2e5d82a](https://github.com/bxrne/tau/commit/2e5d82afbb7e4383c4643f5f64a20680c45fb3a2))
+
 ## [0.3.0](https://github.com/bxrne/tau/compare/tauctl-v0.2.0...tauctl-v0.3.0) (2026-07-07)
 
 
