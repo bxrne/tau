@@ -179,20 +179,20 @@ impl App {
             ["use", name] => {
                 self.send_io(IoRequest::Use(name.to_string()));
             }
-            ["load", lens, path] => {
+            ["import", "csv", lens, path] => {
                 self.pending = true;
                 self.status = "loading…".into();
-                self.send_io(IoRequest::Load {
+                self.send_io(IoRequest::ImportCsv {
                     lens: lens.to_string(),
                     path: path.to_string(),
                     chunk: 256,
                 });
             }
-            ["load", lens, path, chunk_str] => match chunk_str.parse::<usize>() {
+            ["import", "csv", lens, path, chunk_str] => match chunk_str.parse::<usize>() {
                 Ok(chunk) if chunk > 0 => {
                     self.pending = true;
                     self.status = "loading…".into();
-                    self.send_io(IoRequest::Load {
+                    self.send_io(IoRequest::ImportCsv {
                         lens: lens.to_string(),
                         path: path.to_string(),
                         chunk,
@@ -204,7 +204,7 @@ impl App {
                     self.push_log(msg, true);
                 }
             },
-            ["loadf", path, name, rest @ ..] => {
+            ["import", "lua", name, path, rest @ ..] => {
                 let clause = if rest.is_empty() {
                     String::new()
                 } else {
@@ -336,32 +336,32 @@ mod tests {
     }
 
     #[test]
-    fn submit_load_sets_pending_and_status() {
+    fn submit_import_csv_sets_pending_and_status() {
         let (mut app, _tx) = test_app();
-        app.submit("load pressure examples/data/pressure.csv".to_string());
+        app.submit("import csv pressure examples/data/pressure.csv".to_string());
         assert!(app.pending);
         assert_eq!(app.status, "loading…");
     }
 
     #[test]
-    fn submit_load_with_explicit_chunk_sets_pending() {
+    fn submit_import_csv_with_explicit_chunk_sets_pending() {
         let (mut app, _tx) = test_app();
-        app.submit("load cpu examples/data/cpu-load.csv 128".to_string());
+        app.submit("import csv cpu examples/data/cpu-load.csv 128".to_string());
         assert!(app.pending);
     }
 
     #[test]
-    fn submit_load_with_invalid_chunk_logs_error() {
+    fn submit_import_csv_with_invalid_chunk_logs_error() {
         let (mut app, _tx) = test_app();
-        app.submit("load lens path notanumber".to_string());
+        app.submit("import csv lens path notanumber".to_string());
         assert!(!app.pending);
         assert!(app.log.last().unwrap().is_err);
     }
 
     #[test]
-    fn submit_load_with_zero_chunk_logs_error() {
+    fn submit_import_csv_with_zero_chunk_logs_error() {
         let (mut app, _tx) = test_app();
-        app.submit("load lens path 0".to_string());
+        app.submit("import csv lens path 0".to_string());
         assert!(!app.pending);
         assert!(app.log.last().unwrap().is_err);
     }
@@ -389,7 +389,7 @@ mod tests {
     }
 
     #[test]
-    fn submit_loadf_reads_file_and_constructs_create_function() {
+    fn submit_import_lua_reads_file_and_constructs_create_function() {
         let (tx_req, rx_req) = mpsc::channel::<IoRequest>();
         let (_tx_resp, rx_resp) = mpsc::channel::<IoResponse>();
         let mut app = App {
@@ -406,11 +406,11 @@ mod tests {
         };
 
         let path =
-            format!("/tmp/tauctl-loadf-test-{}.lua", std::process::id());
+            format!("/tmp/tauctl-import-lua-test-{}.lua", std::process::id());
         std::fs::write(&path, "local x = 1\nreturn x * 2\n").unwrap();
 
         app.submit(format!(
-            "loadf {path} double ON WRITE LENS returns CAPS exec,range"
+            "import lua double {path} ON WRITE LENS returns CAPS exec,range"
         ));
 
         std::fs::remove_file(&path).ok();
@@ -441,9 +441,9 @@ mod tests {
     }
 
     #[test]
-    fn submit_loadf_missing_file_logs_error() {
+    fn submit_import_lua_missing_file_logs_error() {
         let (mut app, _tx) = test_app();
-        app.submit("loadf /nonexistent.lua fn1".to_string());
+        app.submit("import lua fn1 /nonexistent.lua".to_string());
         assert!(!app.pending);
         assert!(app.log.last().unwrap().is_err);
     }
