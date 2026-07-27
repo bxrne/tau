@@ -26,8 +26,8 @@ pub enum IoRequest {
     Disconnect(String),
     /// Switch the active connection.
     Use(String),
-    /// Bulk-load a local CSV into a lens.
-    Load {
+    /// Bulk-import a local CSV file into a lens.
+    ImportCsv {
         lens: String,
         path: String,
         chunk: usize,
@@ -158,7 +158,7 @@ fn handle_query(mgr: &mut TcpManager, line: String, tx: &Sender<IoResponse>) {
     }
 }
 
-fn handle_load(
+fn handle_import_csv(
     mgr: &mut TcpManager,
     lens: String,
     path: String,
@@ -275,7 +275,7 @@ fn io_thread(rx: Receiver<IoRequest>, tx: Sender<IoResponse>) {
             IoRequest::Disconnect(name) => handle_disconnect(&mut mgr, name, &tx),
             IoRequest::Use(name) => handle_use(&mut mgr, name, &tx),
             IoRequest::Query(line) => handle_query(&mut mgr, line, &tx),
-            IoRequest::Load { lens, path, chunk } => handle_load(&mut mgr, lens, path, chunk, &tx),
+            IoRequest::ImportCsv { lens, path, chunk } => handle_import_csv(&mut mgr, lens, path, chunk, &tx),
         }
     }
 }
@@ -308,20 +308,20 @@ mod tests {
     }
 
     #[test]
-    fn handle_load_no_active_connection_sends_error() {
+    fn handle_import_csv_no_active_connection_sends_error() {
         let mut mgr = TcpManager::new();
         let (tx, rx) = mpsc::channel::<IoResponse>();
-        handle_load(&mut mgr, "x".into(), "/tmp/x.csv".into(), 256, &tx);
+        handle_import_csv(&mut mgr, "x".into(), "/tmp/x.csv".into(), 256, &tx);
         assert!(matches!(rx.recv().unwrap(), IoResponse::Error(_)));
     }
 
     #[test]
-    fn handle_load_missing_file_sends_error() {
+    fn handle_import_csv_missing_file_sends_error() {
         let addr = ok_server();
         let mut mgr = TcpManager::new();
         mgr.connect("t", &addr.to_string()).unwrap();
         let (tx, rx) = mpsc::channel::<IoResponse>();
-        handle_load(
+        handle_import_csv(
             &mut mgr,
             "x".into(),
             "/tmp/tauctl-no-such-file-xyz123.csv".into(),
@@ -336,16 +336,16 @@ mod tests {
     }
 
     #[test]
-    fn handle_load_success_sends_done_with_row_count() {
+    fn handle_import_csv_success_sends_done_with_row_count() {
         let addr = ok_server();
         let mut mgr = TcpManager::new();
         mgr.connect("t", &addr.to_string()).unwrap();
 
-        let path = format!("/tmp/tauctl-load-test-{}.csv", std::process::id());
+        let path = format!("/tmp/tauctl-import-csv-test-{}.csv", std::process::id());
         std::fs::write(&path, "0,1,42\n1,2,43\n2,3,44\n").unwrap();
 
         let (tx, rx) = mpsc::channel::<IoResponse>();
-        handle_load(&mut mgr, "x".into(), path.clone(), 256, &tx);
+        handle_import_csv(&mut mgr, "x".into(), path.clone(), 256, &tx);
         std::fs::remove_file(&path).ok();
 
         let resp = rx.recv().unwrap();
@@ -357,16 +357,16 @@ mod tests {
     }
 
     #[test]
-    fn handle_load_csv_with_comments_and_blanks() {
+    fn handle_import_csv_with_comments_and_blanks() {
         let addr = ok_server();
         let mut mgr = TcpManager::new();
         mgr.connect("t", &addr.to_string()).unwrap();
 
-        let path = format!("/tmp/tauctl-load-comments-{}.csv", std::process::id());
+        let path = format!("/tmp/tauctl-import-comments-{}.csv", std::process::id());
         std::fs::write(&path, "# comment\n0,1,10\n\n1,2,20\n").unwrap();
 
         let (tx, rx) = mpsc::channel::<IoResponse>();
-        handle_load(&mut mgr, "y".into(), path.clone(), 256, &tx);
+        handle_import_csv(&mut mgr, "y".into(), path.clone(), 256, &tx);
         std::fs::remove_file(&path).ok();
 
         let resp = rx.recv().unwrap();

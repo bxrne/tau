@@ -218,3 +218,5 @@ The Sharpe lens is itself bitemporal — corrections to `returns` produce new la
 | Scheduled function | `CREATE FUNCTION f SCHEDULE EVERY 86400 CAPS exec AS "…"` |
 | Call a function | `CALL FUNCTION f(args)` |
 | List functions | `SHOW FUNCTIONS` |
+| Import Lua from a file | `import lua f fn.lua ON WRITE LENS x CAPS exec` (tauctl) |
+| Import CSV into a lens | `import csv x data.csv [chunk]` (tauctl) |

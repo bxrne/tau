@@ -154,12 +154,12 @@ The available standard library: `string`, `table`, `math`, `coroutine`, `pairs`,
 
 ---
 
-## Loading Lua from a file (`loadf`)
+## Loading Lua from a file (`import lua`)
 
-The `tauctl` client provides a `loadf` meta-command for loading Lua source from a file, so you can develop and version your functions as `.lua` files instead of inlining them on the command line.
+The `tauctl` client provides an `import lua` meta-command for loading Lua source from a file, so you can develop and version your functions as `.lua` files instead of inlining them on the command line.
 
 ```
-loadf <path> <name> [trigger clause] [CAPS ...]
+import lua <name> <path> [trigger clause] [CAPS ...]
 ```
 
 The client reads the file, joins newlines into spaces (the wire protocol is line-oriented), escapes `"` as `\"` and `\` as `\\` (so Lua source using `"` for string literals is safe), and sends a single `CREATE FUNCTION` statement.
@@ -170,13 +170,13 @@ The client reads the file, joins newlines into spaces (the wire protocol is line
 #   local rows = tau.range('returns', s, e)
 #   ...
 
-τ: loadf sharpe.lua sharpe_24h ON WRITE LENS returns CAPS exec,range,clock
+τ: import lua sharpe_24h sharpe.lua ON WRITE LENS returns CAPS exec,range,clock
 → OK
 ```
 
 ### String escape sequences
 
-TauQL string literals support two escape sequences: `\"` (double-quote) and `\\` (backslash). This is needed for embedding Lua source — which commonly uses `"` for string literals — as a `CREATE FUNCTION` body. All other characters (including `\n`, which the `loadf` command replaces with a space) are literal.
+TauQL string literals support two escape sequences: `\"` (double-quote) and `\\` (backslash). This is needed for embedding Lua source — which commonly uses `"` for string literals — as a `CREATE FUNCTION` body. All other characters (including `\n`, which the `import lua` command replaces with a space) are literal.
 
 ```
 CREATE FUNCTION f AS "local s = \"hello\""

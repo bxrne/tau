@@ -211,7 +211,7 @@ tauctl
 τ AUTH admin <pass>
 τ CREATE DATABASE metrics
 τ CREATE LENS cpu int
-τ load cpu examples/data/cpu-load.csv
+τ import csv cpu examples/data/cpu-load.csv
 loaded 1440 rows into cpu (6 chunks)
 ```
 
