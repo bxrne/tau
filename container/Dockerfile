@@ -15,7 +15,8 @@ ARG BUILD_PROFILE=release
 
 FROM rust:${RUST_VERSION}-alpine AS chef
 
-RUN apk add --no-cache musl-dev \
+# make is required to build vendored LuaJIT (mlua feature "vendored").
+RUN apk add --no-cache musl-dev make \
     && cargo install cargo-chef --locked --version 0.1.71 \
     && rm -rf "$CARGO_HOME/registry"
 

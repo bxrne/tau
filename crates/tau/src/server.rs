@@ -68,6 +68,22 @@ pub fn accept_loop(
     connection_limit: usize,
     idle_timeout: Option<Duration>,
 ) -> io::Result<()> {
+    // Host tick: fire due SCHEDULE EVERY Lua functions about every 100ms.
+    {
+        let cron_kernel = kernel.clone();
+        thread::Builder::new()
+            .name("tau-cron".into())
+            .spawn(move || {
+                loop {
+                    thread::sleep(Duration::from_millis(100));
+                    if let Err(e) = cron_kernel.tick_cron() {
+                        warn!(error = ?e, "cron tick failed");
+                    }
+                }
+            })
+            .expect("failed to spawn cron thread");
+    }
+
     let active_connections = Arc::new(AtomicUsize::new(0));
     let shared_metrics = kernel.metrics();
     for incoming in listener.incoming() {

@@ -47,7 +47,7 @@ sysinfo = { version = "0.32", default-features = false, features = ["system"] }
 hex = "0.4"
 itoa = "1"
 
-mlua = { version = "0.12.0", features = ["luajit", "vendored"] }
+mlua = { version = "0.12.0", features = ["luajit", "vendored", "send"] }
 
 hegeltest = "0.14.12"
 hegeltest-macros = "0.14.12"

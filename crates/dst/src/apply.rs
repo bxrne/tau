@@ -408,6 +408,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn set_compact_dual_sim_accepts_and_still_matches_at() {
+        let paths = crate::profile::ProfileWorkspace::new(MEMORY_MULTI).paths;
+        let mut target = MEMORY_MULTI.bootstrap_kernel(&paths);
+        let mut model = MEMORY_MULTI.bootstrap_oracle(&paths);
+        let append = Op::Append {
+            lens: "a".into(),
+            data: crate::op::Payload::Int(vec![(0, 100, 7)]),
+        };
+        assert!(apply_dual_kernel(0, &append, &mut target, &mut model).is_empty());
+        let divs = apply_dual_kernel(
+            1,
+            &Op::SetCompact {
+                lens: "a".into(),
+                threshold: Some(4),
+            },
+            &mut target,
+            &mut model,
+        );
+        assert!(divs.is_empty(), "{divs:?}");
+        let got = crate::harness::exec(&mut target, "AT LENS a 50");
+        assert_eq!(
+            match got {
+                libtau::Output::Value(v) => v,
+                _ => panic!("expected value"),
+            },
+            model.at("a", 50)
+        );
+    }
+
     #[hegel::test]
     fn pbt_append_at_matches_oracle(tc: TestCase) {
         let paths = crate::profile::ProfileWorkspace::new(MEMORY_MULTI).paths;
