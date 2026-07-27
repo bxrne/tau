@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.0](https://github.com/bxrne/tau/compare/libtau-v0.8.0...libtau-v0.9.0) (2026-07-27)
+
+
+### Features
+
+* **libtau:** instroducing func calls to lua from tauql ([54bcad0](https://github.com/bxrne/tau/commit/54bcad02aef18709563936e1144e8b5eb693ff7a))
+
 ## [0.8.0](https://github.com/bxrne/tau/compare/libtau-v0.7.0...libtau-v0.8.0) (2026-07-18)
 
 
