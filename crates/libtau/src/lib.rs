@@ -38,7 +38,7 @@ pub use value::Value;
 pub use wire::{Response, WireError};
 
 /// Async facade over a hosted kernel: syscalls are serialized through the
-/// tokio host loop.  For synchronous embedding (the TCP server, DST) use
+/// tokio host loop.  For synchronous embedding (the TCP server ) use
 /// [`Kernel`] directly.
 pub struct Libtau {
     host: HostHandle,

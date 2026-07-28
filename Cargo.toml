@@ -2,10 +2,8 @@
 resolver = "2"
 members = [
     "crates/libtau",
-    "crates/libdst",
     "crates/tau",
     "crates/tauctl",
-    "crates/dst",
 ]
 
 [workspace.package]
@@ -16,7 +14,6 @@ description = "A time-series database built on algebraically precise temporal in
 
 [workspace.dependencies]
 libtau = { path = "crates/libtau" }
-libdst = { path = "crates/libdst" }
 clap = { version = "4.5", features = ["derive"] }
 crc32fast = "1.5.0"
 rustc-hash = "2.1"

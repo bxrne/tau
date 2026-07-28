@@ -7,8 +7,6 @@ on:
       - 'tau-v*'
       - 'tauctl-v*'
       - 'libtau-v*'
-      - 'libdst-v*'
-      - 'dst-v*'
 
 permissions:
   contents: write
@@ -16,7 +14,6 @@ permissions:
   pull-requests: write
 
 jobs:
-  # ── On every push to master ─────────────────────────────────────────────────
   # Opens / updates one release PR per crate that has unreleased conventional
   # commits. Merging a release PR causes release-please to push a versioned tag
   # (tau-v*, tauctl-v*, libtau-v*) using RELEASE_TOKEN so the tag push
@@ -31,7 +28,6 @@ jobs:
           manifest-file: .release-please-manifest.json
           token: ${{ secrets.RELEASE_TOKEN }}
 
-  # ── On every versioned tag push ──────────────────────────────────────────────
   # Detect which crate was released and emit outputs used by all downstream jobs.
   prepare:
     if: github.ref_type == 'tag'
