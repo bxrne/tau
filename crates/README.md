@@ -12,4 +12,5 @@ Tau is a Cargo workspace: one engine library, two runtime binaries, and three te
 
 ## Where to look
 
-Each crate has its own README covering what it is, how it works, and how to use it: [libtau](libtau/README.md), [tau](tau/README.md), [tauctl](tauctl/README.md), [dst](dst/README.md), [libdst](libdst/README.md), [fuzztau](fuzztau/README.md).
+Each crate has its own README covering what it is, how it works, and how to use it: [libtau](libtau/README.md), [tau](tau/README.md), [tauctl](tauctl/README.md), [fuzztau](fuzztau/README.md).
+

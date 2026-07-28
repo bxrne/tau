@@ -6,16 +6,6 @@
       "package-name": "libtau",
       "changelog-path": "CHANGELOG.md"
     },
-    "crates/libdst": {
-      "release-type": "rust",
-      "package-name": "libdst",
-      "changelog-path": "CHANGELOG.md"
-    },
-    "crates/dst": {
-      "release-type": "rust",
-      "package-name": "dst",
-      "changelog-path": "CHANGELOG.md"
-    },
     "crates/tau": {
       "release-type": "rust",
       "package-name": "tau",
