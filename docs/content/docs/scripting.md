@@ -313,6 +313,6 @@ DROP FUNCTION sharpe_24h
 Lua functions are covered by two testing layers:
 
 1. **Unit tests** (`libtau/src/func/`) — sandboxing (assert `os` is nil), `CALL FUNCTION` return values, `tau.exec` round-trips, reentrancy guard.
-2. **DST** (`crates/dst/`) — canned functions with known semantics are dual-simulated: the target runs the Lua, the oracle computes the expected effect independently. See [DST](/docs/dst/) and `crates/dst/LUA_TESTING.md`.
+2. **DST** (`crates/dst/`) — canned functions with known semantics are dual-simulated: the target runs the Lua, the oracle computes the expected effect independently. See [DST](/docs/dst/). 
 
 See [Testing](/docs/testing/) for the full strategy.
