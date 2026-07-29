@@ -14,7 +14,7 @@ Complete reference for Tau. The data model, query language, storage internals, t
 - [TauQL Reference](/docs/tauql/). Every statement, operator and response code.
 - [Lua Scripting](/docs/scripting/). Triggers, cron, the `tau.*` host API, and finance examples (Sharpe, rolling stddev, position-keeping).
 - [Examples](/docs/examples/). Short, copy-pasteable TauQL for backtesting, spreads, IoT and observability.
-- [Testing](/docs/testing/). Property based tests and unit anchors. How the three layers fit together.
+- [Testing](/docs/testing/). Property-based tests, unit anchors, and chaos testing with dstest.
 - [Permissions](/docs/permissions/). The CRUDA bitmap, per-statement requirements, grants and wildcards.
 - [Configuration](/docs/configuration/). All server flags and environment variables.
 - [Containers](/docs/containers/). The Docker stack with Prometheus and Grafana, and the Helm chart for Kubernetes.
