@@ -28,7 +28,7 @@ Tau uses four distinct testing layers. Each one finds a different class of bug; 
 ```bash
 cargo nextest run --release                        # all tests (preferred)
 cargo nextest run --release --lib                  # libtau unit tests only
-cargo nextest run --release -p libdst              # DST framework tests
+cargo nextest run --release --lib                  # libtau unit tests only
 cargo nextest run --release -p dst                 # Tau DST driver tests
 cargo nextest run --release -E 'binary(tau)'       # server tests only
 cargo nextest run --release -E 'binary(tauctl)'    # tauctl tests only
@@ -55,7 +55,7 @@ cargo test --release                               # fallback if nextest is not 
 - `Response::parse` never panics on arbitrary UTF-8 text
 - `Response::display → parse` roundtrip for `VAL`, `RANGE`, and `NAMES` variants
 - WAL rotation archive is replayable and contains pre-rotation layer state
-- `libdst` behavior-tree guards, deterministic scheduler, shrink correctness, and Tau oracle compaction / TTL properties
+- `libtau` compaction, TTL, and query handling properties
 
 **How to run:**
 
@@ -67,21 +67,20 @@ All such tests are named `pbt_*` for easy log filtering. Hegel auto-installs a P
 
 ---
 
-## Layer 3: Deterministic Simulation Testing (libdst + dst)
+## Layer 3: Deterministic Chaos Testing (dstest)
 
-**Location:** `crates/libdst` (framework), `crates/dst` (Tau driver binary).
+**Location:** `dst/` directory with Lua scripts; requires [dstest](https://crates.io/crates/dstest) CLI.
 
-**What they test:** End-to-end agreement between `libtau::Kernel` and an independent reference oracle (no libtau code) under random workloads — including derived lenses, TTL, multi-database switching, WAL replay, and truncated-WAL recovery. Divergences are structured ([`Divergence`](https://github.com/bxrne/tau/tree/master/crates/libdst/src/divergence.rs)) with step index, description, and expected/got values. Failing traces are minimised via delta-debug shrinking.
+**What it tests:** Container resilience under fault injection. Spins up Tau Docker containers, injects chaos (pause, kill, resource deprivation), and verifies HTTP health endpoints recover correctly.
 
 **How to run:**
 
 ```bash
-cargo run --release --bin dst -- --seed 42
-RUST_LOG=warn cargo run --release --bin dst -- --ci --seed 42
-cargo test -p libdst -p dst
+cargo install dstest
+dstest < dst/alive.lua
 ```
 
-See [Deterministic Simulation Testing](/docs/dst/) for architecture and operation tables.
+See [dst/README.md](https://github.com/bxrne/tau/tree/master/dst/) for scripts and configuration.
 
 ---
 
@@ -148,5 +147,5 @@ cargo +nightly fuzz run --fuzz-dir crates/fuzztau wire crates/fuzztau/artifacts/
 |-------|----------------|-------------|
 | Unit tests | Regressions on known-shape behaviour | Always (CI) |
 | Hegel PBT | Invariant violations across random inputs | Always (inline with unit tests) |
-| libdst / dst | SUT vs reference divergence under emergent workloads | CI (after nextest, before Docker) |
+| dstest | Container crash/restart resilience under chaos | CI (after nextest, before Docker) |
 | cargo-fuzz | Panics, crashes, and OOMs from adversarial bytes on the text parsers | Time-boxed every CI run (build-check all targets; run `parse`/`wire`), plus on demand |

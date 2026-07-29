@@ -51,7 +51,7 @@ The server takes a TOML config (`tau --config my.toml`) covering the storage bac
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo nextest run --release
-cargo run --release --bin dst -- --seed 42
+cargo run --release --bin dstest -- --seed 42  # container chaos testing (dst/README.md)
 ```
 
-The workspace layout and per-crate details are in [crates/README.md](crates/README.md); architecture rationale is in [how it works](https://tau.bxrne.com/docs/how-it-works/). Licensed under [Apache 2.0](LICENSE).
+The workspace layout and per-crate details are in [crates/README.md](crates/README.md); architecture rationale is in [how it works](https://tau.bxrne.com/docs/how-it-works/). Container chaos testing scripts are in [dst/](dst/). Licensed under [Apache 2.0](LICENSE).
