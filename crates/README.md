@@ -2,13 +2,15 @@
 
 ## What it is
 
-Tau is a Cargo workspace: one engine library, two runtime binaries, and three testing crates. Binary names are unique, so `cargo run --bin tau|tauctl|dst` works from the repo root.
+Tau is a Cargo workspace: one engine library, two runtime binaries, and a fuzz crate. Binary names are unique, so `cargo run --bin tau|tauctl` works from the repo root.
 
 ## How the crates fit
 
 `libtau` is the engine — a syscall-routing microkernel (`Kernel`) over db, query, auth, and metrics services. The `tau` server exposes a kernel over line-oriented TCP (optional TLS, auth, WAL); `tauctl` is the interactive TUI client speaking the same wire protocol. Neither binary contains engine logic.
 
-`libdst` is a generic deterministic-simulation framework; `dst` is its Tau driver, driving a kernel and an independent oracle in lock-step. `fuzztau` holds LibFuzzer targets for the TauQL and wire parsers (nightly toolchain). None of the three are in the runtime dependency chain.
+`fuzztau` holds LibFuzzer targets for the TauQL and wire parsers (nightly toolchain). It is not in the runtime dependency chain.
+
+Deterministic chaos testing lives in the `dst/` directory — Lua scripts driven by the external [dstest](https://crates.io/crates/dstest) CLI, which injects faults (pause, kill, resource deprivation) into Docker containers and verifies resilience.
 
 ## Where to look
 

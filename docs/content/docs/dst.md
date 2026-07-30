@@ -1,39 +1,34 @@
-# dstest — Chaos Testing for Tau Containers
++++
+title = "DST"
+date = 2026-07-30
+weight = 55
+template = "page.html"
++++
 
-This directory contains **dstest** scripts for testing Tau's container resilience under fault injection. dstest is a deterministic chaos testing framework that injects faults into Docker containers and verifies system behavior.
-
-## What is dstest?
-
-dstest runs Lua scripts that:
-- Spin up containerized services
-- Inject faults (pause, kill, resource deprivation)
-- Make HTTP requests to verify health
-- Assert expected behavior under chaos
+Tau uses [dstest](https://crates.io/crates/dstest) — a deterministic chaos testing framework — to verify container resilience under fault injection. Scripts in the `dst/` directory spin up Docker containers, inject faults (pause, kill, resource deprivation), and assert expected behaviour under chaos.
 
 Same seed = identical fault sequence, making failures reproducible and debuggable.
+
+---
 
 ## Installing
 
 ```bash
-# From crates.io
 cargo install dstest
-
-# From source
-cargo install --git https://github.com/bxrne/dstest dstest
 ```
+
+---
 
 ## Running
 
 ```bash
-# Run a script
+# From the repo root
 dstest < dst/alive.lua
-
-# Or via stdin
-cat dst/alive.lua | dstest
-
-# From repo root during development
-cat dst/alive.lua | cargo run --release --bin dstest
+dstest < dst/smoke.lua
+dstest < dst/sweep.lua
 ```
+
+---
 
 ## Scripts
 
@@ -44,9 +39,11 @@ cat dst/alive.lua | cargo run --release --bin dstest
 | `smoke.lua` | Full protocol smoke test: AUTH, CREATE, APPEND, DERIVE, point lookups, SHOW LENSES, out-of-range NIL, QUIT |
 | `sweep.lua` | Table-driven multi-config orchestrator — spins up multiple containers with different env vars and runs fault rounds against all concurrently via coroutines |
 
+---
+
 ## Architecture
 
-`core.lua` is `require`d by every test script. It distills the shared setup (container spawn, key generation, health/metrics checks, TCP connect, protocol command helpers) into one module so test scripts stay declarative.
+`core.lua` is `require`d by every test script. It distils the shared setup — container spawn, key generation, health/metrics checks, TCP connect, protocol command helpers — into one module so test scripts stay declarative.
 
 ### Importing core
 
@@ -71,7 +68,9 @@ core.step_and_check(id)                         -- inject fault + health check
 core.cleanup(id)                                -- clear faults, log done
 ```
 
-### Orchestrator
+---
+
+## Orchestrator
 
 `core.orchestrate(specs, opts)` runs multiple experiments concurrently using Lua coroutines. One shared fault campaign is injected across all containers; each coroutine's `check` function verifies health after each fault round.
 
@@ -104,6 +103,8 @@ Each spec field:
 
 Returns `{ passed, failed, total, results }`.
 
+---
+
 ## Fault Types
 
 | Fault | Effect |
@@ -115,9 +116,9 @@ Returns `{ passed, failed, total, results }`.
 | `deprive:memory` | Halve memory limit (min 64MB) |
 | `deprive:cpu` | Limit CPU to 20% quota |
 
-## Configuration
+---
 
-Scripts configure weights for each fault type:
+## Configuration
 
 ```lua
 dstest.config({
@@ -132,6 +133,8 @@ dstest.config({
 })
 ```
 
+---
+
 ## Determinism
 
 The same seed produces identical fault sequences across runs:
@@ -144,8 +147,3 @@ dstest.config({ seed = 42 })
 local r2 = dstest.run_steps(5)
 -- r1 and r2 are identical
 ```
-
-## Related
-
-- dstest skill: `~/.config/opencode/skills/dstest/SKILL.md`
-- dstest crate: linked via Cargo workspace
