@@ -28,8 +28,7 @@ Tau uses four distinct testing layers. Each one finds a different class of bug; 
 ```bash
 cargo nextest run --release                        # all tests (preferred)
 cargo nextest run --release --lib                  # libtau unit tests only
-cargo nextest run --release --lib                  # libtau unit tests only
-cargo nextest run --release -p dst                 # Tau DST driver tests
+cargo nextest run --release -p libtau              # libtau (library) tests only
 cargo nextest run --release -E 'binary(tau)'       # server tests only
 cargo nextest run --release -E 'binary(tauctl)'    # tauctl tests only
 cargo test --release                               # fallback if nextest is not installed
@@ -73,14 +72,19 @@ All such tests are named `pbt_*` for easy log filtering. Hegel auto-installs a P
 
 **What it tests:** Container resilience under fault injection. Spins up Tau Docker containers, injects chaos (pause, kill, resource deprivation), and verifies HTTP health endpoints recover correctly.
 
+Scripts share a common `core.lua` module (spawn, health/metrics assertions, TCP helpers, protocol expectations, coroutine-based orchestrator) so each test stays declarative. A table-driven `sweep.lua` orchestrator runs multiple container configs concurrently under one fault campaign.
+
 **How to run:**
 
 ```bash
 cargo install dstest
-dstest < dst/alive.lua
+
+dstest < dst/alive.lua    # health + metrics with single fault
+dstest < dst/smoke.lua   # full protocol smoke test
+dstest < dst/sweep.lua   # multi-config orchestrator
 ```
 
-See [dst/README.md](https://github.com/bxrne/tau/tree/master/dst/) for scripts and configuration.
+See the [DST](../dst/) page and [dst/README.md](https://github.com/bxrne/tau/tree/master/dst/) for the full API reference.
 
 ---
 
