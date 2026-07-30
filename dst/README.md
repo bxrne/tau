@@ -12,12 +12,6 @@ dstest runs Lua scripts that:
 
 Same seed = identical fault sequence, making failures reproducible and debuggable.
 
-## Scripts
-
-| Script | Purpose |
-|--------|---------|
-| `alive.lua` | Basic health check: spins up Tau, verifies `/healthz` and `/metrics`, injects one fault, confirms recovery |
-
 ## Installing
 
 ```bash
