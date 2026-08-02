@@ -33,6 +33,21 @@ jobs:
           tool: nextest
       - run: cargo nextest run --release
 
+  dst:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+          cache-on-failure: "true"
+      - name: Install dstest
+        run: cargo install --git https://github.com/bxrne/dstest --locked
+      - name: Smoke test (Tau container, no faults)
+        run: dstest < dst/smoke.lua
+
   fuzz:
     needs: test
     runs-on: ubuntu-latest
